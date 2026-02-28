@@ -1,43 +1,97 @@
-# Product Specification — WhatsApp Advertisement Assistant Bot
+# Product Specification v5 — WhatsApp Advertisement Assistant Bot
 
 ## 1. Overview
 
 The **WhatsApp Advertisement Assistant Bot** is a conversational tool that allows a single operator (owner/operator role) to create, manage, and publish digital advertisements for in-store TV screens — entirely through WhatsApp chat. No dedicated web dashboard or desktop application is required for day-to-day operations.
+
+**Core product behaviour:**
+
+1. The bot holds a **free-form, chat-style dialog** with the operator to define the product to advertise. There is no rigid form or fixed question order.
+2. To better identify the product, the bot may ask for a **product photo** and/or an **EAN barcode** (product code).
+3. Once it has enough information — combining what the operator provided and what it finds on the web — the bot **suggests generating an advertisement image** and presents it for review.
+4. If the operator is not satisfied, they can **regenerate** the ad: either using the previous image as a visual reference (keeping the general style while applying requested changes), or **starting from scratch** with a completely fresh generation.
 
 ---
 
 ## 2. Goals and Non-Goals
 
 ### Goals
-- Allow an operator to compose ad content (text, images, prices) by chatting with the bot over WhatsApp.
-- Generate publication-ready advertisement visuals suitable for TV display.
+- Allow an operator to compose ad content (text, images, prices) by chatting with the bot over WhatsApp in a natural, free-form style.
+- Automatically enrich product details using publicly available web information when the operator provides limited input.
+- Optionally accept a product photo and/or EAN barcode to better identify and describe the product.
+- Generate publication-ready advertisement visuals suitable for TV display (1920 × 1080 px, 10% safe margins, landscape).
+- Allow the operator to regenerate the ad — either using the previous image as a reference or from scratch — if the initial result is not satisfactory.
 - Publish completed advertisements to the store's TV Content Management System (CMS).
 - Remove (delete all) advertisements from the CMS when instructed.
 - Support Hebrew-language conversations and Israeli business conventions by default.
+- Remember the operator's language and currency preferences across sessions (identified by phone number).
 
 ### Non-Goals
 - Multi-user or multi-role workflows (e.g., separate manager and cashier accounts).
-- Multi-language operator UI (the operator interface is Hebrew by default; English override is supported per session).
 - Scheduling future publication times or managing campaigns across time windows.
 - Editing or updating already-published advertisements (only append-new or delete-all operations are supported).
 - Consumer-facing functionality; this bot serves only the store owner/operator.
 
 ---
 
-## 3. User Roles
+## 3. Conversation Experience
 
-| Role | Description |
-|------|-------------|
-| **Owner / Operator** | Single user who owns and operates the store. Interacts with the bot via WhatsApp to create and publish ads. |
+### 3.1 Dialog Model
 
-There is no other role. No admin console, no multi-staff access.
+The bot conducts a **free-form, multi-turn chat dialog** to collect the information needed to create an advertisement. There is no fixed wizard sequence; the operator can provide details in any order, in any phrasing, and across multiple messages.
+
+The bot proactively identifies the product by:
+- Parsing the operator's natural-language description.
+- Optionally requesting a **product photo** (an image of the item).
+- Optionally requesting the **EAN barcode** (product code) for precise identification.
+- Searching the web to fill in product details not explicitly provided by the operator (e.g., brand description, common packaging details).
+
+Once the bot has sufficient information, it suggests generating an advertisement image and presents the result for approval.
+
+### 3.2 Conversation Principles
+
+| Principle | Description |
+|-----------|-------------|
+| **Free-form first** | The bot accepts any natural phrasing. The operator does not need to learn commands or follow a script. |
+| **Clarify only missing essentials** | The bot asks follow-up questions only when the minimum required information is absent: at minimum, a **product name** and a **price**. It does not ask for optional details unless they are genuinely needed. |
+| **Show, don't ask too much** | After gathering the essentials, the bot generates and shows an ad rather than asking more questions. Improvement is driven by the operator's reaction to the visual, not by a pre-generation questionnaire. |
+| **Iterate with context** | The bot retains context between turns in an ad session. When regenerating, it applies only the changes the operator specifies (e.g., *"make the price bigger"*, *"use a blue background"*) without losing other collected details. |
+| **Memory** | The bot remembers the operator's preferred **language** and **currency** based on their WhatsApp number (phone number identity). These preferences are applied automatically in future sessions and can be overridden at any time. |
+
+### 3.3 Required vs Optional Fields
+
+| Field | Required? | Notes |
+|-------|-----------|-------|
+| Product name | **Required** | Must be confirmed before generating an ad. |
+| Price | **Required** | Defaults to ILS (₪) unless the operator specifies another currency. |
+| Product photo | Optional | Operator may send an image; the bot incorporates it into the generated ad. |
+| EAN barcode | Optional | Helps the bot identify the product and enrich details from the web. |
+| Promotional text | Optional | E.g., "20% off today only". The bot may suggest text if not provided. |
+
+### 3.4 Example Happy Path
+
+1. Operator: *"I want to advertise Tnuva cottage cheese"*
+2. Bot: *"What is the price?"*
+3. Operator: *"₪6.90"*
+4. Bot: *"Great! I found some details about this product online. Generating your ad now…"* → sends preview image.
+5. Operator: *"Looks good, publish it"*
+6. Bot: *"Published! Your ad is now live on the TV screen."*
+
+### 3.5 Regeneration Modes
+
+After the bot presents a preview image, the operator can:
+
+| Mode | Trigger phrase examples | Behaviour |
+|------|------------------------|-----------|
+| **Regenerate with reference** | *"Change the background colour to red"*, *"Make the price larger"* | The bot uses the previous image as a visual reference and applies only the requested changes. |
+| **Regenerate from scratch** | *"Start over"*, *"Generate a completely new design"* | The bot discards the previous image and creates a fresh advertisement using all previously collected data. |
 
 ---
 
 ## 4. Supported Use Cases
 
 ### 4.1 Create a New Advertisement
-The operator sends a message describing the product, price, and any promotional text. The bot confirms the details with the operator before generating the ad visual.
+The operator starts a free-form conversation describing the product. The bot gathers the product name and price (minimum), optionally asks for a photo or EAN code, enriches details from the web, and generates an ad visual.
 
 ### 4.2 Preview an Advertisement
 The bot returns a preview image of the generated ad for operator approval before publishing.
@@ -46,23 +100,38 @@ The bot returns a preview image of the generated ad for operator approval before
 Once approved, the operator instructs the bot to publish. The bot appends the ad to the CMS playlist. There is no scheduling; the ad goes live immediately upon publishing.
 
 ### 4.4 Delete All Advertisements
-The operator can instruct the bot to remove all currently active advertisements from the CMS. This is an all-or-nothing operation; individual ad removal is not supported.
+The operator can instruct the bot to remove all currently active advertisements from the CMS. This is an all-or-nothing operation; individual ad removal is not supported. The bot requires explicit confirmation before executing this action.
 
 ### 4.5 List Active Advertisements
 The operator can request a summary list of advertisements currently published in the CMS.
 
-### 4.6 Get Help
-The operator can ask what commands or actions the bot supports.
+### 4.6 Regenerate an Advertisement
+After previewing an ad, the operator can request a regeneration — either refining the existing design or starting fresh (see §3.5).
+
+### 4.7 Get Help
+The operator can ask what actions the bot supports.
 
 ---
 
-## 5. Conversation Experience
+## 5. User Roles and Admin Console
 
-- The primary language of the bot is **Hebrew**. The operator may request English responses for a session.
-- The bot uses a friendly, conversational tone appropriate for a small-business owner.
-- All monetary values default to **Israeli New Shekel (₪ / ILS)** unless the operator specifies a different currency.
-- The bot proactively asks for missing information (e.g., product name, price, promotional text) rather than failing silently.
-- The bot confirms destructive actions (e.g., "Delete all ads") with an explicit confirmation prompt before proceeding.
+### 5.1 Operator Role
+
+| Role | Description |
+|------|-------------|
+| **Owner / Operator** | Single user who owns and operates the store. Interacts with the bot via WhatsApp to create and publish ads. Identified by their registered WhatsApp phone number. |
+
+### 5.2 Admin Console
+
+An **admin console** is an essential part of the product. It enables configuration and oversight of the system without requiring direct code changes. The admin console provides:
+
+- **Operator management**: register, update, or deactivate the operator's authorised WhatsApp phone number.
+- **CMS connection settings**: configure the TV CMS endpoint used for publishing.
+- **Default settings**: set the default language, currency, and regional preferences.
+- **Active advertisement overview**: view the current list of ads published to the CMS.
+- **Audit log**: view a history of bot actions (ad created, published, deleted) with timestamps.
+
+The admin console is intended for the system administrator or store owner during setup and ongoing maintenance. It is not a day-to-day tool for ad creation.
 
 ---
 
@@ -75,7 +144,7 @@ The operator can ask what commands or actions the bot supports.
 | **Orientation** | Landscape |
 | **Primary use** | In-store TV screens |
 
-The operator provides content (text, prices, optional images). The bot handles layout and styling within the safe margin boundaries.
+The operator provides content (text, prices, optional images). The bot handles layout and styling within the safe margin boundaries. Web-sourced product details may supplement operator-provided content in the layout.
 
 ---
 
@@ -100,15 +169,38 @@ The operator provides content (text, prices, optional images). The bot handles l
 | Date format | DD/MM/YYYY |
 | Number format | Israeli (e.g., 1,234.56) |
 
-The operator may override currency and language per session.
+The operator may override currency and language per session. Overrides are remembered across sessions for the same phone number (see §3.2, Memory principle).
 
 ---
 
-## 9. Safety and Operator Protections
+## 9. Security, Privacy, and Compliance
 
-- The bot will not perform any destructive action (delete all ads) without an explicit confirmation step.
-- The bot will not accept instructions that appear to alter its own behaviour, impersonate other systems, or bypass its operating rules (see Architecture & Technical Spec for implementation details).
-- The bot will not store or transmit payment card numbers or other sensitive personal data.
+### 9.1 Operator Identity and Access
+- The bot responds only to messages from the registered operator's WhatsApp number.
+- Phone number is the sole identity mechanism; no passwords or tokens are required for day-to-day use.
+- The admin console controls which phone number is authorised to operate the bot.
+
+### 9.2 Prompt Injection Risk
+Because the operator's natural-language messages are processed by an AI language model, a malicious actor who gains access to the operator's WhatsApp account — or who sends spoofed or forged messages — may attempt **prompt injection**: crafting a message designed to override the bot's instructions, exfiltrate data, or trigger unauthorised actions such as deleting all ads or publishing malicious content.
+
+Additionally, product names and promotional text entered by the operator may inadvertently or deliberately contain text intended to manipulate the AI model (indirect injection).
+
+**Required protections (product-level):**
+- The bot must resist instructions embedded in user messages that attempt to change its role, reveal its configuration, or bypass its operating rules.
+- Product names, promotional text, and other operator-supplied content must be treated as data, not as instructions to the AI.
+- Destructive actions (delete-all, publish) must require an explicit confirmation step that cannot be bypassed by a crafted message.
+- The bot must not expose its internal configuration or system state to the operator or any third party.
+
+### 9.3 Data Handling and Privacy
+- The bot does not store or transmit payment card numbers, identity documents, or other sensitive personal data.
+- Conversation history is retained only as long as needed to support the active session and preference memory (language and currency per phone number).
+- Product photos uploaded by the operator are used solely for ad generation and are not shared with third parties beyond what is necessary for that purpose.
+- EAN codes and product details retrieved from the web are used only for ad enrichment and are not stored longer than the session requires.
+
+### 9.4 Compliance Considerations
+- The product must comply with applicable data protection regulations for the region of operation (Israel: PPPA; EU users if applicable: GDPR).
+- No consumer personal data is collected. Operator data (phone number, preferences) must be handled in accordance with applicable law.
+- Ad content is operator-generated; the operator is responsible for ensuring the accuracy of prices and compliance with local advertising regulations.
 
 ---
 
@@ -121,4 +213,6 @@ The following are explicitly outside the scope of this product:
 - Analytics, reporting, or ad performance tracking.
 - Multi-store or franchise management.
 - Integration with any ERP, POS, or inventory system.
-- Automated ad generation from a product catalog.
+- Automated ad generation from a product catalog (without operator involvement).
+- Scheduling or time-based ad management.
+- Individual ad update or removal (only full delete-all is supported).
