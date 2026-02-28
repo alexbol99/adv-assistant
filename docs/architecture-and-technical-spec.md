@@ -271,7 +271,7 @@ Operator ──["Start over / new design"]──▶ Conversation Manager
 | Idempotency (delete-all) | Idempotent by nature; 404 from CMS treated as success |
 | Timeout | HTTP client timeout 10 s; surface error to operator if exceeded |
 | Inbound duplicate delivery | Deduplicate by WhatsApp message ID (`wamid`); keep processed-message records for 30 days and skip already-processed events |
-| Replay resistance | In addition to signature verification and deduplication, reject stale inbound events outside a configured timestamp window (default: 5 minutes) when timestamp is available |
+| Replay resistance | In addition to signature verification and deduplication, reject stale inbound events outside a 5-minute timestamp window when timestamp is available |
 
 ### 2.5 Admin Console Flows
 
@@ -363,7 +363,7 @@ Additionally, product descriptions entered by the operator might inadvertently c
 
 #### 4.2.5 Sender Verification
 - Only messages originating from allowlisted operator WhatsApp numbers are processed.
-- Messages from unauthorised numbers receive a generic rejection response once per number per configured window; repeated attempts in that window are silently ignored.
+- Messages from unauthorised numbers receive a generic rejection response once per number per 60-minute window; repeated attempts in that window are silently ignored.
 
 #### 4.2.6 Input Length and Content Limits
 - Product name: max 120 characters.
@@ -498,3 +498,10 @@ Additionally, product descriptions entered by the operator might inadvertently c
 - `4xx` responses from the CMS (excluding `404` on delete-all) are treated as permanent failures; the operator is notified with an actionable message.
 - `5xx` responses trigger the retry policy defined in §2.4.
 - Circuit breaker pattern is recommended for production deployments with high CMS unavailability frequency.
+
+### 6.5 Mock CMS API (Development)
+- Until the production CMS contract is fully validated, local/staging integration can use a mock CMS that implements the same `/api/ads` interface:
+  - `POST /api/ads`: appends an item to an in-memory list and returns `201`.
+  - `GET /api/ads`: returns the in-memory list.
+  - `DELETE /api/ads`: clears the in-memory list and returns `204`.
+- This mock is for development/testing only and must not replace production CMS validation.

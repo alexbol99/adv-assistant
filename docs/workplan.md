@@ -63,8 +63,8 @@ This document describes the step-by-step implementation plan for building the Wh
 - Implement `GET /webhook` for Meta's verification handshake (challenge–response).
 - Implement `POST /webhook` to receive inbound message events.
 - Verify `X-Hub-Signature-256` HMAC signature on every inbound request; reject invalid signatures with HTTP 403.
-- Reject stale inbound events outside a configured replay window (default: 5 minutes) when message timestamps are available.
-- Apply unauthorised-number policy: send a generic rejection once per number per configured window, then silently ignore repeated attempts in that window.
+- Reject stale inbound events outside a 5-minute replay window when message timestamps are available.
+- Apply unauthorised-number policy: send a generic rejection once per number per 60-minute window, then silently ignore repeated attempts in that window.
 - Return HTTP 200 immediately after enqueuing the message task.
 
 ### 2.3 Cloud Tasks Enqueue
@@ -189,7 +189,8 @@ This document describes the step-by-step implementation plan for building the Wh
 
 ### 7.1 Nano Banana Client
 - Implement a `NanoBananaClient` class with methods: `submit_job()`, `poll_job()`, `register_callback()`.
-- `submit_job()`: POST the structured ad data (product name, price, promo text, optional photo URL, enriched details, 1920×1080 resolution, 10% safe margins) to the Nano Banana API; return the job ID.
+- Authenticate with `Authorization: Bearer <token>`.
+- `submit_job()`: POST the structured ad data using model `nanobanana-2`, 1920×1080 output, and derived `aspect_ratio=16:9`; include stable `idempotency_key` and optional `reference_image_url`; return the job ID.
 - `poll_job()`: GET the job status endpoint with the job ID until status is `completed` or `failed`; return the rendered image URL or binary.
 
 ### 7.2 Async Generation Flow
@@ -201,6 +202,7 @@ This document describes the step-by-step implementation plan for building the Wh
 ### 7.3 Callback Support
 - Implement a `POST /callbacks/nano-banana` endpoint to receive Nano Banana job completion callbacks.
 - On callback receipt, trigger the same image download → GCS upload → operator notification flow as polling.
+- Verify callback authenticity via shared-secret signature validation.
 - The decision between polling and callback mode is configurable; callback mode is preferred in production.
 
 ### 7.4 Regeneration Modes
@@ -219,6 +221,7 @@ This document describes the step-by-step implementation plan for building the Wh
 - `publish_ad()`: POST the ad payload (`image_url`, metadata) to the CMS append endpoint; record the result in `published_ad`.
 - `list_ads()`: GET the current CMS playlist; return a summary list of active ads.
 - `delete_all_ads()`: DELETE all ads from the CMS; record the action in `audit_event`.
+- Provide a local/staging mock CMS implementation of the same `/api/ads` contract for integration testing while production CMS behavior remains under validation.
 
 ### 8.2 Confirmation Flow
 - `publish_ad` and `delete_all` intents require explicit operator confirmation via interactive WhatsApp buttons only.

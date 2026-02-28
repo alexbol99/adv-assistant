@@ -184,7 +184,7 @@ The operator may override currency and language per session. Overrides are remem
 - The admin console controls which phone numbers are authorised to operate the bot.
 - No self-enrollment is allowed via chat. Operator onboarding/offboarding is an admin action only.
 - Authorisation source of truth is the `operator` table (`active=true` means authorised).
-- Messages from unauthorised numbers receive a generic rejection message once per number per time window; repeated attempts in that window are silently ignored.
+- Messages from unauthorised numbers receive a generic rejection message once per number per **60-minute window**; repeated attempts in that window are silently ignored.
 
 #### 9.1.1 Admin Console Access (required)
 - **Authentication**: strong authentication is required for Admin Console access. At launch, username + password with a secure credential store is acceptable; OIDC/SSO integration remains preferred for production maturity.
