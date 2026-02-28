@@ -40,6 +40,8 @@ The bot application server is deployed as a **stateless, containerised service o
 - Each incoming WhatsApp message is serialised and enqueued as a Cloud Tasks HTTP task targeting the bot's internal `/tasks/process-message` endpoint.
 - This decouples webhook acknowledgement from message processing and provides built-in retry semantics with configurable back-off.
 - Ad generation jobs (which may be long-running) are also enqueued as separate tasks so they do not block conversation response latency.
+- The task endpoint accepts only OIDC-authenticated Cloud Tasks invocations; unauthenticated callers are rejected.
+- Inbound processing is deduplicated by WhatsApp message ID (`wamid`) with a 30-day processed-message retention window.
 - Queue configuration: max retries = 5; min back-off = 5 s; max back-off = 300 s.
 
 ---
@@ -63,6 +65,7 @@ A **Cloud SQL PostgreSQL** instance is provisioned from day one, even if some en
 | `published_ad` | Immutable record of CMS publish events |
 | `system_config` | Singleton configuration row (CMS URL, defaults) |
 | `audit_event` | Append-only log of admin and bot actions |
+| `processed_inbound_message` | Dedup registry keyed by `wamid` (30-day retention) |
 
 **Connection:** Cloud Run connects to Cloud SQL via the **Cloud SQL Auth Proxy** (Unix socket, no public IP required). Async SQLAlchemy with `asyncpg` driver.
 
@@ -85,6 +88,15 @@ Rendered ad images and operator-uploaded product photos are stored in a **GCS bu
 Signed URLs have a finite expiry. The CMS may cache or re-fetch the URL at any time; an expired signed URL would break the CMS display. Public URLs with unguessable names avoid this issue.
 
 > **Note — CMS URL behaviour:** Whether the CMS stores the URL for later re-fetch or embeds the image at publish time is currently undetermined (TBD). The public-object approach handles both cases; this assumption should be validated once the CMS integration is specified.
+
+### 4.4 Mock CMS for Development
+
+While production CMS behavior is still being validated, development and staging can use a mock CMS implementing:
+- `POST /api/ads` (append),
+- `GET /api/ads` (list),
+- `DELETE /api/ads` (delete-all).
+
+This preserves integration progress without changing production decisions.
 
 ### 4.2 Lifecycle TTL Cleanup
 
@@ -126,17 +138,58 @@ Both generation modes (defined in the arch spec) map to Nano Banana API paramete
 | Fresh generation | Submit structured ad data (product name, price, promo text, optional photo URL, enriched details) as generation inputs; no reference image. |
 | Reference-based regeneration | Submit the same inputs **plus** the previous preview image URL as a visual reference; include the operator's change instructions in the prompt. |
 
-### 5.3 Open Questions about Nano Banana API
+### 5.3 Locked Nano Banana Contract
 
-The following questions are unresolved pending API documentation review and/or vendor confirmation. Decisions should be recorded here once answered.
+The following integration contract is now locked for implementation.
 
-1. **Authentication**: What authentication scheme does the Nano Banana API use? (API key in header? OAuth? Other?)
-2. **Request schema**: What is the exact request body structure for a generation job? What fields are mandatory vs optional?
-3. **Reference image input**: How is the reference image supplied for regeneration — as a URL, a base64-encoded blob, or a multipart upload?
-4. **Polling endpoint**: What is the polling endpoint path and response schema for job status? What are the possible status values?
-5. **Callback registration**: How is the callback URL registered — per-job in the request body, or globally per API key?
-6. **Rate limits and quotas**: What are the rate limits (requests per minute/hour)? Are there concurrency limits on active jobs?
-7. **Error handling**: What HTTP status codes and error payloads does the API return for invalid inputs, quota exhaustion, and generation failures? Is retry safe (idempotent job submission)?
+1. **Authentication**: `Authorization: Bearer <token>`.
+2. **Model**: `Nanobanana 2`.
+3. **Aspect ratio derivation**: derive `aspect_ratio` from requested resolution; for `1920x1080`, use `16:9`.
+4. **Reference image input**: URL (`reference_image_url`) for reference-based regeneration.
+5. **Callback delivery**: Nano Banana posts generation status updates to a bot callback endpoint (`POST /callbacks/nano-banana`).
+
+#### 5.3.1 Recommended Request Schema (adapter contract)
+
+```json
+{
+  "model": "nanobanana-2",
+  "prompt": "<render prompt>",
+  "size": { "width": 1920, "height": 1080 },
+  "aspect_ratio": "16:9",
+  "reference_image_url": "https://.../previous.png",
+  "callback_url": "https://<bot>/callbacks/nano-banana",
+  "metadata": {
+    "draft_id": "<uuid>",
+    "operator_phone": "<e164>"
+  },
+  "idempotency_key": "<uuid>"
+}
+```
+
+Notes:
+- `reference_image_url` is omitted for fresh generation.
+- `idempotency_key` must be stable across retries of the same logical job.
+
+#### 5.3.2 Recommended Callback Payload (adapter contract)
+
+```json
+{
+  "job_id": "<string>",
+  "status": "queued|running|completed|failed",
+  "output_image_url": "https://...",
+  "error_code": "<string|null>",
+  "error_message": "<string|null>",
+  "metadata": {
+    "draft_id": "<uuid>",
+    "operator_phone": "<e164>"
+  }
+}
+```
+
+Operational recommendations:
+- Verify callback authenticity (shared-secret HMAC header).
+- Keep polling as fallback with exponential intervals (`2s`, `5s`, `10s`) up to `15` minutes total.
+- Treat `429` and `5xx` as retryable; treat `4xx` (except `409`) as permanent failures.
 
 ---
 
@@ -195,14 +248,26 @@ All enriched data is treated as **supplementary** — the operator's explicitly 
 
 | Decision | Choice |
 |----------|--------|
+| Operator model | Multiple authorised operators per store, same permissions |
+| Authorization source of truth | `operator` table (`active=true`) |
+| Operator onboarding | Admin-managed only (no chat self-enrollment) |
 | Language | Python 3.12+ |
 | Deployment | GCP Cloud Run (containerised, stateless) |
 | Async message processing | Google Cloud Tasks |
+| Cloud Tasks task auth | OIDC-authenticated invocation only |
+| Inbound deduplication | `wamid` dedup with 30-day retention |
+| Webhook replay window | 5 minutes (when timestamp is available) |
 | Database | Cloud SQL PostgreSQL (from day one) |
 | Media storage | GCS — public objects, unguessable names, lifecycle TTL |
 | CMS image URL strategy | Public GCS object URLs (signed URLs avoided; CMS behaviour TBD) |
+| Confirmation mechanism | Button payload only for publish/delete-all confirmation |
+| Unauthorized number handling | Generic rejection once per number per 60-minute window, then silent ignore |
+| Draft ownership | Private per operator, optimistic concurrency (first-write-wins) |
 | Ad generation service | Nano Banana (async job + polling; callback supported) |
+| Nano Banana auth/model | Bearer token + `Nanobanana 2` |
 | Product domain | Food/grocery, Israel-focused |
 | Barcode decoding | ZXing/zbar (primary) → vision-LLM (fallback) |
 | EAN lookup | Open Food Facts (primary) → EAN-Search.org (fallback) → web search (enrichment) |
 | Web search for enrichment | Search API targeting Hebrew retailer pages |
+| Data retention | Conversation 30d, media 90d, normalized enrichment 30d, audit 13 months |
+| Pre-production compliance gate | Required enrichment-source terms review before go-live |

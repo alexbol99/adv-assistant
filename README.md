@@ -1,6 +1,6 @@
 # adv-assistant
 
-**WhatsApp Advertisement Assistant Bot** — a conversational bot that lets a store owner/operator create, preview, and publish digital advertisements to in-store TV screens entirely through WhatsApp.
+**WhatsApp Advertisement Assistant Bot** — a conversational bot that lets authorised store operators create, preview, and publish digital advertisements to in-store TV screens entirely through WhatsApp.
 
 ## Documentation
 
@@ -14,7 +14,7 @@
 ## Quick Summary
 
 - **WhatsApp provider**: Meta Cloud API
-- **Operator**: single user (store owner/operator)
+- **Operator model**: multiple authorised phone numbers, same permissions
 - **Output**: 1920 × 1080 px landscape, 10% safe margins
 - **CMS publishing**: append-only; delete-all is the only removal operation; no scheduling
 - **Region / currency**: Israel / ILS (₪) by default
