@@ -18,3 +18,31 @@
 - **Output**: 1920 × 1080 px landscape, 10% safe margins
 - **CMS publishing**: append-only; delete-all is the only removal operation; no scheduling
 - **Region / currency**: Israel / ILS (₪) by default
+
+## Development Setup
+
+1. Install dependencies:
+   - `uv sync --all-groups`
+2. Run quality checks:
+   - `uv run ruff check .`
+   - `uv run ruff format --check .`
+   - `uv run pytest`
+3. Run the app locally:
+   - `uv run uvicorn adv_assistant.main:app --reload --host 0.0.0.0 --port 8080`
+4. Run with Docker:
+   - `docker compose up --build`
+
+## CI / Staging Deploy
+
+The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
+
+- lint (`ruff`)
+- tests (`pytest`)
+- Docker build
+- optional staging deploy from `main` when these variables are configured:
+  - repository variables: `GCP_PROJECT_ID`, `GCP_REGION`, `CLOUD_RUN_SERVICE`
+  - repository secret: `GCP_SA_KEY`
+
+## Infrastructure Bootstrap Helper
+
+Use `/Users/alexanderbol/WebstormProjects/adv-assistant/scripts/bootstrap_gcp.sh` for initial GCP bootstrap (Cloud Run APIs, Cloud SQL, GCS bucket, Cloud Tasks queue).
