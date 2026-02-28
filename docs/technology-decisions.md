@@ -40,6 +40,8 @@ The bot application server is deployed as a **stateless, containerised service o
 - Each incoming WhatsApp message is serialised and enqueued as a Cloud Tasks HTTP task targeting the bot's internal `/tasks/process-message` endpoint.
 - This decouples webhook acknowledgement from message processing and provides built-in retry semantics with configurable back-off.
 - Ad generation jobs (which may be long-running) are also enqueued as separate tasks so they do not block conversation response latency.
+- The task endpoint accepts only OIDC-authenticated Cloud Tasks invocations; unauthenticated callers are rejected.
+- Inbound processing is deduplicated by WhatsApp message ID (`wamid`) with a 30-day processed-message retention window.
 - Queue configuration: max retries = 5; min back-off = 5 s; max back-off = 300 s.
 
 ---
@@ -63,6 +65,7 @@ A **Cloud SQL PostgreSQL** instance is provisioned from day one, even if some en
 | `published_ad` | Immutable record of CMS publish events |
 | `system_config` | Singleton configuration row (CMS URL, defaults) |
 | `audit_event` | Append-only log of admin and bot actions |
+| `processed_inbound_message` | Dedup registry keyed by `wamid` (30-day retention) |
 
 **Connection:** Cloud Run connects to Cloud SQL via the **Cloud SQL Auth Proxy** (Unix socket, no public IP required). Async SQLAlchemy with `asyncpg` driver.
 
@@ -195,14 +198,24 @@ All enriched data is treated as **supplementary** — the operator's explicitly 
 
 | Decision | Choice |
 |----------|--------|
+| Operator model | Multiple authorised operators per store, same permissions |
+| Authorization source of truth | `operator` table (`active=true`) |
+| Operator onboarding | Admin-managed only (no chat self-enrollment) |
 | Language | Python 3.12+ |
 | Deployment | GCP Cloud Run (containerised, stateless) |
 | Async message processing | Google Cloud Tasks |
+| Cloud Tasks task auth | OIDC-authenticated invocation only |
+| Inbound deduplication | `wamid` dedup with 30-day retention |
 | Database | Cloud SQL PostgreSQL (from day one) |
 | Media storage | GCS — public objects, unguessable names, lifecycle TTL |
 | CMS image URL strategy | Public GCS object URLs (signed URLs avoided; CMS behaviour TBD) |
+| Confirmation mechanism | Button payload only for publish/delete-all confirmation |
+| Unauthorized number handling | Generic rejection once per number/window, then silent ignore |
+| Draft ownership | Private per operator, optimistic concurrency (first-write-wins) |
 | Ad generation service | Nano Banana (async job + polling; callback supported) |
 | Product domain | Food/grocery, Israel-focused |
 | Barcode decoding | ZXing/zbar (primary) → vision-LLM (fallback) |
 | EAN lookup | Open Food Facts (primary) → EAN-Search.org (fallback) → web search (enrichment) |
 | Web search for enrichment | Search API targeting Hebrew retailer pages |
+| Data retention | Conversation 30d, media 90d, normalized enrichment 30d, audit 13 months |
+| Pre-production compliance gate | Required enrichment-source terms review before go-live |

@@ -57,6 +57,7 @@ Once the bot has sufficient information, it suggests generating an advertisement
 | **Clarify only missing essentials** | The bot asks follow-up questions only when the minimum required information is absent: at minimum, a **product name** and a **price**. It does not ask for optional details unless they are genuinely needed. |
 | **Show, don't ask too much** | After gathering the essentials, the bot generates and shows an ad rather than asking more questions. Improvement is driven by the operator's reaction to the visual, not by a pre-generation questionnaire. |
 | **Iterate with context** | The bot retains context between turns in an ad session. When regenerating, it applies only the changes the operator specifies (e.g., *"make the price bigger"*, *"use a blue background"*) without losing other collected details. |
+| **Draft isolation** | In multi-operator mode, each operator works on their own draft. Drafts are not shared across operators. |
 | **Memory** | The bot remembers the operator's preferred **language** and **currency** based on their WhatsApp number (phone number identity). These preferences are applied automatically in future sessions and can be overridden at any time. |
 
 ### 3.3 Required vs Optional Fields
@@ -101,7 +102,7 @@ The bot returns a preview image of the generated ad for operator approval before
 Once approved, the operator instructs the bot to publish. The bot appends the ad to the CMS playlist. There is no scheduling; the ad goes live immediately upon publishing.
 
 ### 4.4 Delete All Advertisements
-The operator can instruct the bot to remove all currently active advertisements from the CMS. This is an all-or-nothing operation; individual ad removal is not supported. The bot requires explicit confirmation before executing this action.
+The operator can instruct the bot to remove all currently active advertisements from the CMS. This is an all-or-nothing operation; individual ad removal is not supported. The bot requires explicit button-based confirmation before executing this action.
 
 ### 4.5 List Active Advertisements
 The operator can request a summary list of advertisements currently published in the CMS.
@@ -157,6 +158,7 @@ The operator provides content (text, prices, optional images). The bot handles l
 | **No scheduling** | Ads go live immediately upon publish command; no future start/end dates. |
 | **No individual update** | Published ads cannot be edited in place; the operator must delete all and re-publish if changes are needed. |
 | **Delete-all** | The only removal operation removes all ads from the CMS at once. |
+| **Permissions** | All authorised operators have identical permissions, including publish and delete-all. |
 
 ---
 
@@ -177,12 +179,15 @@ The operator may override currency and language per session. Overrides are remem
 ## 9. Security, Privacy, and Compliance
 
 ### 9.1 Operator Identity and Access
-- The bot responds only to messages from registered operators' WhatsApp numbers.
+- The bot executes advertisement-management actions only for messages from registered operators' WhatsApp numbers.
 - Phone number is the sole identity mechanism; no passwords or tokens are required for day-to-day use.
 - The admin console controls which phone numbers are authorised to operate the bot.
+- No self-enrollment is allowed via chat. Operator onboarding/offboarding is an admin action only.
+- Authorisation source of truth is the `operator` table (`active=true` means authorised).
+- Messages from unauthorised numbers receive a generic rejection message once per number per time window; repeated attempts in that window are silently ignored.
 
 #### 9.1.1 Admin Console Access (required)
-- **Authentication**: strong authentication is required for Admin Console access. At minimum, username + password with a secure credential store; OIDC/SSO integration is preferred for production deployments.
+- **Authentication**: strong authentication is required for Admin Console access. At launch, username + password with a secure credential store is acceptable; OIDC/SSO integration remains preferred for production maturity.
 - **Authorisation**: all administrative actions (allowlist changes, CMS configuration updates, audit log access) must require verified admin-level credentials.
 - **Session timeout**: idle admin sessions must be invalidated after a configurable timeout (recommended: 30 minutes).
 - **CSRF protection**: all state-changing requests from the browser-based Admin Console must include CSRF tokens or use `SameSite` cookie attributes.
@@ -201,14 +206,16 @@ Additionally, product names and promotional text entered by the operator may ina
 
 ### 9.3 Data Handling and Privacy
 - The bot does not store or transmit payment card numbers, identity documents, or other sensitive personal data.
-- Conversation history is retained only as long as needed to support the active session and preference memory (language and currency per phone number).
-- Product photos uploaded by the operator are used solely for ad generation and are not shared with third parties beyond what is necessary for that purpose.
-- EAN codes and product details retrieved from the web are used only for ad enrichment and are not stored longer than the session requires.
+- Conversation history retention: **30 days**.
+- Product photos uploaded by operators are used solely for ad generation and are not shared with third parties beyond what is necessary for that purpose; media retention is **90 days**.
+- EAN/enrichment data retention: normalized fields in drafts are retained **30 days**; raw provider responses are not persisted.
+- Audit log retention: **13 months**.
 
 ### 9.4 Compliance Considerations
 - The product must comply with applicable data protection regulations for the region of operation (Israel: PPPA; EU users if applicable: GDPR).
 - No consumer personal data is collected. Operator data (phone number, preferences) must be handled in accordance with applicable law.
 - Ad content is operator-generated; the operator is responsible for ensuring the accuracy of prices and compliance with local advertising regulations.
+- A short legal/compliance check of enrichment sources and usage terms is required before production go-live.
 
 ---
 

@@ -35,10 +35,11 @@ This document describes the step-by-step implementation plan for building the Wh
 - Define async SQLAlchemy 2 models for all tables (see arch spec §5):
   - `operator` — registered WhatsApp phone numbers, language/currency preferences.
   - `conversation_session` — per-operator session state as JSONB.
-  - `ad_draft` — advertisement in progress or completed (fields: product name, price, EAN, promo text, photo URL, `generation_job_id`, `preview_reference_url`, `rendered_image_url`, status).
+  - `ad_draft` — advertisement in progress or completed (fields: `operator_phone`, product name, price, EAN, promo text, photo URL, `generation_job_id`, `preview_reference_url`, `rendered_image_url`, `version`, status).
   - `published_ad` — immutable record of CMS publish events.
   - `system_config` — singleton configuration row (CMS URL, defaults).
   - `audit_event` — append-only log of admin and bot actions.
+  - `processed_inbound_message` — dedup store keyed by WhatsApp `wamid` with retention metadata (30-day TTL).
 
 ### 1.2 Alembic Migrations
 - Initialise Alembic; generate the initial migration from the models.
@@ -62,12 +63,16 @@ This document describes the step-by-step implementation plan for building the Wh
 - Implement `GET /webhook` for Meta's verification handshake (challenge–response).
 - Implement `POST /webhook` to receive inbound message events.
 - Verify `X-Hub-Signature-256` HMAC signature on every inbound request; reject invalid signatures with HTTP 403.
+- Reject stale inbound events outside a configured replay window (default: 5 minutes) when message timestamps are available.
+- Apply unauthorised-number policy: send a generic rejection once per number per configured window, then silently ignore repeated attempts in that window.
 - Return HTTP 200 immediately after enqueuing the message task.
 
 ### 2.3 Cloud Tasks Enqueue
 - Serialise the incoming message payload as JSON.
 - Enqueue a Cloud Tasks HTTP task targeting `POST /tasks/process-message` on the same Cloud Run service.
 - Implement the `POST /tasks/process-message` endpoint that triggers the Conversation Manager.
+- Require OIDC-authenticated Cloud Tasks invocations for `POST /tasks/process-message`; reject unauthenticated callers.
+- Deduplicate by WhatsApp `wamid` before processing; skip already-processed messages and persist dedup records for 30 days.
 
 ---
 
@@ -79,6 +84,7 @@ This document describes the step-by-step implementation plan for building the Wh
 - On each task invocation, load the operator's `conversation_session` from the database (keyed by phone number).
 - After processing, write updated session state back to the database.
 - Auto-create an `operator` record on first contact.
+- Enforce admin-only operator onboarding: no self-enrollment via chat.
 
 ### 3.2 Conversation History
 - Store the last N message turns (configurable) as a list in `conversation_session.context` (JSONB).
@@ -87,6 +93,8 @@ This document describes the step-by-step implementation plan for building the Wh
 ### 3.3 Session State Machine
 - Define the high-level session states: `idle`, `collecting_product_info`, `awaiting_confirmation`, `generating_ad`, `awaiting_publish_confirmation`.
 - Implement state transitions driven by intent classification (Phase 4).
+- Keep drafts private per operator (no shared draft editing between operators).
+- Apply optimistic concurrency (`version` or `updated_at`) for draft updates; first-write-wins and stale writers receive a refresh warning.
 
 ---
 
@@ -148,7 +156,8 @@ This document describes the step-by-step implementation plan for building the Wh
 
 ### 5.3 Graceful Degradation
 - If all providers fail or return no data, proceed with only operator-provided fields.
-- Notify the operator that automatic enrichment was unavailable.
+- Notify the operator once per draft that automatic enrichment was unavailable.
+- Do not persist raw provider responses; persist only normalized enrichment fields used by the draft.
 
 ---
 
@@ -212,7 +221,7 @@ This document describes the step-by-step implementation plan for building the Wh
 - `delete_all_ads()`: DELETE all ads from the CMS; record the action in `audit_event`.
 
 ### 8.2 Confirmation Flow
-- `publish_ad` and `delete_all` intents require explicit operator confirmation via an interactive WhatsApp button prompt (with text fallback: `yes` / `כן`).
+- `publish_ad` and `delete_all` intents require explicit operator confirmation via interactive WhatsApp buttons only.
 - Confirmation state is tracked in `conversation_session` to prevent re-prompting on retries.
 - Destructive actions cannot be bypassed by a crafted message (see arch spec §4 and product spec §9.2).
 
@@ -234,14 +243,14 @@ This document describes the step-by-step implementation plan for building the Wh
   - `GET /admin/audit` — retrieve audit log entries (paginated).
 
 ### 9.2 Authentication & Security
-- Protect all `/admin/...` endpoints with strong authentication (username + password with secure credential store; OIDC/SSO preferred).
+- Protect all `/admin/...` endpoints with strong authentication (username + password with secure credential store at launch; OIDC/SSO preferred for maturity).
 - Enforce session timeout (30-minute idle expiry).
 - Apply CSRF protection on all state-changing requests.
 - Log all admin actions to `audit_event`.
 
 ### 9.3 Admin UI
 - Build a minimal browser-based UI (e.g., simple HTML + HTMX, or a lightweight React app) served from the same Cloud Run service.
-- Screens: operator management, CMS configuration, active ads overview, audit log.
+- Screens: operator management (including last activity timestamp), CMS configuration, active ads overview, audit log.
 
 ---
 
@@ -257,6 +266,7 @@ This document describes the step-by-step implementation plan for building the Wh
 ### 10.2 Structured Logging
 - Use structured JSON logging (e.g., `structlog`) with fields: `trace_id`, `operator_id`, `intent`, `duration_ms`, `error`.
 - Forward logs to Google Cloud Logging.
+- Include actor identity details in audit metadata (`operator_phone` for WhatsApp actions; `admin_user_id` for admin-console actions).
 
 ### 10.3 Monitoring & Alerting
 - Define Cloud Monitoring dashboards for: webhook latency, task queue depth, ad generation success/failure rate, CMS publish success rate.
@@ -267,8 +277,18 @@ This document describes the step-by-step implementation plan for building the Wh
 - Apply principle of least privilege to all IAM service accounts.
 - Rotate secrets via Secret Manager on a defined schedule.
 - Rate-limit webhook and admin API endpoints.
+- Add per-operator and per-phone-number throttling for unauthorised traffic.
+- Define compromised-operator response runbook: immediate operator deactivation via Admin Console and audit notification.
 
-### 10.5 Performance
+### 10.5 Data Retention Controls
+- Enforce retention policy in storage and DB cleanup jobs:
+  - Conversation history: 30 days.
+  - Operator-uploaded photos / generated media: 90 days.
+  - Draft-enrichment normalized fields: 30 days.
+  - Processed inbound dedup records: 30 days.
+  - Audit events: 13 months.
+
+### 10.6 Performance
 - Set Cloud Run minimum instances = 1 to avoid cold starts in production.
 - Configure DB connection pool size appropriate for Cloud Run concurrency settings.
 - Add response caching for `list_ads` and `system_config` reads where safe.
@@ -286,6 +306,7 @@ This document describes the step-by-step implementation plan for building the Wh
   - Regeneration (with reference and from scratch).
   - Publish → CMS record created → audit log written.
   - Delete-all → confirmation flow → CMS cleared.
+  - Duplicate webhook/task delivery → single business action (dedup by `wamid`).
 - Run integration tests against a staging environment backed by real GCP services.
 
 ### 11.2 Load & Resilience Testing
@@ -296,10 +317,14 @@ This document describes the step-by-step implementation plan for building the Wh
 - Review all operator-facing inputs for prompt-injection vectors.
 - Confirm webhook signature verification rejects tampered requests.
 - Confirm admin endpoints reject unauthenticated requests.
+- Confirm `POST /tasks/process-message` rejects non-OIDC callers.
+- Confirm replay-window checks reject stale inbound events.
+- Run a short legal/compliance review of enrichment-source terms before production go-live.
 
 ### 11.4 Documentation & Runbook
 - Write operator onboarding guide (how to register a phone number, connect the CMS).
 - Write ops runbook (deployment, secret rotation, incident response, DB backup/restore).
+- Include operator onboarding/offboarding checklist and unauthorised-access handling policy in the runbook.
 
 ### 11.5 Production Launch
 - Cut production Cloud Run deployment.

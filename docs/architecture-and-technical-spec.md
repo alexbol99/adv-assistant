@@ -65,12 +65,15 @@
 - Verifies the `X-Hub-Signature-256` header to reject forged requests.
 - Extracts the message payload and passes it to the Conversation Manager.
 - Returns HTTP 200 immediately to prevent Meta retries; processing is asynchronous.
+- The internal `POST /tasks/process-message` endpoint accepts only OIDC-authenticated requests from Cloud Tasks.
 
 #### 1.2.3 Conversation Manager
 - Maintains per-operator conversation state (session context).
 - Tracks free-form dialog state across turns; there is no fixed wizard sequence or step counter.
 - Passes each incoming message to the Intent / Command Dispatcher.
 - Stores conversation history used as context for LLM calls.
+- Drafts are private per operator; no cross-operator shared draft editing is performed.
+- Draft writes use optimistic concurrency controls with first-write-wins behaviour.
 
 #### 1.2.4 Intent / Command Dispatcher
 - Classifies the operator's message into one of the supported intents (see §3).
@@ -125,6 +128,7 @@
 - Communicates exclusively with the Admin API; does not interact with WhatsApp or the CMS directly.
 - Responsibilities:
   - Operator allowlist management (register, update, or deactivate authorised WhatsApp phone numbers).
+  - Operator overview (status and last activity timestamp per operator).
   - CMS connection settings (endpoint URL, authentication credentials).
   - Default settings (language, currency, region).
   - Active advertisement overview (via the CMS list endpoint, proxied through the Admin API).
@@ -188,9 +192,9 @@ Operator ──[8: "₪6.90"]─────────────────
                                                                     ▼
                                                 Conversation Manager
                                              [14: send preview image via
-                                              WhatsApp + "Publish? Yes/No"]
+                                              WhatsApp + Publish button]
                                                                     │
-Operator ──[15: "Yes, publish it"]──────────────────────────────────┘
+Operator ──[15: taps Publish button]─────────────────────────────────┘
                                                                     │
                                              [16: publish intent]
                                                                     ▼
@@ -252,8 +256,8 @@ Operator ──["Start over / new design"]──▶ Conversation Manager
 
 1. Operator sends: "Delete all ads" (or similar).
 2. Dispatcher recognises the `delete_all` intent.
-3. Conversation Manager sends an explicit confirmation prompt ("Are you sure you want to delete all ads?").
-4. Operator confirms via an interactive button, or via text reply "YES"/"yes"/"כן" (case-insensitive for text).
+3. Conversation Manager sends an explicit confirmation prompt with button actions.
+4. Operator confirms via the delete confirmation button payload.
 5. TV CMS Client calls DELETE endpoint.
 6. Confirmation sent to operator.
 
@@ -266,6 +270,8 @@ Operator ──["Start over / new design"]──▶ Conversation Manager
 | Idempotency (publish) | Each ad has a unique client-generated ID; duplicate publishes are detected by the CMS client before sending |
 | Idempotency (delete-all) | Idempotent by nature; 404 from CMS treated as success |
 | Timeout | HTTP client timeout 10 s; surface error to operator if exceeded |
+| Inbound duplicate delivery | Deduplicate by WhatsApp message ID (`wamid`); keep processed-message records for 30 days and skip already-processed events |
+| Replay resistance | In addition to signature verification and deduplication, reject stale inbound events outside a configured timestamp window (default: 5 minutes) when timestamp is available |
 
 ### 2.5 Admin Console Flows
 
@@ -276,6 +282,7 @@ Operator ──["Start over / new design"]──▶ Conversation Manager
 3. Admin adds, updates, or deactivates an operator's WhatsApp phone number via the Admin API.
 4. The Admin API persists the change to the `operator` table; an `AuditEvent` is recorded.
 5. The updated allowlist takes effect immediately; the Webhook Handler validates incoming numbers against active operator records.
+6. Operator onboarding is admin-only; self-enrollment from WhatsApp chat is not supported.
 
 #### 2.5.2 CMS Configuration
 
@@ -299,12 +306,12 @@ The following intents are supported by the Intent / Command Dispatcher. The LLM 
 |--------|------------------------|--------|
 | `create_ad` | "New ad", "I want to advertise", "Add product" | Start free-form ad drafting dialog |
 | `publish_ad` | "Publish my ad", "Go live" | Request publish for the current preview (starts confirmation flow if required) |
-| `confirm_publish` | "Yes", "Publish", "Approve", "Send it" or publish button tap | Publish current preview ad to CMS after confirmation |
+| `confirm_publish` | Publish button tap | Publish current preview ad to CMS after confirmation |
 | `reject_draft` | "No", "Cancel", "Not this one" | Discard current draft |
 | `regenerate_with_reference` | "Change the background to red", "Make the price larger", "Use a different font" | Regenerate ad using previous preview as visual reference, applying only the requested changes |
 | `regenerate_from_scratch` | "Start over", "Generate a completely new design", "Try again from the beginning" | Discard previous preview and generate a fresh ad from all collected data |
 | `delete_all` | "Delete all ads", "Clear screen", "Remove everything" | Trigger delete-all confirmation flow |
-| `confirm_delete_all` | "YES" / "כן" (after confirmation prompt) or delete button tap | Execute delete-all on CMS |
+| `confirm_delete_all` | Delete confirmation button tap | Execute delete-all on CMS |
 | `list_ads` | "What ads are running?", "Show me the playlist" | Return list of active ads from CMS |
 | `help` | "Help", "What can you do?", "Commands" | Return help text |
 | `set_language` | "Switch to English", "ענה בעברית", "Отвечай по-русски", "تحدث بالعربية" | Set session language preference (he / en / ru / ar) |
@@ -352,11 +359,11 @@ Additionally, product descriptions entered by the operator might inadvertently c
 
 #### 4.2.4 Destructive Action Confirmation Gate
 - `publish_ad` and `delete_all` intents require a human-in-the-loop confirmation step before any irreversible action is taken.
-- Confirmation is matched using trusted button payloads (preferred) or a case-insensitive string match against a fixed set of accepted values (`yes`, `כן`), not an LLM call.
+- Confirmation is matched using trusted button payloads only (no text fallback and no LLM call).
 
 #### 4.2.5 Sender Verification
 - Only messages originating from allowlisted operator WhatsApp numbers are processed.
-- Messages from any other number are silently discarded.
+- Messages from unauthorised numbers receive a generic rejection response once per number per configured window; repeated attempts in that window are silently ignored.
 
 #### 4.2.6 Input Length and Content Limits
 - Product name: max 120 characters.
@@ -391,6 +398,7 @@ Additionally, product descriptions entered by the operator might inadvertently c
 │               AdDraft                     │
 │                                           │
 │  id                  : UUID               │
+│  operator_phone      : string (E.164)      │
 │  product_name        : string (≤120 chars)│
 │  price               : decimal            │
 │  currency            : string (default ILS)│
@@ -400,6 +408,7 @@ Additionally, product descriptions entered by the operator might inadvertently c
 │  generation_job_id   : string | null      │
 │  preview_reference_url : string | null    │
 │  rendered_image_url  : string | null      │
+│  version             : integer             │
 │  status              : DRAFT | GENERATING │
 │                        | PREVIEW_READY    │
 │                        | APPROVED         │
@@ -452,15 +461,17 @@ Additionally, product descriptions entered by the operator might inadvertently c
 ```
 
 - **AdDraft** represents an advertisement in progress or completed. A single session may have at most one active draft.
+  - `operator_phone`: draft owner. Drafts are private to a single authorised operator.
   - `ean`: optional EAN barcode supplied by the operator; used by the Product Enrichment component to fetch product details from web sources.
   - `photo_url`: optional URL of a product photo uploaded by the operator; incorporated into the ad layout.
   - `generation_job_id`: asynchronous ad-generation job identifier when a render is in progress.
   - `preview_reference_url`: URL of the most recently generated preview image; used as the visual reference input when `regenerate_with_reference` is requested.
   - `rendered_image_url`: URL of the current rendered ad image stored in the Media Store.
+  - `version`: optimistic concurrency control field used for first-write-wins updates.
 - **ConversationSession** is a per-operator state object persisted in the `conversation_session` table (optionally cache-accelerated) that tracks multi-turn exchanges. The `language` field stores the operator's preferred conversation language (`he` = Hebrew (default), `en` = English, `ru` = Russian, `ar` = Arabic) and persists across sessions for the same phone number. Sessions expire after a configurable idle timeout (default: 30 minutes).
 - **PublishedAd** is an immutable record linking a draft to its CMS identifier. It is created on each successful publish and retained for auditability even after `delete_all` is executed in the CMS.
 - **SystemConfig** is a singleton configuration record managed exclusively through the Admin API. It stores CMS connection details, locale defaults, and a reference to the admin auth secret in the secrets manager. It must never be readable or writable through WhatsApp message paths.
-- **AuditEvent** is an append-only record of every significant admin or system action. It is written by the Admin API on configuration changes and by the bot on ad lifecycle events (publish, delete-all). Used for operational oversight via the Admin Console.
+- **AuditEvent** is an append-only record of every significant admin or system action. It is written by the Admin API on configuration changes and by the bot on ad lifecycle events (publish, delete-all). Actor metadata should include operator phone number for WhatsApp actions and admin user identifier for console actions.
 
 ---
 
