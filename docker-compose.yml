@@ -12,11 +12,9 @@ services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_DB: adv_assistant
-      POSTGRES_USER: adv_assistant
-      POSTGRES_PASSWORD: adv_assistant
-    ports:
-      - "5432:5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
