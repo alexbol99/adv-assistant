@@ -45,4 +45,13 @@ The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 
 ## Infrastructure Bootstrap Helper
 
-Use `/Users/alexanderbol/WebstormProjects/adv-assistant/scripts/bootstrap_gcp.sh` for initial GCP bootstrap (Cloud Run APIs, Cloud SQL, GCS bucket, Cloud Tasks queue).
+Use `scripts/bootstrap_gcp.sh` for initial GCP bootstrap (Cloud Run APIs, Cloud SQL, GCS bucket, Cloud Tasks queue):
+
+```bash
+GCP_PROJECT_ID=my-project \
+GCP_REGION=me-west1 \
+GCS_BUCKET=my-bucket \
+CLOUD_SQL_INSTANCE=my-sql-instance \
+TASKS_QUEUE=my-queue \
+bash scripts/bootstrap_gcp.sh
+```
