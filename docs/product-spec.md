@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The **WhatsApp Advertisement Assistant Bot** is a conversational tool that allows a single operator (owner/operator role) to create, manage, and publish digital advertisements for in-store TV screens — entirely through WhatsApp chat. No dedicated web dashboard or desktop application is required for **day-to-day ad creation and publishing**. An **Admin Console** exists for system configuration and operational oversight (operator allowlist management, CMS connection settings, audit log); it is not needed for routine ad operations.
+The **WhatsApp Advertisement Assistant Bot** is a conversational tool that allows multiple authorised operators (e.g., owner and staff) to create, manage, and publish digital advertisements for in-store TV screens — entirely through WhatsApp chat. All operators share the same permissions. No dedicated web dashboard or desktop application is required for **day-to-day ad creation and publishing**. An **Admin Console** exists for system configuration and operational oversight (operator allowlist management, CMS connection settings, audit log); it is not needed for routine ad operations.
 
 **Core product behaviour:**
 
@@ -24,13 +24,14 @@ The **WhatsApp Advertisement Assistant Bot** is a conversational tool that allow
 - Publish completed advertisements to the store's TV Content Management System (CMS).
 - Remove (delete all) advertisements from the CMS when instructed.
 - Support Hebrew-language conversations and Israeli business conventions by default.
-- Remember the operator's language and currency preferences across sessions (identified by phone number).
+- Remember each operator's language and currency preferences across sessions (identified by phone number).
+- Support multiple operators per store with identical permissions.
 
 ### Non-Goals
-- Multi-user or multi-role workflows (e.g., separate manager and cashier accounts).
+- Multi-role permission workflows (e.g., manager approval required before staff can publish).
 - Scheduling future publication times or managing campaigns across time windows.
 - Editing or updating already-published advertisements (only append-new or delete-all operations are supported).
-- Consumer-facing functionality; this bot serves only the store owner/operator.
+- Consumer-facing functionality; this bot serves only store operators.
 
 ---
 
@@ -119,13 +120,13 @@ The operator can ask what actions the bot supports.
 
 | Role | Description |
 |------|-------------|
-| **Owner / Operator** | Single user who owns and operates the store. Interacts with the bot via WhatsApp to create and publish ads. Identified by their registered WhatsApp phone number. |
+| **Operator** | One of multiple authorised store users who can operate the bot via WhatsApp to create and publish ads. All operators have identical permissions. Identified by their registered WhatsApp phone number. |
 
 ### 5.2 Admin Console
 
 An **admin console** is an essential part of the product. It enables configuration and oversight of the system without requiring direct code changes. The admin console provides:
 
-- **Operator management**: register, update, or deactivate the operator's authorised WhatsApp phone number.
+- **Operator management**: register, update, or deactivate authorised WhatsApp phone numbers.
 - **CMS connection settings**: configure the TV CMS endpoint used for publishing.
 - **Default settings**: set the default language, currency, and regional preferences.
 - **Active advertisement overview**: view the current list of ads published to the CMS.
@@ -176,9 +177,9 @@ The operator may override currency and language per session. Overrides are remem
 ## 9. Security, Privacy, and Compliance
 
 ### 9.1 Operator Identity and Access
-- The bot responds only to messages from the registered operator's WhatsApp number.
+- The bot responds only to messages from registered operators' WhatsApp numbers.
 - Phone number is the sole identity mechanism; no passwords or tokens are required for day-to-day use.
-- The admin console controls which phone number is authorised to operate the bot.
+- The admin console controls which phone numbers are authorised to operate the bot.
 
 #### 9.1.1 Admin Console Access (required)
 - **Authentication**: strong authentication is required for Admin Console access. At minimum, username + password with a secure credential store; OIDC/SSO integration is preferred for production deployments.

@@ -6,7 +6,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         Operator (WhatsApp)                         │
+│                        Operators (WhatsApp)                         │
 └──────────────────────────────┬──────────────────────────────────────┘
                                │ HTTPS (webhooks & Send API)
                                ▼
@@ -355,7 +355,7 @@ Additionally, product descriptions entered by the operator might inadvertently c
 - Confirmation is matched using trusted button payloads (preferred) or a case-insensitive string match against a fixed set of accepted values (`yes`, `כן`), not an LLM call.
 
 #### 4.2.5 Sender Verification
-- Only messages originating from the pre-configured operator WhatsApp number are processed.
+- Only messages originating from allowlisted operator WhatsApp numbers are processed.
 - Messages from any other number are silently discarded.
 
 #### 4.2.6 Input Length and Content Limits
@@ -377,7 +377,7 @@ Additionally, product descriptions entered by the operator might inadvertently c
 
 | Risk | Mitigation | Residual Risk |
 |------|-----------|---------------|
-| Operator WhatsApp account compromise | Sender verification; destructive-action gate | If attacker controls the operator's WhatsApp, they can publish/delete ads |
+| Operator WhatsApp account compromise | Sender verification; destructive-action gate | If attacker controls an authorised operator's WhatsApp, they can publish/delete ads |
 | Indirect injection via product names | Input sanitisation, structured output parsing | Low; injected text in product names is parsed as data, not instructions |
 | LLM model-level jailbreak | System prompt hardening, intent schema constraint | Low-medium; depends on model robustness; monitor LLM provider updates |
 | CMS credential theft | Credentials stored in environment variables / secrets manager; not in code | Low if infrastructure is hardened |
