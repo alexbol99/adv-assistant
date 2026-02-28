@@ -35,7 +35,7 @@ This document describes the step-by-step implementation plan for building the Wh
 - Define async SQLAlchemy 2 models for all tables (see arch spec §5):
   - `operator` — registered WhatsApp phone numbers, language/currency preferences.
   - `conversation_session` — per-operator session state as JSONB.
-  - `ad_draft` — advertisement in progress or completed (fields: product name, price, EAN, promo text, photo URL, preview URL, status).
+  - `ad_draft` — advertisement in progress or completed (fields: product name, price, EAN, promo text, photo URL, `generation_job_id`, `preview_reference_url`, `rendered_image_url`, status).
   - `published_ad` — immutable record of CMS publish events.
   - `system_config` — singleton configuration row (CMS URL, defaults).
   - `audit_event` — append-only log of admin and bot actions.
@@ -100,7 +100,7 @@ This document describes the step-by-step implementation plan for building the Wh
 
 ### 4.2 Intent Classification
 - Define supported intents (see arch spec §3):
-  - `create_ad`, `regenerate_with_reference`, `regenerate_from_scratch`, `publish`, `delete_all`, `list_ads`, `help`, `unknown`.
+  - `create_ad`, `publish_ad`, `confirm_publish`, `reject_draft`, `regenerate_with_reference`, `regenerate_from_scratch`, `delete_all`, `confirm_delete_all`, `list_ads`, `help`, `set_language`, `unknown`.
 - Prompt the LLM to classify the operator's message and return a structured JSON intent object.
 
 ### 4.3 Field Extraction
@@ -158,7 +158,7 @@ This document describes the step-by-step implementation plan for building the Wh
 
 ### 6.1 GCS Client
 - Implement a `MediaStore` class wrapping the `google-cloud-storage` Python client.
-- Upload method: accept file bytes + MIME type; generate a UUID v4 object name (`{category}/{uuid4}.{ext}`); upload with `predefined_acl="publicRead"`; return the public URL (`https://storage.googleapis.com/<bucket>/<object>`).
+- Upload method: accept file bytes + MIME type; generate a UUID v4 object name (`{category}/{uuid4}.{ext}`); upload object and return the public URL (`https://storage.googleapis.com/<bucket>/<object>`). Public readability is managed via bucket-level IAM (`allUsers objectViewer`), not per-object ACLs.
 
 ### 6.2 URL Strategy
 - Use public GCS object URLs (not signed URLs) to ensure permanent accessibility for the CMS and WhatsApp preview messages.
@@ -170,7 +170,7 @@ This document describes the step-by-step implementation plan for building the Wh
 
 ### 6.4 Photo Handling
 - When the operator sends a product photo via WhatsApp, download it from the Meta media endpoint and upload it to GCS.
-- Store the GCS URL in `AdDraft.product_photo_url` for use in enrichment (Phase 5) and ad generation (Phase 7).
+- Store the GCS URL in `AdDraft.photo_url` for use in enrichment (Phase 5) and ad generation (Phase 7).
 
 ---
 
@@ -185,8 +185,8 @@ This document describes the step-by-step implementation plan for building the Wh
 
 ### 7.2 Async Generation Flow
 - The ad generation flow runs as an enqueued Cloud Tasks task (not inline in the conversation handler) to avoid blocking response latency.
-- On job submission, store the job ID in `AdDraft.generation_job_id` and set status to `generating`.
-- On completion, download the rendered image from Nano Banana, upload it to GCS (Phase 6), store the GCS URL in `AdDraft.preview_url`, and set status to `preview_ready`.
+- On job submission, store the job ID in `AdDraft.generation_job_id` and set status to `GENERATING`.
+- On completion, download the rendered image from Nano Banana, upload it to GCS (Phase 6), store the GCS URL in `AdDraft.rendered_image_url`, set `AdDraft.preview_reference_url` to the same URL, and set status to `PREVIEW_READY`.
 - Send the preview image to the operator via WhatsApp.
 
 ### 7.3 Callback Support
@@ -195,7 +195,7 @@ This document describes the step-by-step implementation plan for building the Wh
 - The decision between polling and callback mode is configurable; callback mode is preferred in production.
 
 ### 7.4 Regeneration Modes
-- **Regenerate with reference**: submit previous `AdDraft.preview_url` as a visual reference along with the operator's change instructions.
+- **Regenerate with reference**: submit previous `AdDraft.preview_reference_url` as a visual reference along with the operator's change instructions.
 - **Regenerate from scratch**: submit without a reference image; fresh generation from collected `AdDraft` data.
 
 ---
@@ -212,7 +212,7 @@ This document describes the step-by-step implementation plan for building the Wh
 - `delete_all_ads()`: DELETE all ads from the CMS; record the action in `audit_event`.
 
 ### 8.2 Confirmation Flow
-- `publish` and `delete_all` intents require explicit operator confirmation via an interactive WhatsApp button prompt.
+- `publish_ad` and `delete_all` intents require explicit operator confirmation via an interactive WhatsApp button prompt (with text fallback: `yes` / `כן`).
 - Confirmation state is tracked in `conversation_session` to prevent re-prompting on retries.
 - Destructive actions cannot be bypassed by a crafted message (see arch spec §4 and product spec §9.2).
 

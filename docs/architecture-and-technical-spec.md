@@ -108,7 +108,7 @@
 - Uploads the rendered PNG to the Media Store and returns the resulting public URL.
 
 #### 1.2.8 Media Store
-- Object-storage backed store (e.g., S3-compatible bucket) for rendered ad images.
+- Object-storage backed store (Google Cloud Storage bucket) for rendered ad images.
 - Assigns a public URL to each image; URLs are used for WhatsApp preview delivery and CMS publishing payloads.
 - Applies a configurable TTL to images matching the expected ad lifecycle.
 
@@ -134,7 +134,7 @@
 - An HTTP REST API exposed by the Bot Application Server for administrative operations.
 - Accessible only through authenticated requests; not reachable via the WhatsApp message path.
 - Responsibilities:
-  - CRUD operations on the operator allowlist and `SystemConfig`.
+  - CRUD operations on operator records and `SystemConfig`.
   - Persisting and retrieving `AuditEvent` records.
   - Proxying CMS list queries to support the active advertisement overview in the Admin Console.
 - All Admin API endpoints require admin-level credentials (bearer token or session cookie); see §4.2.8 for the control-plane separation guarantee.
@@ -252,8 +252,8 @@ Operator ──["Start over / new design"]──▶ Conversation Manager
 
 1. Operator sends: "Delete all ads" (or similar).
 2. Dispatcher recognises the `delete_all` intent.
-3. Conversation Manager sends an explicit confirmation prompt ("Are you sure you want to delete all ads? Reply YES to confirm.").
-4. Operator replies "YES" (case-insensitive; Hebrew "כן" also accepted).
+3. Conversation Manager sends an explicit confirmation prompt ("Are you sure you want to delete all ads?").
+4. Operator confirms via an interactive button, or via text reply "YES"/"yes"/"כן" (case-insensitive for text).
 5. TV CMS Client calls DELETE endpoint.
 6. Confirmation sent to operator.
 
@@ -274,8 +274,8 @@ Operator ──["Start over / new design"]──▶ Conversation Manager
 1. Admin logs in to the Admin Console (browser).
 2. Admin navigates to the operator allowlist section.
 3. Admin adds, updates, or deactivates an operator's WhatsApp phone number via the Admin API.
-4. The Admin API persists the change to `SystemConfig`; an `AuditEvent` is recorded.
-5. The updated allowlist takes effect immediately; the Webhook Handler uses the current allowlist for all subsequent message validation.
+4. The Admin API persists the change to the `operator` table; an `AuditEvent` is recorded.
+5. The updated allowlist takes effect immediately; the Webhook Handler validates incoming numbers against active operator records.
 
 #### 2.5.2 CMS Configuration
 
@@ -298,13 +298,13 @@ The following intents are supported by the Intent / Command Dispatcher. The LLM 
 | Intent | Example trigger phrases | Action |
 |--------|------------------------|--------|
 | `create_ad` | "New ad", "I want to advertise", "Add product" | Start free-form ad drafting dialog |
-| `confirm_publish` | "Yes", "Publish", "Approve", "Send it" | Publish current draft ad to CMS |
+| `publish_ad` | "Publish my ad", "Go live" | Request publish for the current preview (starts confirmation flow if required) |
+| `confirm_publish` | "Yes", "Publish", "Approve", "Send it" or publish button tap | Publish current preview ad to CMS after confirmation |
 | `reject_draft` | "No", "Cancel", "Not this one" | Discard current draft |
 | `regenerate_with_reference` | "Change the background to red", "Make the price larger", "Use a different font" | Regenerate ad using previous preview as visual reference, applying only the requested changes |
 | `regenerate_from_scratch` | "Start over", "Generate a completely new design", "Try again from the beginning" | Discard previous preview and generate a fresh ad from all collected data |
-| `publish_ad` | "Publish my ad", "Go live" | Publish the last approved preview |
 | `delete_all` | "Delete all ads", "Clear screen", "Remove everything" | Trigger delete-all confirmation flow |
-| `confirm_delete_all` | "YES" (after confirmation prompt) | Execute delete-all on CMS |
+| `confirm_delete_all` | "YES" / "כן" (after confirmation prompt) or delete button tap | Execute delete-all on CMS |
 | `list_ads` | "What ads are running?", "Show me the playlist" | Return list of active ads from CMS |
 | `help` | "Help", "What can you do?", "Commands" | Return help text |
 | `set_language` | "Switch to English", "ענה בעברית", "Отвечай по-русски", "تحدث بالعربية" | Set session language preference (he / en / ru / ar) |
@@ -351,8 +351,8 @@ Additionally, product descriptions entered by the operator might inadvertently c
 - A response that does not match a known intent is treated as `unknown` and does not trigger any system action.
 
 #### 4.2.4 Destructive Action Confirmation Gate
-- `delete_all` and `confirm_publish` intents require a human-in-the-loop confirmation step (explicit "YES" reply) before any irreversible action is taken.
-- The confirmation step uses a case-insensitive string match against a fixed set of accepted values (`yes`, `כן`), not an LLM call, preventing injection through the confirmation reply itself.
+- `publish_ad` and `delete_all` intents require a human-in-the-loop confirmation step before any irreversible action is taken.
+- Confirmation is matched using trusted button payloads (preferred) or a case-insensitive string match against a fixed set of accepted values (`yes`, `כן`), not an LLM call.
 
 #### 4.2.5 Sender Verification
 - Only messages originating from the pre-configured operator WhatsApp number are processed.
@@ -397,9 +397,12 @@ Additionally, product descriptions entered by the operator might inadvertently c
 │  promo_text          : string (≤240 chars)│
 │  ean                 : string | null      │
 │  photo_url           : string | null      │
+│  generation_job_id   : string | null      │
 │  preview_reference_url : string | null    │
 │  rendered_image_url  : string | null      │
-│  status              : DRAFT | APPROVED   │
+│  status              : DRAFT | GENERATING │
+│                        | PREVIEW_READY    │
+│                        | APPROVED         │
 │                        | PUBLISHED        │
 │  created_at          : datetime           │
 └───────────────────────────────────────────┘
@@ -408,7 +411,7 @@ Additionally, product descriptions entered by the operator might inadvertently c
 │           ConversationSession             │
 │                                           │
 │  operator_phone : string (E.164)          │
-│  language       : "he" | "en" | "ru" | "ar│
+│  language       : "he" | "en" | "ru" | "ar"│
 │  current_draft  : AdDraft | null          │
 │  history        : Message[]               │
 │  last_active    : datetime                │
@@ -426,7 +429,6 @@ Additionally, product descriptions entered by the operator might inadvertently c
 ┌───────────────────────────────────────────┐
 │             SystemConfig                  │
 │                                           │
-│  operator_allowlist : string[] (E.164)    │
 │  cms_base_url       : string              │
 │  default_language   : "he"|"en"|"ru"|"ar" │
 │  default_currency   : string (default ILS)│
@@ -452,11 +454,12 @@ Additionally, product descriptions entered by the operator might inadvertently c
 - **AdDraft** represents an advertisement in progress or completed. A single session may have at most one active draft.
   - `ean`: optional EAN barcode supplied by the operator; used by the Product Enrichment component to fetch product details from web sources.
   - `photo_url`: optional URL of a product photo uploaded by the operator; incorporated into the ad layout.
+  - `generation_job_id`: asynchronous ad-generation job identifier when a render is in progress.
   - `preview_reference_url`: URL of the most recently generated preview image; used as the visual reference input when `regenerate_with_reference` is requested.
   - `rendered_image_url`: URL of the current rendered ad image stored in the Media Store.
-- **ConversationSession** is a per-operator in-memory or cache-backed object that tracks state across multi-turn exchanges. The `language` field stores the operator's preferred conversation language (`he` = Hebrew (default), `en` = English, `ru` = Russian, `ar` = Arabic) and persists across sessions for the same phone number. Sessions expire after a configurable idle timeout (default: 30 minutes).
-- **PublishedAd** is an immutable record linking a draft to its CMS identifier. It is created on each successful publish and deleted when `delete_all` is executed.
-- **SystemConfig** is a singleton configuration record managed exclusively through the Admin API. It stores the operator allowlist, CMS connection details, locale defaults, and a reference to the admin auth secret in the secrets manager. It must never be readable or writable through WhatsApp message paths.
+- **ConversationSession** is a per-operator state object persisted in the `conversation_session` table (optionally cache-accelerated) that tracks multi-turn exchanges. The `language` field stores the operator's preferred conversation language (`he` = Hebrew (default), `en` = English, `ru` = Russian, `ar` = Arabic) and persists across sessions for the same phone number. Sessions expire after a configurable idle timeout (default: 30 minutes).
+- **PublishedAd** is an immutable record linking a draft to its CMS identifier. It is created on each successful publish and retained for auditability even after `delete_all` is executed in the CMS.
+- **SystemConfig** is a singleton configuration record managed exclusively through the Admin API. It stores CMS connection details, locale defaults, and a reference to the admin auth secret in the secrets manager. It must never be readable or writable through WhatsApp message paths.
 - **AuditEvent** is an append-only record of every significant admin or system action. It is written by the Admin API on configuration changes and by the bot on ad lifecycle events (publish, delete-all). Used for operational oversight via the Admin Console.
 
 ---
@@ -477,7 +480,7 @@ Additionally, product descriptions entered by the operator might inadvertently c
 | List ads | `GET` | `/api/ads` | _(none)_ | `200 OK` with JSON array |
 
 ### 6.3 Image Delivery
-- The rendered PNG is uploaded to the Media Store (e.g., S3-compatible bucket) and its public URL is included in the CMS payload.
+- The rendered PNG is uploaded to the Media Store (GCS bucket) and its public URL is included in the CMS payload.
 - Images are stored with a TTL matching the expected ad lifecycle.
 
 ### 6.4 Error Handling
