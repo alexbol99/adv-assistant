@@ -59,9 +59,15 @@ jobs:
           GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           GCP_REGION: ${{ vars.GCP_REGION }}
           CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+          CLOUD_RUN_ALLOW_UNAUTHENTICATED: ${{ vars.CLOUD_RUN_ALLOW_UNAUTHENTICATED }}
         run: |
+          ALLOW_FLAG=""
+          if [ "$CLOUD_RUN_ALLOW_UNAUTHENTICATED" = "true" ]; then
+            ALLOW_FLAG="--allow-unauthenticated"
+          fi
+
           gcloud run deploy "$CLOUD_RUN_SERVICE" \
             --project "$GCP_PROJECT_ID" \
             --region "$GCP_REGION" \
             --source . \
-            --allow-unauthenticated
+            $ALLOW_FLAG
