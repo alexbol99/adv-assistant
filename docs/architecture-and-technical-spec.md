@@ -76,7 +76,7 @@
   - Build system and user prompts.
   - Enforce prompt-injection guardrails (see §9).
   - Parse structured data (product name, price, promo text) from free-text operator messages.
-  - Generate natural-language replies in Hebrew (default) or English (if operator requests).
+  - Generate natural-language replies in the operator's preferred language; supported languages are Hebrew (default), English, Russian, and Arabic.
 - The LLM is used solely for natural-language understanding and response generation; it does **not** directly control the CMS or rendering pipeline.
 
 #### 6.2.6 Ad Renderer
@@ -184,7 +184,7 @@ The following intents are supported by the Intent / Command Dispatcher. The LLM 
 | `confirm_delete_all` | "YES" (after confirmation prompt) | Execute delete-all on CMS |
 | `list_ads` | "What ads are running?", "Show me the playlist" | Return list of active ads from CMS |
 | `help` | "Help", "What can you do?", "Commands" | Return help text |
-| `set_language` | "Switch to English", "ענה בעברית" | Set session language preference |
+| `set_language` | "Switch to English", "ענה בעברית", "Отвечай по-русски", "تحدث بالعربية" | Set session language preference (`he`, `en`, `ru`, `ar`) |
 | `unknown` | Anything not matching above | LLM generates clarification request |
 
 ### 8.1 Ad Creation Wizard Steps
@@ -273,7 +273,7 @@ Additionally, product descriptions entered by the operator might inadvertently c
 │           ConversationSession         │
 │                                       │
 │  operator_phone : string (E.164)      │
-│  language       : "he" | "en"         │
+│  language       : "he" | "en" | "ru" | "ar"│
 │  current_step   : WizardStep | null   │
 │  current_draft  : AdDraft | null      │
 │  history        : Message[]           │
