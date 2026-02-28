@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The **WhatsApp Advertisement Assistant Bot** is a conversational tool that allows a single operator (owner/operator role) to create, manage, and publish digital advertisements for in-store TV screens — entirely through WhatsApp chat. No dedicated web dashboard or desktop application is required for day-to-day operations.
+The **WhatsApp Advertisement Assistant Bot** is a conversational tool that allows a single operator (owner/operator role) to create, manage, and publish digital advertisements for in-store TV screens — entirely through WhatsApp chat. No dedicated web dashboard or desktop application is required for **day-to-day ad creation and publishing**. An **Admin Console** exists for system configuration and operational oversight (operator allowlist management, CMS connection settings, audit log); it is not needed for routine ad operations.
 
 **Core product behaviour:**
 
@@ -179,6 +179,13 @@ The operator may override currency and language per session. Overrides are remem
 - The bot responds only to messages from the registered operator's WhatsApp number.
 - Phone number is the sole identity mechanism; no passwords or tokens are required for day-to-day use.
 - The admin console controls which phone number is authorised to operate the bot.
+
+#### 9.1.1 Admin Console Access (required)
+- **Authentication**: strong authentication is required for Admin Console access. At minimum, username + password with a secure credential store; OIDC/SSO integration is preferred for production deployments.
+- **Authorisation**: all administrative actions (allowlist changes, CMS configuration updates, audit log access) must require verified admin-level credentials.
+- **Session timeout**: idle admin sessions must be invalidated after a configurable timeout (recommended: 30 minutes).
+- **CSRF protection**: all state-changing requests from the browser-based Admin Console must include CSRF tokens or use `SameSite` cookie attributes.
+- **Audit logging**: all admin actions (configuration changes, operator onboarding/deactivation, credential updates) must be recorded in the audit log with actor, action, and timestamp.
 
 ### 9.2 Prompt Injection Risk
 Because the operator's natural-language messages are processed by an AI language model, a malicious actor who gains access to the operator's WhatsApp account — or who sends spoofed or forged messages — may attempt **prompt injection**: crafting a message designed to override the bot's instructions, exfiltrate data, or trigger unauthorised actions such as deleting all ads or publishing malicious content.

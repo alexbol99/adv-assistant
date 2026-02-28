@@ -15,10 +15,10 @@
 └──────────────────────────────┬──────────────────────────────────────┘
                                │ HTTPS webhooks
                                ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Bot Application Server                       │
-│                                                                     │
-│   ┌──────────────┐   ┌──────────────┐   ┌────────────────────────┐ │
+┌─────────────────────────────────────────────────────────────────────┐   ┌──────────────────────┐
+│                        Bot Application Server                       │◀──│   Admin (Browser)    │
+│                                                                     │   └──────────────────────┘
+│   ┌──────────────┐   ┌──────────────┐   ┌────────────────────────┐ │     HTTPS (Admin API)
 │   │  Webhook     │   │  Conversation│   │   Intent / Command     │ │
 │   │  Handler     │──▶│  Manager     │──▶│   Dispatcher           │ │
 │   └──────────────┘   └──────────────┘   └──────────┬─────────────┘ │
@@ -43,6 +43,12 @@
 │                 │   (image URLs,      │  │   (append /          │  │
 │                 │    TTL management)  │  │    delete-all)       │  │
 │                 └─────────────────────┘  └──────────────────────┘  │
+│                                                                     │
+│   ┌─────────────────────────────────────────────────────────────┐  │
+│   │  Admin Console (Web UI)  ──▶  Admin API                     │  │
+│   │  (operator allowlist,         (config, audit, ops)          │  │
+│   │   CMS settings, audit log)                                  │  │
+│   └─────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -112,6 +118,26 @@
   - **Append**: POST a new ad to the CMS playlist.
   - **Delete all**: DELETE all ads from the CMS playlist.
 - Implements retry logic with exponential back-off for transient failures (see §2.4).
+
+#### 1.2.10 Admin Console (Web UI)
+- A browser-based web interface served by the Bot Application Server.
+- Provides a management interface for system administrators; it is not used for day-to-day ad creation.
+- Communicates exclusively with the Admin API; does not interact with WhatsApp or the CMS directly.
+- Responsibilities:
+  - Operator allowlist management (register, update, or deactivate authorised WhatsApp phone numbers).
+  - CMS connection settings (endpoint URL, authentication credentials).
+  - Default settings (language, currency, region).
+  - Active advertisement overview (via the CMS list endpoint, proxied through the Admin API).
+  - Audit log viewing.
+
+#### 1.2.11 Admin API (Configuration + Audit + Ops)
+- An HTTP REST API exposed by the Bot Application Server for administrative operations.
+- Accessible only through authenticated requests; not reachable via the WhatsApp message path.
+- Responsibilities:
+  - CRUD operations on the operator allowlist and `SystemConfig`.
+  - Persisting and retrieving `AuditEvent` records.
+  - Proxying CMS list queries to support the active advertisement overview in the Admin Console.
+- All Admin API endpoints require admin-level credentials (bearer token or session cookie); see §4.2.8 for the control-plane separation guarantee.
 
 ---
 
@@ -241,6 +267,28 @@ Operator ──["Start over / new design"]──▶ Conversation Manager
 | Idempotency (delete-all) | Idempotent by nature; 404 from CMS treated as success |
 | Timeout | HTTP client timeout 10 s; surface error to operator if exceeded |
 
+### 2.5 Admin Console Flows
+
+#### 2.5.1 Operator Onboarding / Update
+
+1. Admin logs in to the Admin Console (browser).
+2. Admin navigates to the operator allowlist section.
+3. Admin adds, updates, or deactivates an operator's WhatsApp phone number via the Admin API.
+4. The Admin API persists the change to `SystemConfig`; an `AuditEvent` is recorded.
+5. The updated allowlist takes effect immediately; the Webhook Handler uses the current allowlist for all subsequent message validation.
+
+#### 2.5.2 CMS Configuration
+
+1. Admin logs in to the Admin Console.
+2. Admin updates the TV CMS endpoint URL and/or authentication credentials via the Admin API.
+3. Admin API persists the new settings to `SystemConfig`; an `AuditEvent` is recorded.
+4. The TV CMS Client reads the updated configuration on the next CMS operation.
+
+#### 2.5.3 Overview and Audit Retrieval
+
+1. **Active advertisement overview**: Admin navigates to the overview page; the Admin Console calls the Admin API, which proxies the CMS list endpoint and returns the current playlist.
+2. **Audit log**: Admin navigates to the audit log page; the Admin Console calls the Admin API, which queries stored `AuditEvent` records and returns them in reverse-chronological order.
+
 ---
 
 ## 3. Intents and Commands
@@ -320,6 +368,11 @@ Additionally, product descriptions entered by the operator might inadvertently c
 - Before rendering or publishing, all LLM-produced field values are validated against expected types and length constraints.
 - Price must be a non-negative number; currency must be a recognised currency code (default: ILS).
 
+#### 4.2.8 Separation of Control Planes
+- WhatsApp messages **cannot** change any system configuration (operator allowlist, CMS endpoint, default language/currency, or Admin API credentials).
+- Configuration changes are only possible through the Admin API, which requires admin-level authentication that is independent of the operator's WhatsApp identity.
+- This separation ensures that even a fully compromised operator WhatsApp account cannot alter the bot's operating configuration or grant new operators access.
+
 ### 4.3 Limitations and Residual Risk
 
 | Risk | Mitigation | Residual Risk |
@@ -369,6 +422,31 @@ Additionally, product descriptions entered by the operator might inadvertently c
 │  ad_draft_id    : UUID (FK → AdDraft)     │
 │  published_at   : datetime                │
 └───────────────────────────────────────────┘
+
+┌───────────────────────────────────────────┐
+│             SystemConfig                  │
+│                                           │
+│  operator_allowlist : string[] (E.164)    │
+│  cms_base_url       : string              │
+│  default_language   : "he"|"en"|"ru"|"ar" │
+│  default_currency   : string (default ILS)│
+│  default_region     : string              │
+│  auth_secret_ref    : string (reference   │
+│                        to secrets manager)│
+│  updated_at         : datetime            │
+└───────────────────────────────────────────┘
+
+┌───────────────────────────────────────────┐
+│              AuditEvent                   │
+│                                           │
+│  id         : UUID                        │
+│  actor      : string (admin user/system)  │
+│  action     : string (e.g., "publish_ad", │
+│               "update_config",            │
+│               "delete_all")              │
+│  metadata   : JSON (contextual details)   │
+│  timestamp  : datetime                    │
+└───────────────────────────────────────────┘
 ```
 
 - **AdDraft** represents an advertisement in progress or completed. A single session may have at most one active draft.
@@ -378,6 +456,8 @@ Additionally, product descriptions entered by the operator might inadvertently c
   - `rendered_image_url`: URL of the current rendered ad image stored in the Media Store.
 - **ConversationSession** is a per-operator in-memory or cache-backed object that tracks state across multi-turn exchanges. The `language` field stores the operator's preferred conversation language (`he` = Hebrew (default), `en` = English, `ru` = Russian, `ar` = Arabic) and persists across sessions for the same phone number. Sessions expire after a configurable idle timeout (default: 30 minutes).
 - **PublishedAd** is an immutable record linking a draft to its CMS identifier. It is created on each successful publish and deleted when `delete_all` is executed.
+- **SystemConfig** is a singleton configuration record managed exclusively through the Admin API. It stores the operator allowlist, CMS connection details, locale defaults, and a reference to the admin auth secret in the secrets manager. It must never be readable or writable through WhatsApp message paths.
+- **AuditEvent** is an append-only record of every significant admin or system action. It is written by the Admin API on configuration changes and by the bot on ad lifecycle events (publish, delete-all). Used for operational oversight via the Admin Console.
 
 ---
 
