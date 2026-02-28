@@ -1,4 +1,4 @@
-# Implementation Plan — WhatsApp Advertisement Assistant Bot
+# Technology Decisions — WhatsApp Advertisement Assistant Bot
 
 This document records the concrete technology decisions and implementation approach for the WhatsApp Advertisement Assistant Bot, complementing the [Product Specification](product-spec.md) and [Architecture & Technical Specification](architecture-and-technical-spec.md).
 
