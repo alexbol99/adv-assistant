@@ -1,4 +1,4 @@
-# Product Specification v5 — WhatsApp Advertisement Assistant Bot
+# Product Specification — WhatsApp Advertisement Assistant Bot
 
 ## 1. Overview
 
