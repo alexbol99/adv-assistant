@@ -94,12 +94,13 @@ def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentServ
 def _build_ad_generation_service(settings: Settings):
     required = {
         "NANA_BANANA_API_KEY": settings.nana_banana_api_key,
-        "NANA_BANANA_BASE_URL": settings.nana_banana_base_url,
         "NANA_BANANA_CALLBACK_URL": settings.nana_banana_callback_url,
     }
-    if all(required.values()):
+    has_api_target = bool(settings.nana_banana_api_url or settings.nana_banana_base_url)
+    if all(required.values()) and has_api_target:
         return NanoBananaAdGenerationService(
             api_key=settings.nana_banana_api_key or "",
+            api_url=settings.nana_banana_api_url,
             base_url=settings.nana_banana_base_url or "",
             callback_url=settings.nana_banana_callback_url or "",
             model=settings.nana_banana_model,

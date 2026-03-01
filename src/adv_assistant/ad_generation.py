@@ -113,14 +113,15 @@ class NanoBananaAdGenerationService:
         self,
         *,
         api_key: str,
-        base_url: str,
+        api_url: str | None = None,
+        base_url: str | None = None,
         callback_url: str,
         model: str = "nanobanana-2",
         timeout_seconds: float = 20.0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_key = api_key
-        self._base_url = base_url.rstrip("/")
+        self._api_url = _resolve_generation_api_url(api_url=api_url, base_url=base_url)
         self._callback_url = callback_url
         self._model = model
         self._owns_client = client is None
@@ -173,7 +174,7 @@ class NanoBananaAdGenerationService:
 
         try:
             response = await self._client.post(
-                f"{self._base_url}/v1/generate",
+                self._api_url,
                 json=payload,
                 headers={"Authorization": f"Bearer {self._api_key}"},
             )
@@ -278,3 +279,11 @@ def _price_to_text(price: Decimal | None, currency: str) -> str:
     if price is None:
         return "not provided"
     return f"{price} {currency}"
+
+
+def _resolve_generation_api_url(*, api_url: str | None, base_url: str | None) -> str:
+    if api_url and api_url.strip():
+        return api_url.strip()
+    if base_url and base_url.strip():
+        return f"{base_url.rstrip('/')}/v1/generate"
+    raise ValueError("Either api_url or base_url is required")

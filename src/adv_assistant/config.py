@@ -71,6 +71,7 @@ class Settings:
     enrichment_http_timeout_seconds: int = 8
 
     nana_banana_api_key: str | None = None
+    nana_banana_api_url: str | None = None
     nana_banana_base_url: str | None = None
     nana_banana_model: str = "nanobanana-2"
     nana_banana_callback_url: str | None = None
@@ -119,6 +120,7 @@ class Settings:
             ),
             enrichment_http_timeout_seconds=_int_env("ENRICHMENT_HTTP_TIMEOUT_SECONDS", 8),
             nana_banana_api_key=_optional_env("NANA_BANANA_API_KEY"),
+            nana_banana_api_url=_optional_env("NANA_BANANA_API_URL"),
             nana_banana_base_url=_optional_env("NANA_BANANA_BASE_URL"),
             nana_banana_model=os.getenv("NANA_BANANA_MODEL", "nanobanana-2"),
             nana_banana_callback_url=_optional_env("NANA_BANANA_CALLBACK_URL"),

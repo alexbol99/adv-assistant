@@ -77,7 +77,8 @@
   - only normalized enrichment fields are stored in DB; raw provider payloads are not persisted
 - Ad generation configuration (Phase 7, callback-only):
   - `NANA_BANANA_API_KEY`
-  - `NANA_BANANA_BASE_URL`
+  - `NANA_BANANA_API_URL` (preferred explicit endpoint URL)
+  - `NANA_BANANA_BASE_URL` (optional fallback; app uses `<base_url>/v1/generate`)
   - `NANA_BANANA_MODEL` (default `nanobanana-2`)
   - `NANA_BANANA_CALLBACK_URL` (must point to `/callbacks/nano-banana`)
   - `NANA_BANANA_CALLBACK_SECRET` (HMAC secret for callback signature verification)
