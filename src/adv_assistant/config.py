@@ -11,6 +11,14 @@ def _int_env(name: str, default: int) -> int:
     return int(raw_value)
 
 
+def _optional_env(name: str) -> str | None:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return None
+    stripped = raw_value.strip()
+    return stripped or None
+
+
 @dataclass(slots=True)
 class Settings:
     app_name: str = "adv-assistant"
@@ -73,7 +81,7 @@ class Settings:
             tasks_oidc_audience=os.getenv("TASKS_OIDC_AUDIENCE"),
             tasks_allowed_service_account_email=os.getenv("TASKS_ALLOWED_SERVICE_ACCOUNT_EMAIL"),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
-            openai_base_url=os.getenv("OPENAI_BASE_URL"),
+            openai_base_url=_optional_env("OPENAI_BASE_URL"),
             llm_classification_model=os.getenv("LLM_CLASSIFICATION_MODEL", "gpt-4o-mini"),
             llm_extraction_model=os.getenv("LLM_EXTRACTION_MODEL", "gpt-4o-mini"),
             llm_reply_model=os.getenv("LLM_REPLY_MODEL", "gpt-4o-mini"),
