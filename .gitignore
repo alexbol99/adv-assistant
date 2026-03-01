@@ -30,3 +30,8 @@ dist/
 
 # Local databases
 *.db
+
+# Local environment files
+.env
+.env.*
+!.env.example
