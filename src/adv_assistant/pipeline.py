@@ -405,18 +405,17 @@ class InboundTaskProcessor:
         )
         if updated_draft is not None:
             current_draft = updated_draft
-
-        await audit_repo.log(
-            actor="system",
-            action="enrichment_applied",
-            operator_phone=payload.operator_phone,
-            metadata={
-                "wamid": payload.wamid,
-                "ean": ean,
-                "source": enriched.source,
-                "updated_fields": sorted(update_fields.keys()),
-            },
-        )
+            await audit_repo.log(
+                actor="system",
+                action="enrichment_applied",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "ean": ean,
+                    "source": enriched.source,
+                    "updated_fields": sorted(update_fields.keys()),
+                },
+            )
         return current_draft, None
 
     def _build_enrichment_update_fields(
