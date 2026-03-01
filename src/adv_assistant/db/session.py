@@ -25,7 +25,7 @@ def create_engine(database_url: str | None = None, *, echo: bool = False) -> Asy
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return async_sessionmaker(bind=engine, expire_on_commit=False, autoflush=False)
+    return async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 
 
 @asynccontextmanager
