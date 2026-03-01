@@ -31,6 +31,8 @@
    - `uv run uvicorn adv_assistant.main:app --reload --host 0.0.0.0 --port 8080`
 4. Run with Docker:
    - `docker compose up --build`
+   - create `.env` from `.env.example` and set a local-only `POSTGRES_PASSWORD`
+   - never reuse local `.env` credentials in staging/production
 
 ## Database Migrations
 
