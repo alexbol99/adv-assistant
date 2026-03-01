@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -5,6 +6,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
+from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.config import Settings
@@ -15,6 +17,11 @@ from adv_assistant.db.repositories import (
     ProcessedInboundMessageRepository,
 )
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
+from adv_assistant.enrichment import (
+    NoopProductLookupProvider,
+    OpenFoodFactsProvider,
+    ProviderChainEnrichmentService,
+)
 from adv_assistant.ingress import (
     extract_inbound_messages,
     is_within_replay_window,
@@ -35,6 +42,8 @@ from adv_assistant.tasks_queue import (
 )
 from adv_assistant.whatsapp import MetaWhatsAppClient, NoopWhatsAppClient, WhatsAppClient
 
+logger = logging.getLogger(__name__)
+
 
 def _build_task_authorizer(settings: Settings) -> TaskRequestAuthorizer:
     audience = settings.tasks_oidc_audience or settings.tasks_handler_url
@@ -54,6 +63,21 @@ def _build_whatsapp_client(settings: Settings) -> WhatsAppClient:
             graph_api_version=settings.whatsapp_graph_api_version,
         )
     return NoopWhatsAppClient()
+
+
+def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentService:
+    if not settings.enrichment_enabled:
+        return ProviderChainEnrichmentService(providers=[])
+    return ProviderChainEnrichmentService(
+        providers=[
+            OpenFoodFactsProvider(
+                base_url=settings.open_food_facts_base_url,
+                timeout_seconds=settings.enrichment_http_timeout_seconds,
+            ),
+            NoopProductLookupProvider("ean_fallback"),
+            NoopProductLookupProvider("web_search"),
+        ]
+    )
 
 
 def _build_task_enqueuer(
@@ -99,6 +123,49 @@ async def _should_send_unauthorized_rejection(
     )
 
 
+async def _validate_schema_compatibility(
+    *,
+    engine,
+    settings: Settings,
+) -> None:
+    if not settings.enrichment_enabled:
+        return
+
+    required_columns = {
+        "enriched_brand",
+        "enriched_category",
+        "enriched_description",
+        "enriched_image_url",
+        "enrichment_source",
+        "enrichment_unavailable_notified_at",
+    }
+
+    async with engine.begin() as connection:
+        table_names, ad_draft_columns = await connection.run_sync(_inspect_schema)
+
+    if "ad_draft" not in table_names:
+        raise RuntimeError(
+            "Database schema is not initialized (missing 'ad_draft'). "
+            "Run `uv run alembic upgrade head`."
+        )
+
+    missing_columns = sorted(required_columns - ad_draft_columns)
+    if missing_columns:
+        raise RuntimeError(
+            "Database schema is behind application code. Missing columns in 'ad_draft': "
+            f"{', '.join(missing_columns)}. Run `uv run alembic upgrade head`."
+        )
+
+
+def _inspect_schema(sync_connection) -> tuple[set[str], set[str]]:
+    schema_inspector = inspect(sync_connection)
+    table_names = set(schema_inspector.get_table_names())
+    ad_draft_columns: set[str] = set()
+    if "ad_draft" in table_names:
+        ad_draft_columns = {column["name"] for column in schema_inspector.get_columns("ad_draft")}
+    return table_names, ad_draft_columns
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     current_settings = settings or Settings.from_env()
 
@@ -119,7 +186,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         llm_gateway = NoopLLMGateway()
 
     whatsapp_client = _build_whatsapp_client(current_settings)
-    task_processor = InboundTaskProcessor(session_factory, llm_gateway=llm_gateway)
+    enrichment_service = _build_enrichment_service(current_settings)
+    task_processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=llm_gateway,
+        enrichment_service=enrichment_service,
+    )
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):
         result = await task_processor.process(payload)
@@ -130,6 +202,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     message=result.reply_text,
                 )
             except Exception as exc:
+                logger.exception(
+                    "Outbound reply delivery failed (wamid=%s, operator_phone=%s)",
+                    payload.wamid,
+                    payload.operator_phone,
+                )
                 async with session_scope(session_factory) as cleanup_session:
                     processed_repo = ProcessedInboundMessageRepository(cleanup_session)
                     audit_repo = AuditEventRepository(cleanup_session)
@@ -167,9 +244,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
+            await _validate_schema_compatibility(engine=engine, settings=current_settings)
             yield
         finally:
             await whatsapp_client.close()
+            await enrichment_service.close()
             await engine.dispose()
 
     app = FastAPI(title=current_settings.app_name, lifespan=lifespan)
@@ -312,19 +391,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 await task_enqueuer_value.enqueue_inbound(payload_obj)
             except Exception as exc:
-                await audit_repo.log(
-                    actor="system",
-                    action="inbound_enqueue_failed",
-                    operator_phone=event.operator_phone,
-                    metadata={
-                        "wamid": event.wamid,
-                        "tasks_mode": settings_value.tasks_mode,
-                        "error": str(exc),
-                    },
+                logger.exception(
+                    "Inbound enqueue/processing failed (wamid=%s, operator_phone=%s, mode=%s)",
+                    event.wamid,
+                    event.operator_phone,
+                    settings_value.tasks_mode,
                 )
+                async with session_scope(session_factory) as error_session:
+                    await AuditEventRepository(error_session).log(
+                        actor="system",
+                        action="inbound_enqueue_failed",
+                        operator_phone=event.operator_phone,
+                        metadata={
+                            "wamid": event.wamid,
+                            "tasks_mode": settings_value.tasks_mode,
+                            "error": str(exc),
+                        },
+                    )
                 if settings_value.tasks_mode == "cloud":
                     raise
-                continue
+                raise HTTPException(
+                    status_code=500,
+                    detail="Inbound processing failed",
+                ) from exc
             enqueued_count += 1
 
         return {"status": "accepted", "received": len(events), "enqueued": enqueued_count}

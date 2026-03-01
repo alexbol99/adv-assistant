@@ -59,6 +59,15 @@ class AdDraft(TimestampMixin, Base):
     promo_text: Mapped[str | None] = mapped_column(String(240), nullable=True)
     ean: Mapped[str | None] = mapped_column(String(32), nullable=True)
     photo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enriched_brand: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    enriched_category: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    enriched_description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    enriched_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enrichment_source: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    enrichment_unavailable_notified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     generation_job_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     preview_reference_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     rendered_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)

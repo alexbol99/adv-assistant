@@ -322,7 +322,7 @@ async def test_inline_mode_sends_reply_to_authorized_operator(
     assert "understood your message" in fake_sender.messages[0][1].lower()
 
 
-async def test_inline_mode_delivery_failure_does_not_return_500(
+async def test_inline_mode_delivery_failure_returns_500(
     phase2_app,
     phase2_client: AsyncClient,
 ) -> None:
@@ -342,8 +342,8 @@ async def test_inline_mode_delivery_failure_does_not_return_500(
         headers={"Content-Type": "application/json", "X-Hub-Signature-256": signature},
     )
 
-    assert response.status_code == 200
-    assert response.json()["enqueued"] == 0
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Inbound processing failed"
     assert (
         await _count_audit_events(
             phase2_app.state.session_factory,

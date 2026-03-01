@@ -10,6 +10,7 @@
 | [Architecture & Technical Specification](docs/architecture-and-technical-spec.md) | System components, data flow diagrams, conceptual data model, intents/commands, CMS integration interface, reliability, and prompt-injection guardrails. |
 | [Technology Decisions](docs/technology-decisions.md) | Concrete technology decisions: Python stack, GCP Cloud Run + Cloud Tasks deployment, Cloud SQL PostgreSQL, GCS media storage, Nano Banana ad generation, and product enrichment approach for Israeli grocery. |
 | [Workplan](docs/workplan.md) | Step-by-step implementation phases (0–11) for building the application. |
+| [Phase 5 Compliance Checklist](docs/phase5-compliance-checklist.md) | Pre-production legal/compliance checklist for enrichment sources and data handling. |
 
 ## Quick Summary
 
@@ -29,9 +30,11 @@
    - `uv run pytest`
 3. Run the app locally:
    - `uv run uvicorn adv_assistant.main:app --reload --host 0.0.0.0 --port 8080`
+   - or `make run` (auto-loads `.env` into process env)
 4. Run with Docker:
    - `docker compose up --build`
    - create `.env` from `.env.example` and set a local-only `POSTGRES_PASSWORD`
+   - app container loads `.env` via `env_file`
    - never reuse local `.env` credentials in staging/production
 
 ## Webhook + Task Pipeline (Phase 2)
@@ -66,11 +69,19 @@
   - `LLM_MAX_INPUT_CHARS` (default `2000`)
   - confirmation button payloads are deterministic and bypass LLM:
     - `confirm_publish`, `confirm_delete_all`, `cancel_delete_all`
+- Enrichment configuration (Phase 5):
+  - `ENRICHMENT_ENABLED` (default `true`)
+  - `OPEN_FOOD_FACTS_BASE_URL` (default `https://world.openfoodfacts.org`)
+  - `ENRICHMENT_HTTP_TIMEOUT_SECONDS` (default `8`)
+  - provider chain order: Open Food Facts -> EAN fallback -> web-search fallback
+  - only normalized enrichment fields are stored in DB; raw provider payloads are not persisted
 
 ## Database Migrations
 
 - Upgrade to latest schema:
   - `uv run alembic upgrade head`
+  - `make migrate` (recommended for local; auto-loads `.env` / `DATABASE_URL`)
+  - required after pulling schema changes (for example Phase 5 enrichment columns)
 - Create a new migration revision:
   - `uv run alembic revision -m "your message"`
 - Override migration DB URL:
