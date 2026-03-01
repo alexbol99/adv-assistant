@@ -19,6 +19,7 @@ dependencies = [
   "psycopg[binary]>=3.2.13,<4.0.0",
   "google-auth>=2.39.0,<3.0.0",
   "google-cloud-tasks>=2.19.3,<3.0.0",
+  "openai>=1.75.0,<2.0.0",
 ]
 
 [dependency-groups]

@@ -16,6 +16,7 @@ from adv_assistant.ingress import (
     is_within_replay_window,
     verify_x_hub_signature,
 )
+from adv_assistant.llm_gateway import NoopLLMGateway, OpenAILLMGateway
 from adv_assistant.pipeline import InboundTaskProcessor
 from adv_assistant.tasks_auth import (
     OidcTaskRequestAuthorizer,
@@ -99,7 +100,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     engine = create_engine(current_settings.database_url)
     session_factory = create_session_factory(engine)
-    task_processor = InboundTaskProcessor(session_factory)
+    if current_settings.openai_api_key:
+        llm_gateway = OpenAILLMGateway(
+            api_key=current_settings.openai_api_key,
+            base_url=current_settings.openai_base_url,
+            classification_model=current_settings.llm_classification_model,
+            extraction_model=current_settings.llm_extraction_model,
+            reply_model=current_settings.llm_reply_model,
+            max_retries=current_settings.llm_max_retries,
+            timeout_seconds=current_settings.llm_timeout_seconds,
+            max_input_chars=current_settings.llm_max_input_chars,
+        )
+    else:
+        llm_gateway = NoopLLMGateway()
+
+    task_processor = InboundTaskProcessor(session_factory, llm_gateway=llm_gateway)
     task_enqueuer = _build_task_enqueuer(settings=current_settings, processor=task_processor)
     task_authorizer = _build_task_authorizer(current_settings)
     whatsapp_client = _build_whatsapp_client(current_settings)

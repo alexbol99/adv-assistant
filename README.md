@@ -57,6 +57,15 @@
   - Replay window is configurable via `REPLAY_WINDOW_SECONDS` (default `300`)
   - Unauthorized numbers receive one rejection message per `UNAUTHORIZED_REJECTION_WINDOW_MINUTES` (default `60`)
   - `POST /tasks/process-message` accepts only valid OIDC bearer tokens
+- LLM configuration (Phase 4):
+  - `OPENAI_API_KEY`
+  - optional `OPENAI_BASE_URL`
+  - `LLM_CLASSIFICATION_MODEL`, `LLM_EXTRACTION_MODEL`, `LLM_REPLY_MODEL`
+  - `LLM_MAX_RETRIES` (schema mismatch retry count, default `1`)
+  - `LLM_TIMEOUT_SECONDS` (default `15`)
+  - `LLM_MAX_INPUT_CHARS` (default `2000`)
+  - confirmation button payloads are deterministic and bypass LLM:
+    - `confirm_publish`, `confirm_delete_all`, `cancel_delete_all`
 
 ## Database Migrations
 

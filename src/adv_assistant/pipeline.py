@@ -1,3 +1,4 @@
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,6 +14,18 @@ from adv_assistant.db.repositories import (
     ProcessedInboundMessageRepository,
 )
 from adv_assistant.db.session import session_scope
+from adv_assistant.llm_gateway import (
+    BUTTON_CANCEL_DELETE_ALL,
+    BUTTON_CONFIRM_DELETE_ALL,
+    BUTTON_CONFIRM_PUBLISH,
+    Intent,
+    LLMGateway,
+    LLMGatewayError,
+    LLMSchemaError,
+    NoopLLMGateway,
+    extract_button_payload_id,
+    sanitize_user_text,
+)
 from adv_assistant.tasks_queue import InboundTaskPayload
 
 
@@ -22,6 +35,10 @@ class ProcessInboundResult:
     unauthorized_operator: bool = False
     session_created: bool = False
     draft_created: bool = False
+    llm_used: bool = False
+    intent: str | None = None
+    deterministic_action: str | None = None
+    reply_text: str | None = None
 
     @property
     def status(self) -> str:
@@ -44,8 +61,14 @@ def _extract_text(raw_message: dict[str, Any]) -> str | None:
 
 
 class InboundTaskProcessor:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        llm_gateway: LLMGateway | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._llm_gateway = llm_gateway or NoopLLMGateway()
 
     async def process(self, payload: InboundTaskPayload) -> ProcessInboundResult:
         async with session_scope(self._session_factory) as session:
@@ -77,20 +100,10 @@ class InboundTaskProcessor:
             session_created = session_obj is None
 
             history: list[dict[str, str]] = []
-            current_draft_id = None
+            current_draft_id: uuid.UUID | None = None
             if session_obj is not None:
                 history = list(session_obj.history)
                 current_draft_id = session_obj.current_draft_id
-
-            incoming_text = _extract_text(payload.raw_message)
-            if incoming_text is not None:
-                history.append(
-                    {
-                        "role": "user",
-                        "text": incoming_text,
-                        "wamid": payload.wamid,
-                    }
-                )
 
             draft_created = False
             if current_draft_id is not None:
@@ -115,11 +128,136 @@ class InboundTaskProcessor:
                 current_draft_id = created_draft.id
                 draft_created = True
 
+            current_draft = await draft_repo.get_by_id(current_draft_id)
+            if current_draft is None:
+                raise RuntimeError("current draft was not created")
+
+            incoming_text = _extract_text(payload.raw_message)
+            button_payload_id = extract_button_payload_id(payload.raw_message)
+            llm_used = False
+            intent_value: str | None = None
+            deterministic_action: str | None = None
+            reply_text: str | None = None
+
+            if button_payload_id:
+                history.append(
+                    {
+                        "role": "user",
+                        "text": f"[button:{button_payload_id}]",
+                        "wamid": payload.wamid,
+                    }
+                )
+                deterministic_action, reply_text = _resolve_button_action(button_payload_id)
+                intent_value = deterministic_action
+                await audit_repo.log(
+                    actor="system",
+                    action="button_callback_resolved",
+                    operator_phone=payload.operator_phone,
+                    metadata={"wamid": payload.wamid, "button_id": button_payload_id},
+                )
+            elif incoming_text is not None:
+                sanitized_text = sanitize_user_text(incoming_text, max_chars=2000)
+                history.append(
+                    {
+                        "role": "user",
+                        "text": sanitized_text,
+                        "wamid": payload.wamid,
+                    }
+                )
+                try:
+                    classification = await self._llm_gateway.classify_intent(
+                        message_text=sanitized_text,
+                        language=operator.language,
+                        history=history,
+                    )
+                    llm_used = self._llm_gateway.uses_external_llm or llm_used
+                    intent_value = classification.intent.value
+
+                    extracted_fields = None
+                    if classification.intent in {
+                        Intent.CREATE_AD,
+                        Intent.REGENERATE_WITH_REFERENCE,
+                        Intent.REGENERATE_FROM_SCRATCH,
+                    }:
+                        extracted_fields = await self._llm_gateway.extract_ad_fields(
+                            message_text=sanitized_text,
+                            language=operator.language,
+                            history=history,
+                        )
+                        llm_used = self._llm_gateway.uses_external_llm or llm_used
+                        update_fields = extracted_fields.to_draft_update_fields()
+                        if update_fields:
+                            updated_draft = await draft_repo.update_for_operator_with_version(
+                                draft_id=current_draft.id,
+                                operator_phone=payload.operator_phone,
+                                expected_version=current_draft.version,
+                                **update_fields,
+                            )
+                            if updated_draft is None:
+                                reply_text = (
+                                    "This draft was already changed. Please refresh and try again."
+                                )
+                                await audit_repo.log(
+                                    actor="system",
+                                    action="draft_stale_write_detected",
+                                    operator_phone=payload.operator_phone,
+                                    metadata={"wamid": payload.wamid},
+                                )
+                            else:
+                                current_draft = updated_draft
+
+                    if reply_text is None:
+                        if classification.intent in {Intent.PUBLISH_AD, Intent.DELETE_ALL}:
+                            reply_text = (
+                                "Please use the confirmation button to continue with this action."
+                            )
+                        else:
+                            reply = await self._llm_gateway.generate_reply(
+                                intent=classification.intent,
+                                message_text=sanitized_text,
+                                language=operator.language,
+                                extracted_fields=extracted_fields,
+                            )
+                            llm_used = self._llm_gateway.uses_external_llm or llm_used
+                            reply_text = reply.reply_text
+                except LLMSchemaError:
+                    reply_text = (
+                        "I could not safely parse your request. "
+                        "Please rephrase in one short message."
+                    )
+                    await audit_repo.log(
+                        actor="system",
+                        action="llm_schema_mismatch_fallback",
+                        operator_phone=payload.operator_phone,
+                        metadata={"wamid": payload.wamid},
+                    )
+                except LLMGatewayError:
+                    reply_text = "Temporary AI service issue. Please try again in a moment."
+                    await audit_repo.log(
+                        actor="system",
+                        action="llm_gateway_failure_fallback",
+                        operator_phone=payload.operator_phone,
+                        metadata={"wamid": payload.wamid},
+                    )
+            else:
+                reply_text = (
+                    "Unsupported message type. Please send text or use confirmation buttons."
+                )
+
+            if reply_text is not None:
+                history.append(
+                    {
+                        "role": "assistant",
+                        "text": reply_text,
+                        "wamid": payload.wamid,
+                    }
+                )
+
             await session_repo.create_or_update(
                 operator_phone=payload.operator_phone,
                 language=operator.language if session_created else None,
                 history=history,
-                current_draft_id=current_draft_id,
+                current_draft_id=current_draft.id,
                 last_active_at=now,
             )
 
@@ -146,6 +284,9 @@ class InboundTaskProcessor:
                     "wamid": payload.wamid,
                     "session_created": session_created,
                     "draft_created": draft_created,
+                    "intent": intent_value,
+                    "deterministic_action": deterministic_action,
+                    "llm_used": llm_used,
                 },
             )
             return ProcessInboundResult(
@@ -153,4 +294,24 @@ class InboundTaskProcessor:
                 unauthorized_operator=False,
                 session_created=session_created,
                 draft_created=draft_created,
+                llm_used=llm_used,
+                intent=intent_value,
+                deterministic_action=deterministic_action,
+                reply_text=reply_text,
             )
+
+
+def _resolve_button_action(button_id: str) -> tuple[str | None, str]:
+    if button_id == BUTTON_CONFIRM_PUBLISH:
+        return (
+            "confirm_publish",
+            "Publish confirmed. Publishing flow will be handled in the next phase.",
+        )
+    if button_id == BUTTON_CONFIRM_DELETE_ALL:
+        return (
+            "confirm_delete_all",
+            "Delete-all confirmed. Deletion flow will be handled in the next phase.",
+        )
+    if button_id == BUTTON_CANCEL_DELETE_ALL:
+        return "cancel_delete_all", "Delete-all canceled."
+    return None, "Unknown confirmation button."
