@@ -28,6 +28,13 @@ from adv_assistant.ingress import (
     verify_x_hub_signature,
 )
 from adv_assistant.llm_gateway import NoopLLMGateway, OpenAILLMGateway
+from adv_assistant.media_ingest import (
+    DefaultOperatorPhotoIngestor,
+    NoopWhatsAppMediaClient,
+    OperatorPhotoIngestor,
+    WhatsAppMediaClient,
+)
+from adv_assistant.media_store import GCSMediaStore, MediaStore, NoopMediaStore
 from adv_assistant.pipeline import InboundTaskProcessor
 from adv_assistant.tasks_auth import (
     OidcTaskRequestAuthorizer,
@@ -40,7 +47,12 @@ from adv_assistant.tasks_queue import (
     InlineTaskEnqueuer,
     TaskEnqueuer,
 )
-from adv_assistant.whatsapp import MetaWhatsAppClient, NoopWhatsAppClient, WhatsAppClient
+from adv_assistant.whatsapp import (
+    MetaWhatsAppClient,
+    MetaWhatsAppMediaClient,
+    NoopWhatsAppClient,
+    WhatsAppClient,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +89,43 @@ def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentServ
             NoopProductLookupProvider("ean_fallback"),
             NoopProductLookupProvider("web_search"),
         ]
+    )
+
+
+def _build_media_store(settings: Settings) -> MediaStore:
+    mode = settings.media_store_mode.strip().lower()
+    if mode == "noop":
+        return NoopMediaStore()
+    if mode == "gcs":
+        if not settings.media_gcs_bucket:
+            raise RuntimeError("MEDIA_GCS_BUCKET is required when MEDIA_STORE_MODE=gcs")
+        return GCSMediaStore(
+            bucket_name=settings.media_gcs_bucket,
+            project_id=settings.gcp_project_id,
+            public_base_url=settings.media_gcs_public_base_url,
+            object_prefix=settings.media_gcs_object_prefix,
+        )
+    raise RuntimeError(f"Unsupported MEDIA_STORE_MODE='{settings.media_store_mode}'")
+
+
+def _build_whatsapp_media_client(settings: Settings) -> WhatsAppMediaClient:
+    if settings.whatsapp_access_token:
+        return MetaWhatsAppMediaClient(
+            access_token=settings.whatsapp_access_token,
+            graph_api_version=settings.whatsapp_graph_api_version,
+            timeout_seconds=settings.whatsapp_media_timeout_seconds,
+        )
+    return NoopWhatsAppMediaClient()
+
+
+def _build_operator_photo_ingestor(
+    *,
+    media_store: MediaStore,
+    whatsapp_media_client: WhatsAppMediaClient,
+) -> OperatorPhotoIngestor:
+    return DefaultOperatorPhotoIngestor(
+        media_client=whatsapp_media_client,
+        media_store=media_store,
     )
 
 
@@ -166,6 +215,23 @@ def _inspect_schema(sync_connection) -> tuple[set[str], set[str]]:
     return table_names, ad_draft_columns
 
 
+async def _validate_media_lifecycle(
+    *,
+    settings: Settings,
+    media_store: MediaStore,
+) -> None:
+    if not settings.media_verify_lifecycle_on_startup:
+        return
+    if settings.media_store_mode.strip().lower() != "gcs":
+        return
+    has_rule = await media_store.has_delete_lifecycle_rule(days=settings.media_lifecycle_days)
+    if not has_rule:
+        raise RuntimeError(
+            "GCS lifecycle policy mismatch: expected a Delete rule with age="
+            f"{settings.media_lifecycle_days} days on bucket '{settings.media_gcs_bucket}'."
+        )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     current_settings = settings or Settings.from_env()
 
@@ -186,11 +252,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         llm_gateway = NoopLLMGateway()
 
     whatsapp_client = _build_whatsapp_client(current_settings)
+    whatsapp_media_client = _build_whatsapp_media_client(current_settings)
     enrichment_service = _build_enrichment_service(current_settings)
+    media_store = _build_media_store(current_settings)
+    operator_photo_ingestor = _build_operator_photo_ingestor(
+        media_store=media_store,
+        whatsapp_media_client=whatsapp_media_client,
+    )
     task_processor = InboundTaskProcessor(
         session_factory,
         llm_gateway=llm_gateway,
         enrichment_service=enrichment_service,
+        operator_photo_ingestor=operator_photo_ingestor,
     )
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):
@@ -245,10 +318,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             await _validate_schema_compatibility(engine=engine, settings=current_settings)
+            await _validate_media_lifecycle(settings=current_settings, media_store=media_store)
             yield
         finally:
+            await operator_photo_ingestor.close()
             await whatsapp_client.close()
+            await whatsapp_media_client.close()
             await enrichment_service.close()
+            await media_store.close()
             await engine.dispose()
 
     app = FastAPI(title=current_settings.app_name, lifespan=lifespan)
@@ -260,6 +337,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.task_enqueuer = task_enqueuer
     app.state.task_authorizer = task_authorizer
     app.state.whatsapp_client = whatsapp_client
+    app.state.whatsapp_media_client = whatsapp_media_client
+    app.state.media_store = media_store
     app.state.process_and_maybe_send_reply = process_and_maybe_send_reply
 
     def get_settings() -> Settings:

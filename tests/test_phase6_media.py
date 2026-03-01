@@ -1,0 +1,272 @@
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from adv_assistant.db.base import Base
+from adv_assistant.db.models import AdDraft, AuditEvent, ConversationSession
+from adv_assistant.db.repositories import OperatorRepository
+from adv_assistant.db.session import create_engine, create_session_factory, session_scope
+from adv_assistant.enrichment import EnrichedProduct
+from adv_assistant.media_ingest import (
+    DownloadedMedia,
+    IngestedOperatorPhoto,
+    MediaIngestError,
+    OperatorPhotoIngestor,
+)
+from adv_assistant.media_store import GCSMediaStore, MediaStore, MediaUpload
+from adv_assistant.pipeline import InboundTaskProcessor
+from adv_assistant.tasks_queue import InboundTaskPayload
+
+pytestmark = pytest.mark.anyio
+
+
+class FakeStorageBlob:
+    def __init__(self, bucket: "FakeStorageBucket", name: str) -> None:
+        self._bucket = bucket
+        self._name = name
+
+    def upload_from_string(self, content: bytes, content_type: str) -> None:
+        self._bucket.uploads[self._name] = (content, content_type)
+
+
+class FakeStorageBucket:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.uploads: dict[str, tuple[bytes, str]] = {}
+        self.lifecycle_rules: list[dict[str, object]] = []
+        self.reloaded = False
+
+    def blob(self, name: str) -> FakeStorageBlob:
+        return FakeStorageBlob(self, name)
+
+    def reload(self) -> None:
+        self.reloaded = True
+
+
+class FakeStorageClient:
+    def __init__(self) -> None:
+        self._buckets: dict[str, FakeStorageBucket] = {}
+
+    def bucket(self, name: str) -> FakeStorageBucket:
+        if name not in self._buckets:
+            self._buckets[name] = FakeStorageBucket(name)
+        return self._buckets[name]
+
+
+class StaticMediaStore(MediaStore):
+    def __init__(self, public_url: str) -> None:
+        self.public_url = public_url
+        self.last_upload: tuple[bytes, str, str | None] | None = None
+
+    async def upload_bytes(
+        self,
+        *,
+        content: bytes,
+        content_type: str,
+        object_name: str | None = None,
+        suffix: str | None = None,
+    ) -> MediaUpload:
+        self.last_upload = (content, content_type, suffix)
+        return MediaUpload(
+            object_name=object_name or f"operator-photos/mock{suffix or ''}",
+            public_url=self.public_url,
+        )
+
+    async def has_delete_lifecycle_rule(self, *, days: int) -> bool:
+        return True
+
+    async def close(self) -> None:
+        return None
+
+
+class StaticWhatsAppMediaClient:
+    def __init__(self, downloaded: DownloadedMedia) -> None:
+        self.downloaded = downloaded
+        self.calls = 0
+
+    async def download_media(self, *, media_id: str) -> DownloadedMedia:
+        self.calls += 1
+        return self.downloaded
+
+    async def close(self) -> None:
+        return None
+
+
+class StaticPhotoIngestor(OperatorPhotoIngestor):
+    def __init__(
+        self, result: IngestedOperatorPhoto | None = None, error: str | None = None
+    ) -> None:
+        self._result = result
+        self._error = error
+
+    async def ingest_whatsapp_image(self, *, media_id: str) -> IngestedOperatorPhoto:
+        if self._error:
+            raise MediaIngestError(self._error)
+        if self._result is None:
+            raise MediaIngestError("missing mock result")
+        return self._result
+
+    async def close(self) -> None:
+        return None
+
+
+class StaticEnrichmentService:
+    def __init__(self, *, decoded_ean: str | None, enriched: EnrichedProduct | None) -> None:
+        self._decoded_ean = decoded_ean
+        self._enriched = enriched
+
+    async def decode_ean_from_image(self, image_bytes: bytes) -> str | None:
+        return self._decoded_ean
+
+    async def enrich_by_ean(self, *, ean: str, language: str) -> EnrichedProduct | None:
+        return self._enriched
+
+    async def close(self) -> None:
+        return None
+
+
+@pytest.fixture()
+async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    db_path = tmp_path / "phase6.db"
+    engine = create_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = create_session_factory(engine)
+    yield factory
+    await engine.dispose()
+
+
+async def _seed_operator(factory: async_sessionmaker[AsyncSession], phone: str) -> None:
+    async with session_scope(factory) as session:
+        await OperatorRepository(session).create(phone=phone, active=True)
+
+
+async def test_gcs_media_store_upload_and_lifecycle_rule_check() -> None:
+    fake_client = FakeStorageClient()
+    bucket = fake_client.bucket("test-media")
+    bucket.lifecycle_rules = [{"action": {"type": "Delete"}, "condition": {"age": 90}}]
+    store = GCSMediaStore(bucket_name="test-media", client=fake_client)  # type: ignore[arg-type]
+
+    upload = await store.upload_bytes(content=b"img", content_type="image/png", suffix=".png")
+
+    assert upload.object_name.startswith("operator-photos/")
+    assert upload.object_name.endswith(".png")
+    assert upload.public_url.startswith("https://storage.googleapis.com/test-media/")
+    assert bucket.uploads[upload.object_name] == (b"img", "image/png")
+    assert await store.has_delete_lifecycle_rule(days=90) is True
+    assert await store.has_delete_lifecycle_rule(days=30) is False
+    assert bucket.reloaded is True
+
+
+async def test_default_operator_photo_ingestor_uploads_image() -> None:
+    media_store = StaticMediaStore(public_url="https://storage.googleapis.com/bucket/operator.jpg")
+    media_client = StaticWhatsAppMediaClient(
+        DownloadedMedia(content=b"image-bytes", content_type="image/jpeg")
+    )
+    from adv_assistant.media_ingest import DefaultOperatorPhotoIngestor
+
+    ingestor = DefaultOperatorPhotoIngestor(media_client=media_client, media_store=media_store)
+    ingested = await ingestor.ingest_whatsapp_image(media_id="abc123")
+
+    assert ingested.public_url.endswith("/operator.jpg")
+    assert ingested.content == b"image-bytes"
+    assert media_store.last_upload is not None
+    assert media_store.last_upload[2] == ".jpg"
+
+
+async def test_default_operator_photo_ingestor_rejects_non_image() -> None:
+    media_store = StaticMediaStore(public_url="https://storage.googleapis.com/bucket/object")
+    media_client = StaticWhatsAppMediaClient(
+        DownloadedMedia(content=b"binary", content_type="application/pdf")
+    )
+    from adv_assistant.media_ingest import DefaultOperatorPhotoIngestor
+
+    ingestor = DefaultOperatorPhotoIngestor(media_client=media_client, media_store=media_store)
+
+    with pytest.raises(MediaIngestError):
+        await ingestor.ingest_whatsapp_image(media_id="abc123")
+
+
+async def test_pipeline_processes_image_message_and_updates_draft(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000601"
+    await _seed_operator(session_factory, phone)
+    processor = InboundTaskProcessor(
+        session_factory,
+        operator_photo_ingestor=StaticPhotoIngestor(
+            IngestedOperatorPhoto(
+                public_url="https://storage.googleapis.com/test-media/operator-photos/p1.jpg",
+                object_name="operator-photos/p1.jpg",
+                content_type="image/jpeg",
+                content=b"jpeg-bytes",
+            )
+        ),
+        enrichment_service=StaticEnrichmentService(
+            decoded_ean="7290004127326",
+            enriched=EnrichedProduct(
+                product_name="קוטג תנובה",
+                brand="תנובה",
+                source="open_food_facts",
+            ),
+        ),
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase6-image-1",
+            operator_phone=phone,
+            raw_message={"type": "image", "image": {"id": "meta-media-1"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.deterministic_action == "operator_photo_ingest"
+    assert result.reply_text is not None
+    assert "7290004127326" in result.reply_text
+
+    async with session_scope(session_factory) as session:
+        session_obj = (
+            await session.execute(
+                select(ConversationSession).where(ConversationSession.operator_phone == phone)
+            )
+        ).scalar_one()
+        draft = await session.get(AdDraft, session_obj.current_draft_id)
+        assert draft is not None
+        assert draft.photo_url == "https://storage.googleapis.com/test-media/operator-photos/p1.jpg"
+        assert draft.ean == "7290004127326"
+        assert draft.product_name == "קוטג תנובה"
+
+        audit_rows = (
+            await session.execute(
+                select(AuditEvent).where(AuditEvent.action == "operator_photo_ingested")
+            )
+        ).scalars()
+        assert len(list(audit_rows)) == 1
+
+
+async def test_pipeline_image_ingest_failure_is_user_visible(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000602"
+    await _seed_operator(session_factory, phone)
+    processor = InboundTaskProcessor(
+        session_factory,
+        operator_photo_ingestor=StaticPhotoIngestor(error="meta 401"),
+        enrichment_service=StaticEnrichmentService(decoded_ean=None, enriched=None),
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase6-image-err",
+            operator_phone=phone,
+            raw_message={"type": "image", "image": {"id": "meta-media-err"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.reply_text is not None
+    assert "could not process your photo" in result.reply_text.lower()

@@ -2,6 +2,8 @@ from typing import Protocol
 
 import httpx
 
+from adv_assistant.media_ingest import DownloadedMedia, MediaIngestError
+
 
 class WhatsAppClient(Protocol):
     async def send_text(self, *, to_phone: str, message: str) -> None: ...
@@ -49,3 +51,61 @@ class MetaWhatsAppClient:
 
     async def close(self) -> None:
         await self._client.aclose()
+
+
+class MetaWhatsAppMediaClient:
+    def __init__(
+        self,
+        *,
+        access_token: str,
+        graph_api_version: str,
+        timeout_seconds: float = 15.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._graph_api_version = graph_api_version
+        self._owns_client = client is None
+        self._client = client or httpx.AsyncClient(
+            timeout=timeout_seconds,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+    async def download_media(self, *, media_id: str) -> DownloadedMedia:
+        try:
+            metadata_url = f"https://graph.facebook.com/{self._graph_api_version}/{media_id}"
+            metadata_response = await self._client.get(metadata_url)
+            metadata_response.raise_for_status()
+            metadata_payload = metadata_response.json()
+            download_url = metadata_payload.get("url")
+            if not isinstance(download_url, str) or not download_url.strip():
+                raise MediaIngestError("Meta media response does not include download URL")
+
+            media_response = await self._client.get(download_url)
+            media_response.raise_for_status()
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            raise MediaIngestError(f"Meta media download failed: {exc}") from exc
+
+        metadata_content_type = metadata_payload.get("mime_type")
+        response_content_type = media_response.headers.get("content-type")
+        resolved_content_type = _resolve_content_type(
+            response_content_type=response_content_type,
+            metadata_content_type=metadata_content_type
+            if isinstance(metadata_content_type, str)
+            else None,
+        )
+        return DownloadedMedia(content=media_response.content, content_type=resolved_content_type)
+
+    async def close(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+
+def _resolve_content_type(
+    *,
+    response_content_type: str | None,
+    metadata_content_type: str | None,
+) -> str:
+    if response_content_type:
+        return response_content_type.split(";")[0].strip().lower()
+    if metadata_content_type:
+        return metadata_content_type.split(";")[0].strip().lower()
+    return "application/octet-stream"
