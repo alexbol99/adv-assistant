@@ -1,0 +1,66 @@
+import os
+from dataclasses import dataclass, field
+
+from adv_assistant.db.session import get_database_url
+
+
+def _int_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return int(raw_value)
+
+
+@dataclass(slots=True)
+class Settings:
+    app_name: str = "adv-assistant"
+    database_url: str = field(default_factory=get_database_url)
+
+    meta_verify_token: str = "change-me"
+    meta_app_secret: str | None = None
+    replay_window_seconds: int = 300
+    unauthorized_rejection_window_minutes: int = 60
+    unauthorized_rejection_message: str = (
+        "You are not authorized to use this assistant. Please contact your administrator."
+    )
+
+    whatsapp_access_token: str | None = None
+    whatsapp_phone_number_id: str | None = None
+    whatsapp_graph_api_version: str = "v21.0"
+
+    tasks_mode: str = "inline"
+    gcp_project_id: str | None = None
+    tasks_region: str | None = None
+    tasks_queue: str | None = None
+    tasks_handler_url: str | None = None
+    tasks_service_account_email: str | None = None
+    tasks_oidc_audience: str | None = None
+    tasks_allowed_service_account_email: str | None = None
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        return cls(
+            app_name=os.getenv("APP_NAME", "adv-assistant"),
+            database_url=get_database_url(),
+            meta_verify_token=os.getenv("VERIFY_TOKEN", "change-me"),
+            meta_app_secret=os.getenv("META_APP_SECRET"),
+            replay_window_seconds=_int_env("REPLAY_WINDOW_SECONDS", 300),
+            unauthorized_rejection_window_minutes=_int_env(
+                "UNAUTHORIZED_REJECTION_WINDOW_MINUTES", 60
+            ),
+            unauthorized_rejection_message=os.getenv(
+                "UNAUTHORIZED_REJECTION_MESSAGE",
+                "You are not authorized to use this assistant. Please contact your administrator.",
+            ),
+            whatsapp_access_token=os.getenv("WHATSAPP_ACCESS_TOKEN"),
+            whatsapp_phone_number_id=os.getenv("PHONE_NUMBER_ID"),
+            whatsapp_graph_api_version=os.getenv("GRAPH_API_VERSION", "v21.0"),
+            tasks_mode=os.getenv("TASKS_MODE", "inline"),
+            gcp_project_id=os.getenv("GCP_PROJECT_ID"),
+            tasks_region=os.getenv("TASKS_REGION") or os.getenv("GCP_REGION"),
+            tasks_queue=os.getenv("TASKS_QUEUE"),
+            tasks_handler_url=os.getenv("TASKS_HANDLER_URL"),
+            tasks_service_account_email=os.getenv("TASKS_SERVICE_ACCOUNT_EMAIL"),
+            tasks_oidc_audience=os.getenv("TASKS_OIDC_AUDIENCE"),
+            tasks_allowed_service_account_email=os.getenv("TASKS_ALLOWED_SERVICE_ACCOUNT_EMAIL"),
+        )

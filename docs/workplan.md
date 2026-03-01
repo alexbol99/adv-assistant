@@ -24,7 +24,7 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 - Configure `ruff`, `pytest`, `pytest-asyncio`, pre-commit, Dockerfile, local compose.
 - Provision GCP services: Cloud Run, Cloud Tasks, Cloud SQL, GCS, Secret Manager.
 - Create GCS bucket (`me-west1`) with public object read and 90-day lifecycle rule.
-- Create Cloud Tasks queue (`me-west1`) with retry/backoff policy.
+- Create Cloud Tasks queue (`me-central1`) with retry/backoff policy.
 - Create environments: `development`, `staging`, `production`.
 - CI pipeline: lint -> test -> build -> deploy (staging).
 

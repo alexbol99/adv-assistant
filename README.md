@@ -34,6 +34,30 @@
    - create `.env` from `.env.example` and set a local-only `POSTGRES_PASSWORD`
    - never reuse local `.env` credentials in staging/production
 
+## Webhook + Task Pipeline (Phase 2)
+
+- Required webhook env vars:
+  - `VERIFY_TOKEN`
+  - `META_APP_SECRET`
+- WhatsApp send API env vars (for unauthorized rejection message delivery):
+  - `WHATSAPP_ACCESS_TOKEN`
+  - `PHONE_NUMBER_ID`
+  - optional `GRAPH_API_VERSION` (default `v21.0`)
+- Runtime modes:
+  - `TASKS_MODE=inline` for local development (task payload is processed in-process)
+  - `TASKS_MODE=cloud` for Cloud Tasks enqueue
+- Cloud mode requires:
+  - `GCP_PROJECT_ID`, `TASKS_REGION`, `TASKS_QUEUE`
+  - `TASKS_HANDLER_URL`
+  - `TASKS_SERVICE_ACCOUNT_EMAIL`
+  - `TASKS_OIDC_AUDIENCE` (optional, defaults to `TASKS_HANDLER_URL`)
+  - `TASKS_ALLOWED_SERVICE_ACCOUNT_EMAIL` (recommended)
+- Security controls:
+  - Webhook POST must pass `X-Hub-Signature-256` validation
+  - Replay window is configurable via `REPLAY_WINDOW_SECONDS` (default `300`)
+  - Unauthorized numbers receive one rejection message per `UNAUTHORIZED_REJECTION_WINDOW_MINUTES` (default `60`)
+  - `POST /tasks/process-message` accepts only valid OIDC bearer tokens
+
 ## Database Migrations
 
 - Upgrade to latest schema:
@@ -57,6 +81,9 @@ The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 ## Infrastructure Bootstrap Helper
 
 Use `scripts/bootstrap_gcp.sh` for initial GCP bootstrap (Cloud Run APIs, Cloud SQL, GCS bucket, Cloud Tasks queue).
+
+Note: Cloud Tasks may not be available in the same region as Cloud Run/Cloud SQL.  
+Set `TASKS_REGION` explicitly (for this project, use `me-central1`).
 
 ## DB Access Provisioning (Staging/Production)
 

@@ -43,6 +43,7 @@ The bot application server is deployed as a **stateless, containerised service o
 - The task endpoint accepts only OIDC-authenticated Cloud Tasks invocations; unauthenticated callers are rejected.
 - Inbound processing is deduplicated by WhatsApp message ID (`wamid`) with a 30-day processed-message retention window.
 - Queue configuration: max retries = 5; min back-off = 5 s; max back-off = 300 s.
+- Queue location: `me-central1` (Cloud Tasks is not available in `me-west1` for this project).
 
 ---
 

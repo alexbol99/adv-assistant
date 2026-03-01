@@ -226,6 +226,24 @@ class AuditEventRepository:
         )
         return list(result.scalars().all())
 
+    async def has_action_since(
+        self,
+        *,
+        action: str,
+        operator_phone: str,
+        since: datetime,
+    ) -> bool:
+        result = await self.session.execute(
+            select(AuditEvent.id)
+            .where(
+                AuditEvent.action == action,
+                AuditEvent.operator_phone == operator_phone,
+                AuditEvent.timestamp >= since,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
 
 class ProcessedInboundMessageRepository:
     def __init__(self, session: AsyncSession) -> None:
