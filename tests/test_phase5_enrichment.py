@@ -81,6 +81,30 @@ class FakeGateway:
         return ReplyGeneration(reply_text="Draft updated.")
 
 
+class UnknownIntentGateway:
+    uses_external_llm = True
+
+    async def classify_intent(
+        self, *, message_text: str, language: str, history: list[dict[str, str]]
+    ) -> IntentClassification:
+        return IntentClassification(intent=Intent.UNKNOWN)
+
+    async def extract_ad_fields(
+        self, *, message_text: str, language: str, history: list[dict[str, str]]
+    ) -> ExtractedAdFields:
+        return ExtractedAdFields()
+
+    async def generate_reply(
+        self,
+        *,
+        intent: Intent,
+        message_text: str,
+        language: str,
+        extracted_fields: ExtractedAdFields | None,
+    ) -> ReplyGeneration:
+        return ReplyGeneration(reply_text="fallback unknown reply")
+
+
 class StaticEnrichmentService:
     def __init__(self, result: EnrichedProduct | None) -> None:
         self._result = result
@@ -275,6 +299,50 @@ async def test_enrichment_unavailable_notified_once_per_draft(
         draft = await session.get(AdDraft, session_obj.current_draft_id)
         assert draft is not None
         assert draft.enrichment_unavailable_notified_at is not None
+
+
+async def test_unknown_intent_with_ean_triggers_deterministic_enrichment_reply(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000503"
+    await _seed_operator(session_factory, phone)
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=UnknownIntentGateway(),
+        enrichment_service=StaticEnrichmentService(
+            EnrichedProduct(
+                product_name="קוטג' תנובה",
+                brand="תנובה",
+                source="open_food_facts",
+            )
+        ),
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-unknown-ean",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "7290004127326"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.intent == "unknown"
+    assert result.reply_text is not None
+    assert "7290004127326" in result.reply_text
+    assert "קוטג" in result.reply_text
+
+    async with session_scope(session_factory) as session:
+        session_obj = (
+            await session.execute(
+                select(ConversationSession).where(ConversationSession.operator_phone == phone)
+            )
+        ).scalar_one()
+        draft = await session.get(AdDraft, session_obj.current_draft_id)
+        assert draft is not None
+        assert draft.ean == "7290004127326"
+        assert draft.product_name == "קוטג' תנובה"
+        assert draft.enrichment_source == "open_food_facts"
 
 
 def test_no_raw_enrichment_payload_field_is_defined() -> None:

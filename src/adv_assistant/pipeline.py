@@ -183,6 +183,7 @@ class InboundTaskProcessor:
 
                     extracted_fields = None
                     enrichment_notice: str | None = None
+                    detected_ean = extract_ean_from_text(sanitized_text)
                     if classification.intent in {
                         Intent.CREATE_AD,
                         Intent.REGENERATE_WITH_REFERENCE,
@@ -220,7 +221,24 @@ class InboundTaskProcessor:
                             audit_repo=audit_repo,
                             current_draft=current_draft,
                             language=operator.language,
-                            sanitized_text=sanitized_text,
+                            detected_ean=detected_ean,
+                            allow_existing_draft_ean=True,
+                        )
+                    elif classification.intent == Intent.UNKNOWN and detected_ean is not None:
+                        current_draft, enrichment_notice = await self._enrich_current_draft(
+                            payload=payload,
+                            draft_repo=draft_repo,
+                            audit_repo=audit_repo,
+                            current_draft=current_draft,
+                            language=operator.language,
+                            detected_ean=detected_ean,
+                            allow_existing_draft_ean=False,
+                        )
+                        reply_text = _build_barcode_lookup_reply(
+                            draft=current_draft,
+                            ean=detected_ean,
+                            language=operator.language,
+                            unavailable_notice=enrichment_notice,
                         )
 
                     if reply_text is None:
@@ -330,9 +348,12 @@ class InboundTaskProcessor:
         audit_repo: AuditEventRepository,
         current_draft,
         language: str,
-        sanitized_text: str,
+        detected_ean: str | None,
+        allow_existing_draft_ean: bool,
     ) -> tuple[Any, str | None]:
-        ean = current_draft.ean or extract_ean_from_text(sanitized_text)
+        ean = detected_ean
+        if ean is None and allow_existing_draft_ean:
+            ean = current_draft.ean
         if ean is None:
             return current_draft, None
 
@@ -455,3 +476,30 @@ def _truncate(value: str | None, max_length: int) -> str | None:
     if not stripped:
         return None
     return stripped[:max_length]
+
+
+def _build_barcode_lookup_reply(
+    *,
+    draft,
+    ean: str,
+    language: str,
+    unavailable_notice: str | None,
+) -> str:
+    product_name = draft.product_name or draft.enriched_brand
+    if product_name:
+        if language.lower() == "he":
+            return (
+                f"זיהיתי את הברקוד {ean}. "
+                f"המוצר שנמצא: {product_name}. "
+                "אפשר להמשיך עכשיו ליצירת מודעה."
+            )
+        return (
+            f"I detected barcode {ean}. "
+            f"Found product: {product_name}. "
+            "We can continue now to ad creation."
+        )
+    if unavailable_notice:
+        return unavailable_notice
+    if language.lower() == "he":
+        return f"קיבלתי את הברקוד {ean}, אבל לא מצאתי פרטי מוצר כרגע."
+    return f"I received barcode {ean}, but I could not find product details yet."
