@@ -15,6 +15,11 @@ from adv_assistant.db.repositories import (
     ProcessedInboundMessageRepository,
 )
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
+from adv_assistant.enrichment import (
+    NoopProductLookupProvider,
+    OpenFoodFactsProvider,
+    ProviderChainEnrichmentService,
+)
 from adv_assistant.ingress import (
     extract_inbound_messages,
     is_within_replay_window,
@@ -54,6 +59,21 @@ def _build_whatsapp_client(settings: Settings) -> WhatsAppClient:
             graph_api_version=settings.whatsapp_graph_api_version,
         )
     return NoopWhatsAppClient()
+
+
+def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentService:
+    if not settings.enrichment_enabled:
+        return ProviderChainEnrichmentService(providers=[])
+    return ProviderChainEnrichmentService(
+        providers=[
+            OpenFoodFactsProvider(
+                base_url=settings.open_food_facts_base_url,
+                timeout_seconds=settings.enrichment_http_timeout_seconds,
+            ),
+            NoopProductLookupProvider("ean_fallback"),
+            NoopProductLookupProvider("web_search"),
+        ]
+    )
 
 
 def _build_task_enqueuer(
@@ -119,7 +139,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         llm_gateway = NoopLLMGateway()
 
     whatsapp_client = _build_whatsapp_client(current_settings)
-    task_processor = InboundTaskProcessor(session_factory, llm_gateway=llm_gateway)
+    enrichment_service = _build_enrichment_service(current_settings)
+    task_processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=llm_gateway,
+        enrichment_service=enrichment_service,
+    )
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):
         result = await task_processor.process(payload)
@@ -170,6 +195,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             await whatsapp_client.close()
+            await enrichment_service.close()
             await engine.dispose()
 
     app = FastAPI(title=current_settings.app_name, lifespan=lifespan)

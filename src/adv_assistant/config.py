@@ -11,6 +11,18 @@ def _int_env(name: str, default: int) -> int:
     return int(raw_value)
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean value")
+
+
 def _optional_env(name: str) -> str | None:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -54,6 +66,10 @@ class Settings:
     llm_timeout_seconds: int = 15
     llm_max_input_chars: int = 2000
 
+    enrichment_enabled: bool = True
+    open_food_facts_base_url: str = "https://world.openfoodfacts.org"
+    enrichment_http_timeout_seconds: int = 8
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -88,4 +104,9 @@ class Settings:
             llm_max_retries=_int_env("LLM_MAX_RETRIES", 1),
             llm_timeout_seconds=_int_env("LLM_TIMEOUT_SECONDS", 15),
             llm_max_input_chars=_int_env("LLM_MAX_INPUT_CHARS", 2000),
+            enrichment_enabled=_bool_env("ENRICHMENT_ENABLED", True),
+            open_food_facts_base_url=os.getenv(
+                "OPEN_FOOD_FACTS_BASE_URL", "https://world.openfoodfacts.org"
+            ),
+            enrichment_http_timeout_seconds=_int_env("ENRICHMENT_HTTP_TIMEOUT_SECONDS", 8),
         )

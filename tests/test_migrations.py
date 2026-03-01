@@ -30,3 +30,6 @@ def test_alembic_upgrade_creates_phase1_tables(tmp_path: Path, monkeypatch) -> N
         "processed_inbound_message",
     }
     assert expected_tables.issubset(tables)
+
+    ad_draft_columns = {column["name"] for column in inspector.get_columns("ad_draft")}
+    assert "enrichment_source" in ad_draft_columns

@@ -10,6 +10,7 @@
 | [Architecture & Technical Specification](docs/architecture-and-technical-spec.md) | System components, data flow diagrams, conceptual data model, intents/commands, CMS integration interface, reliability, and prompt-injection guardrails. |
 | [Technology Decisions](docs/technology-decisions.md) | Concrete technology decisions: Python stack, GCP Cloud Run + Cloud Tasks deployment, Cloud SQL PostgreSQL, GCS media storage, Nano Banana ad generation, and product enrichment approach for Israeli grocery. |
 | [Workplan](docs/workplan.md) | Step-by-step implementation phases (0–11) for building the application. |
+| [Phase 5 Compliance Checklist](docs/phase5-compliance-checklist.md) | Pre-production legal/compliance checklist for enrichment sources and data handling. |
 
 ## Quick Summary
 
@@ -66,6 +67,12 @@
   - `LLM_MAX_INPUT_CHARS` (default `2000`)
   - confirmation button payloads are deterministic and bypass LLM:
     - `confirm_publish`, `confirm_delete_all`, `cancel_delete_all`
+- Enrichment configuration (Phase 5):
+  - `ENRICHMENT_ENABLED` (default `true`)
+  - `OPEN_FOOD_FACTS_BASE_URL` (default `https://world.openfoodfacts.org`)
+  - `ENRICHMENT_HTTP_TIMEOUT_SECONDS` (default `8`)
+  - provider chain order: Open Food Facts -> EAN fallback -> web-search fallback
+  - only normalized enrichment fields are stored in DB; raw provider payloads are not persisted
 
 ## Database Migrations
 

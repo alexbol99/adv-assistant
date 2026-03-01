@@ -14,6 +14,12 @@ from adv_assistant.db.repositories import (
     ProcessedInboundMessageRepository,
 )
 from adv_assistant.db.session import session_scope
+from adv_assistant.enrichment import (
+    EnrichedProduct,
+    EnrichmentService,
+    NoopEnrichmentService,
+    extract_ean_from_text,
+)
 from adv_assistant.llm_gateway import (
     BUTTON_CANCEL_DELETE_ALL,
     BUTTON_CONFIRM_DELETE_ALL,
@@ -66,9 +72,11 @@ class InboundTaskProcessor:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         llm_gateway: LLMGateway | None = None,
+        enrichment_service: EnrichmentService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._llm_gateway = llm_gateway or NoopLLMGateway()
+        self._enrichment_service = enrichment_service or NoopEnrichmentService()
 
     async def process(self, payload: InboundTaskPayload) -> ProcessInboundResult:
         async with session_scope(self._session_factory) as session:
@@ -174,6 +182,7 @@ class InboundTaskProcessor:
                     intent_value = classification.intent.value
 
                     extracted_fields = None
+                    enrichment_notice: str | None = None
                     if classification.intent in {
                         Intent.CREATE_AD,
                         Intent.REGENERATE_WITH_REFERENCE,
@@ -205,6 +214,14 @@ class InboundTaskProcessor:
                                 )
                             else:
                                 current_draft = updated_draft
+                        current_draft, enrichment_notice = await self._enrich_current_draft(
+                            payload=payload,
+                            draft_repo=draft_repo,
+                            audit_repo=audit_repo,
+                            current_draft=current_draft,
+                            language=operator.language,
+                            sanitized_text=sanitized_text,
+                        )
 
                     if reply_text is None:
                         if classification.intent in {Intent.PUBLISH_AD, Intent.DELETE_ALL}:
@@ -220,6 +237,11 @@ class InboundTaskProcessor:
                             )
                             llm_used = self._llm_gateway.uses_external_llm or llm_used
                             reply_text = reply.reply_text
+                    if enrichment_notice:
+                        if reply_text:
+                            reply_text = f"{reply_text}\n\n{enrichment_notice}"
+                        else:
+                            reply_text = enrichment_notice
                 except LLMSchemaError:
                     reply_text = (
                         "I could not safely parse your request. "
@@ -300,6 +322,115 @@ class InboundTaskProcessor:
                 reply_text=reply_text,
             )
 
+    async def _enrich_current_draft(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        audit_repo: AuditEventRepository,
+        current_draft,
+        language: str,
+        sanitized_text: str,
+    ) -> tuple[Any, str | None]:
+        ean = current_draft.ean or extract_ean_from_text(sanitized_text)
+        if ean is None:
+            return current_draft, None
+
+        if current_draft.ean is None:
+            updated_with_ean = await draft_repo.update_for_operator_with_version(
+                draft_id=current_draft.id,
+                operator_phone=payload.operator_phone,
+                expected_version=current_draft.version,
+                ean=ean,
+            )
+            if updated_with_ean is not None:
+                current_draft = updated_with_ean
+
+        enriched = await self._enrichment_service.enrich_by_ean(ean=ean, language=language)
+        if enriched is None:
+            if current_draft.enrichment_unavailable_notified_at is not None:
+                return current_draft, None
+
+            updated_draft = await draft_repo.update_for_operator_with_version(
+                draft_id=current_draft.id,
+                operator_phone=payload.operator_phone,
+                expected_version=current_draft.version,
+                enrichment_source="none",
+                enrichment_unavailable_notified_at=utcnow(),
+            )
+            if updated_draft is not None:
+                current_draft = updated_draft
+            await audit_repo.log(
+                actor="system",
+                action="enrichment_unavailable_notified",
+                operator_phone=payload.operator_phone,
+                metadata={"wamid": payload.wamid, "ean": ean},
+            )
+            return (
+                current_draft,
+                "I could not find additional product details for this barcode yet. "
+                "Continuing with your provided information.",
+            )
+
+        update_fields = self._build_enrichment_update_fields(current_draft, enriched)
+        if not update_fields:
+            return current_draft, None
+
+        updated_draft = await draft_repo.update_for_operator_with_version(
+            draft_id=current_draft.id,
+            operator_phone=payload.operator_phone,
+            expected_version=current_draft.version,
+            **update_fields,
+        )
+        if updated_draft is not None:
+            current_draft = updated_draft
+
+        await audit_repo.log(
+            actor="system",
+            action="enrichment_applied",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "ean": ean,
+                "source": enriched.source,
+                "updated_fields": sorted(update_fields.keys()),
+            },
+        )
+        return current_draft, None
+
+    def _build_enrichment_update_fields(
+        self,
+        current_draft,
+        enriched: EnrichedProduct,
+    ) -> dict[str, Any]:
+        update_fields: dict[str, Any] = {
+            "enrichment_source": enriched.source,
+            "enriched_brand": _truncate(enriched.brand, 120),
+            "enriched_category": _truncate(enriched.category, 120),
+            "enriched_description": _truncate(enriched.description, 500),
+            "enriched_image_url": _truncate(enriched.image_url, 2000),
+            "enrichment_unavailable_notified_at": None,
+        }
+
+        if current_draft.product_name is None and enriched.product_name is not None:
+            update_fields["product_name"] = _truncate(enriched.product_name, 120)
+        if current_draft.promo_text is None and enriched.description is not None:
+            update_fields["promo_text"] = _truncate(enriched.description, 240)
+        if current_draft.photo_url is None and enriched.image_url is not None:
+            update_fields["photo_url"] = _truncate(enriched.image_url, 2000)
+
+        cleaned: dict[str, Any] = {}
+        for key, value in update_fields.items():
+            if value is None and key not in {
+                "enrichment_unavailable_notified_at",
+                "enrichment_source",
+            }:
+                continue
+            if getattr(current_draft, key, None) == value:
+                continue
+            cleaned[key] = value
+        return cleaned
+
 
 def _resolve_button_action(button_id: str) -> tuple[str | None, str]:
     if button_id == BUTTON_CONFIRM_PUBLISH:
@@ -315,3 +446,12 @@ def _resolve_button_action(button_id: str) -> tuple[str | None, str]:
     if button_id == BUTTON_CANCEL_DELETE_ALL:
         return "cancel_delete_all", "Delete-all canceled."
     return None, "Unknown confirmation button."
+
+
+def _truncate(value: str | None, max_length: int) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return stripped[:max_length]
