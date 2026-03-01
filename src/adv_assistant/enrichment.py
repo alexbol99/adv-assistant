@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Protocol
@@ -7,6 +8,7 @@ from typing import Protocol
 import httpx
 
 _EAN_RE = re.compile(r"\b(\d{8,14})\b")
+logger = logging.getLogger(__name__)
 
 
 def normalize_ean(value: str | None) -> str | None:
@@ -125,8 +127,12 @@ class OpenFoodFactsProvider:
         return "open_food_facts"
 
     async def lookup(self, *, ean: str, language: str) -> EnrichedProduct | None:
-        response = await self._client.get(f"/api/v2/product/{ean}")
-        response.raise_for_status()
+        try:
+            response = await self._client.get(f"/api/v2/product/{ean}")
+            response.raise_for_status()
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            logger.warning("Open Food Facts lookup failed for ean=%s: %s", ean, exc)
+            return None
         payload = response.json()
         if int(payload.get("status", 0)) != 1:
             return None

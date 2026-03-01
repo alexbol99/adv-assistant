@@ -170,6 +170,38 @@ async def test_open_food_facts_provider_returns_normalized_schema() -> None:
     await client.aclose()
 
 
+async def test_open_food_facts_provider_http_error_returns_none() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=503, json={"error": "upstream unavailable"})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://world.openfoodfacts.org",
+    )
+    provider = OpenFoodFactsProvider(client=client)
+
+    result = await provider.lookup(ean="7290001234567", language="he")
+
+    assert result is None
+    await client.aclose()
+
+
+async def test_open_food_facts_provider_request_error_returns_none() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("network down", request=request)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://world.openfoodfacts.org",
+    )
+    provider = OpenFoodFactsProvider(client=client)
+
+    result = await provider.lookup(ean="7290001234567", language="he")
+
+    assert result is None
+    await client.aclose()
+
+
 async def test_provider_chain_uses_fallback_order() -> None:
     provider_1 = StaticProvider("open_food_facts", None)
     provider_2 = StaticProvider(
