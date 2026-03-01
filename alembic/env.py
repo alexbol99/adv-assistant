@@ -26,7 +26,11 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    return os.getenv("ALEMBIC_DATABASE_URL", config.get_main_option("sqlalchemy.url"))
+    return (
+        os.getenv("ALEMBIC_DATABASE_URL")
+        or os.getenv("DATABASE_URL")
+        or config.get_main_option("sqlalchemy.url")
+    )
 
 
 def run_migrations_offline() -> None:

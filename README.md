@@ -80,6 +80,7 @@
 
 - Upgrade to latest schema:
   - `uv run alembic upgrade head`
+  - `make migrate` (recommended for local; auto-loads `.env` / `DATABASE_URL`)
   - required after pulling schema changes (for example Phase 5 enrichment columns)
 - Create a new migration revision:
   - `uv run alembic revision -m "your message"`
