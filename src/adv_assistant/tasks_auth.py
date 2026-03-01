@@ -49,7 +49,13 @@ class OidcTaskRequestAuthorizer:
             return False
 
         email = claims.get("email")
-        if self._allowed_service_account_email and email != self._allowed_service_account_email:
+        if not email:
+            return False
+
+        if self._allowed_service_account_email:
+            if email != self._allowed_service_account_email:
+                return False
+        elif not email.endswith(".gserviceaccount.com"):
             return False
 
         email_verified = claims.get("email_verified")
