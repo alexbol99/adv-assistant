@@ -481,7 +481,7 @@ def _truncate(value: str | None, max_length: int) -> str | None:
 
 def _build_barcode_lookup_reply(
     *,
-    draft,
+    draft: AdDraft,
     ean: str,
     language: str,
     unavailable_notice: str | None,
