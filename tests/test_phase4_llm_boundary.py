@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -207,6 +208,11 @@ async def test_noop_gateway_does_not_mark_llm_used(
 def test_sanitize_user_text_strips_html_and_control_chars() -> None:
     value = sanitize_user_text("  <b>Hello</b>\x01  world  ", max_chars=100)
     assert value == "Hello world"
+
+
+def test_extracted_price_is_decimal_and_quantized() -> None:
+    fields = ExtractedAdFields(price=19.995)
+    assert fields.price == Decimal("20.00")
 
 
 async def test_openai_gateway_retries_on_schema_mismatch(monkeypatch: Any) -> None:

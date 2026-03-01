@@ -1,5 +1,6 @@
 import json
 import re
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -42,7 +43,7 @@ class IntentClassification(BaseModel):
 
 class ExtractedAdFields(BaseModel):
     product_name: str | None = Field(default=None, max_length=120)
-    price: float | None = None
+    price: Decimal | None = None
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     promo_text: str | None = Field(default=None, max_length=240)
     ean: str | None = Field(default=None, min_length=8, max_length=14)
@@ -50,12 +51,19 @@ class ExtractedAdFields(BaseModel):
 
     @field_validator("price")
     @classmethod
-    def _validate_price(cls, value: float | None) -> float | None:
+    def _validate_price(cls, value: Any) -> Decimal | None:
         if value is None:
             return None
-        if value < 0:
+        try:
+            decimal_value = Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError) as exc:
+            raise ValueError("price must be a valid number") from exc
+        if decimal_value < 0:
             raise ValueError("price must be non-negative")
-        return value
+        decimal_value = decimal_value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if decimal_value > Decimal("9999999999.99"):
+            raise ValueError("price exceeds max supported value")
+        return decimal_value
 
     @field_validator("currency")
     @classmethod
