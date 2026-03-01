@@ -31,6 +31,17 @@
    - `uv run uvicorn adv_assistant.main:app --reload --host 0.0.0.0 --port 8080`
 4. Run with Docker:
    - `docker compose up --build`
+   - create `.env` from `.env.example` and set a local-only `POSTGRES_PASSWORD`
+   - never reuse local `.env` credentials in staging/production
+
+## Database Migrations
+
+- Upgrade to latest schema:
+  - `uv run alembic upgrade head`
+- Create a new migration revision:
+  - `uv run alembic revision -m "your message"`
+- Override migration DB URL:
+  - `ALEMBIC_DATABASE_URL=postgresql+psycopg://... uv run alembic upgrade head`
 
 ## CI / Staging Deploy
 
@@ -45,4 +56,25 @@ The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 
 ## Infrastructure Bootstrap Helper
 
-Use `/Users/alexanderbol/WebstormProjects/adv-assistant/scripts/bootstrap_gcp.sh` for initial GCP bootstrap (Cloud Run APIs, Cloud SQL, GCS bucket, Cloud Tasks queue).
+Use `scripts/bootstrap_gcp.sh` for initial GCP bootstrap (Cloud Run APIs, Cloud SQL, GCS bucket, Cloud Tasks queue).
+
+## DB Access Provisioning (Staging/Production)
+
+Use `scripts/provision_db_access.sh` to provision:
+- databases: `adv_assistant_staging`, `adv_assistant_prod`
+- service users (app + migrator per environment)
+- Secret Manager password entries
+- SQL grants and least-privilege hardening (automatic when admin DB password is available)
+
+Example:
+- `CLOUD_SQL_INSTANCE=adv-assistant-pg scripts/provision_db_access.sh`
+
+Recommended first run (bootstraps postgres admin password into Secret Manager and applies grants automatically):
+- `BOOTSTRAP_POSTGRES_ADMIN_PASSWORD=true CLOUD_SQL_INSTANCE=adv-assistant-pg scripts/provision_db_access.sh`
+
+Defaults:
+- `GCP_PROJECT_ID=ads-assistant-488908`
+- existing user passwords are not rotated unless `ROTATE_EXISTING_PASSWORDS=true`
+- automatic SQL grant application is enabled (`APPLY_SQL_GRANTS=true`)
+
+If automatic grant application is unavailable (missing `psql`, `cloud-sql-proxy`, or admin password), the script prints manual SQL commands.

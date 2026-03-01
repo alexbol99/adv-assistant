@@ -12,6 +12,11 @@ dependencies = [
   "fastapi>=0.115.0,<1.0.0",
   "uvicorn[standard]>=0.34.0,<1.0.0",
   "httpx>=0.28.0,<1.0.0",
+  "aiosqlite>=0.21.0,<1.0.0",
+  "sqlalchemy[asyncio]>=2.0.44,<3.0.0",
+  "alembic>=1.17.2,<2.0.0",
+  "asyncpg>=0.30.0,<1.0.0",
+  "psycopg[binary]>=3.2.13,<4.0.0",
 ]
 
 [dependency-groups]
@@ -32,7 +37,6 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
-asyncio_mode = "auto"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/adv_assistant"]
