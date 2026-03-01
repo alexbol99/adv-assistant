@@ -42,6 +42,14 @@ class FakeWhatsAppClient:
         return None
 
 
+class FailingWhatsAppClient:
+    async def send_text(self, *, to_phone: str, message: str) -> None:
+        raise RuntimeError("401 Unauthorized")
+
+    async def close(self) -> None:
+        return None
+
+
 class AllowAllTaskAuthorizer:
     async def is_authorized(self, authorization_header: str | None) -> bool:
         return True
@@ -312,6 +320,38 @@ async def test_inline_mode_sends_reply_to_authorized_operator(
     assert len(fake_sender.messages) == 1
     assert fake_sender.messages[0][0] == "+972526508861"
     assert "understood your message" in fake_sender.messages[0][1].lower()
+
+
+async def test_inline_mode_delivery_failure_does_not_return_500(
+    phase2_app,
+    phase2_client: AsyncClient,
+) -> None:
+    phase2_app.state.whatsapp_client = FailingWhatsAppClient()
+    await _seed_operator(phase2_app.state.session_factory, "+972526508861")
+
+    payload = _build_webhook_payload(
+        from_phone="972526508861",
+        wamid="wamid-inline-delivery-failure",
+        timestamp=datetime.now(tz=UTC),
+    )
+    body, signature = _sign_payload("phase2-test-secret", payload)
+
+    response = await phase2_client.post(
+        "/webhook",
+        content=body,
+        headers={"Content-Type": "application/json", "X-Hub-Signature-256": signature},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["enqueued"] == 0
+    assert (
+        await _count_audit_events(
+            phase2_app.state.session_factory,
+            action="inbound_enqueue_failed",
+            operator_phone="+972526508861",
+        )
+        == 1
+    )
 
 
 async def test_task_endpoint_rejects_non_oidc_caller(phase2_client: AsyncClient) -> None:

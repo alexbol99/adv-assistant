@@ -309,7 +309,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 message_timestamp=event.timestamp.isoformat() if event.timestamp else None,
                 raw_message=event.raw_message,
             )
-            await task_enqueuer_value.enqueue_inbound(payload_obj)
+            try:
+                await task_enqueuer_value.enqueue_inbound(payload_obj)
+            except Exception as exc:
+                await audit_repo.log(
+                    actor="system",
+                    action="inbound_enqueue_failed",
+                    operator_phone=event.operator_phone,
+                    metadata={
+                        "wamid": event.wamid,
+                        "tasks_mode": settings_value.tasks_mode,
+                        "error": str(exc),
+                    },
+                )
+                if settings_value.tasks_mode == "cloud":
+                    raise
+                continue
             enqueued_count += 1
 
         return {"status": "accepted", "received": len(events), "enqueued": enqueued_count}
