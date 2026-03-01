@@ -75,6 +75,14 @@
   - `ENRICHMENT_HTTP_TIMEOUT_SECONDS` (default `8`)
   - provider chain order: Open Food Facts -> EAN fallback -> web-search fallback
   - only normalized enrichment fields are stored in DB; raw provider payloads are not persisted
+- Ad generation configuration (Phase 7, callback-only):
+  - `NANA_BANANA_API_KEY`
+  - `NANA_BANANA_BASE_URL`
+  - `NANA_BANANA_MODEL` (default `nanobanana-2`)
+  - `NANA_BANANA_CALLBACK_URL` (must point to `/callbacks/nano-banana`)
+  - `NANA_BANANA_CALLBACK_SECRET` (HMAC secret for callback signature verification)
+  - `NANA_BANANA_TIMEOUT_SECONDS` (default `20`)
+  - `AD_RENDER_WIDTH` / `AD_RENDER_HEIGHT` (default `1920x1080`; aspect ratio derived automatically)
 
 ## Database Migrations
 

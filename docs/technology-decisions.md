@@ -125,10 +125,10 @@ This preserves integration progress without changing production decisions.
 **Nano Banana** is the chosen ad image generation service. Its API uses an **asynchronous job model**:
 
 1. The bot POSTs a generation request and receives a **job ID** immediately.
-2. The bot polls the job status endpoint using the job ID until the job is `completed` or `failed`.
+2. Nano Banana sends a **webhook callback** when the job state changes.
 3. On completion, the rendered image URL (or binary) is retrieved and uploaded to GCS.
 
-**Callback support:** Nano Banana also supports a **webhook callback** (the service POSTs to a bot-provided URL when the job completes). The implementation should support both polling and callback modes; the callback mode is preferred in production to reduce polling overhead and latency.
+**Implementation mode:** Callback-only. Polling is intentionally not implemented in this phase.
 
 ### 5.2 Generation Modes
 
@@ -189,7 +189,6 @@ Notes:
 
 Operational recommendations:
 - Verify callback authenticity (shared-secret HMAC header).
-- Keep polling as fallback with exponential intervals (`2s`, `5s`, `10s`) up to `15` minutes total.
 - Treat `429` and `5xx` as retryable; treat `4xx` (except `409`) as permanent failures.
 
 ---
@@ -264,7 +263,7 @@ All enriched data is treated as **supplementary** — the operator's explicitly 
 | Confirmation mechanism | Button payload only for publish/delete-all confirmation |
 | Unauthorized number handling | Generic rejection once per number per 60-minute window, then silent ignore |
 | Draft ownership | Private per operator, optimistic concurrency (first-write-wins) |
-| Ad generation service | Nano Banana (async job + polling; callback supported) |
+| Ad generation service | Nano Banana (async job + callback) |
 | Nano Banana auth/model | Bearer token + `Nanobanana 2` |
 | Product domain | Food/grocery, Israel-focused |
 | Barcode decoding | ZXing/zbar (primary) → vision-LLM (fallback) |

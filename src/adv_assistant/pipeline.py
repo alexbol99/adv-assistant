@@ -4,6 +4,13 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adv_assistant.ad_generation import (
+    AdGenerationError,
+    AdGenerationService,
+    GenerationDraftInput,
+    GenerationMode,
+    NoopAdGenerationService,
+)
 from adv_assistant.db.base import utcnow
 from adv_assistant.db.enums import AdDraftStatus
 from adv_assistant.db.models import AdDraft
@@ -74,10 +81,16 @@ class InboundTaskProcessor:
         *,
         llm_gateway: LLMGateway | None = None,
         enrichment_service: EnrichmentService | None = None,
+        ad_generation_service: AdGenerationService | None = None,
+        render_width: int = 1920,
+        render_height: int = 1080,
     ) -> None:
         self._session_factory = session_factory
         self._llm_gateway = llm_gateway or NoopLLMGateway()
         self._enrichment_service = enrichment_service or NoopEnrichmentService()
+        self._ad_generation_service = ad_generation_service or NoopAdGenerationService()
+        self._render_width = render_width
+        self._render_height = render_height
 
     async def process(self, payload: InboundTaskPayload) -> ProcessInboundResult:
         async with session_scope(self._session_factory) as session:
@@ -242,6 +255,79 @@ class InboundTaskProcessor:
                             unavailable_notice=enrichment_notice,
                         )
                         enrichment_notice = None
+
+                    if (
+                        reply_text is None
+                        and classification.intent
+                        in {
+                            Intent.CREATE_AD,
+                            Intent.REGENERATE_WITH_REFERENCE,
+                            Intent.REGENERATE_FROM_SCRATCH,
+                        }
+                        and self._ad_generation_service.enabled
+                    ):
+                        mode = _generation_mode_for_intent(classification.intent)
+                        if _is_ready_for_generation(current_draft):
+                            try:
+                                submission = await self._ad_generation_service.submit_for_draft(
+                                    draft=_to_generation_draft_input(
+                                        draft=current_draft,
+                                        operator_phone=payload.operator_phone,
+                                        language=operator.language,
+                                    ),
+                                    mode=mode,
+                                    instruction_text=sanitized_text,
+                                    wamid=payload.wamid,
+                                    width=self._render_width,
+                                    height=self._render_height,
+                                )
+                                updated_draft = await draft_repo.update_for_operator_with_version(
+                                    draft_id=current_draft.id,
+                                    operator_phone=payload.operator_phone,
+                                    expected_version=current_draft.version,
+                                    status=AdDraftStatus.GENERATING,
+                                    generation_job_id=submission.job_id,
+                                )
+                                if updated_draft is None:
+                                    reply_text = (
+                                        "This draft was already changed. "
+                                        "Please refresh and try again."
+                                    )
+                                    await audit_repo.log(
+                                        actor="system",
+                                        action="draft_stale_write_detected",
+                                        operator_phone=payload.operator_phone,
+                                        metadata={"wamid": payload.wamid},
+                                    )
+                                else:
+                                    current_draft = updated_draft
+                                    deterministic_action = "generation_submitted"
+                                    await audit_repo.log(
+                                        actor="system",
+                                        action="generation_job_submitted",
+                                        operator_phone=payload.operator_phone,
+                                        metadata={
+                                            "wamid": payload.wamid,
+                                            "draft_id": str(current_draft.id),
+                                            "job_id": submission.job_id,
+                                            "mode": submission.mode.value,
+                                            "idempotency_key": submission.idempotency_key,
+                                        },
+                                    )
+                                    reply_text = _generation_started_reply(operator.language)
+                            except AdGenerationError as exc:
+                                reply_text = _generation_failed_reply(operator.language)
+                                await audit_repo.log(
+                                    actor="system",
+                                    action="generation_submission_failed",
+                                    operator_phone=payload.operator_phone,
+                                    metadata={
+                                        "wamid": payload.wamid,
+                                        "draft_id": str(current_draft.id),
+                                        "mode": mode.value,
+                                        "error": str(exc),
+                                    },
+                                )
 
                     if reply_text is None:
                         if classification.intent in {Intent.PUBLISH_AD, Intent.DELETE_ALL}:
@@ -504,3 +590,49 @@ def _build_barcode_lookup_reply(
     if language.lower() == "he":
         return f"קיבלתי את הברקוד {ean}, אבל לא מצאתי פרטי מוצר כרגע."
     return f"I received barcode {ean}, but I could not find product details yet."
+
+
+def _generation_mode_for_intent(intent: Intent) -> GenerationMode:
+    if intent == Intent.REGENERATE_WITH_REFERENCE:
+        return GenerationMode.REFERENCE
+    return GenerationMode.FRESH
+
+
+def _is_ready_for_generation(draft: AdDraft) -> bool:
+    return draft.product_name is not None and draft.price is not None
+
+
+def _to_generation_draft_input(
+    *,
+    draft: AdDraft,
+    operator_phone: str,
+    language: str,
+) -> GenerationDraftInput:
+    return GenerationDraftInput(
+        draft_id=draft.id,
+        operator_phone=operator_phone,
+        language=language,
+        product_name=draft.product_name,
+        price=draft.price,
+        currency=draft.currency,
+        promo_text=draft.promo_text,
+        ean=draft.ean,
+        photo_url=draft.photo_url,
+        enriched_brand=draft.enriched_brand,
+        enriched_category=draft.enriched_category,
+        enriched_description=draft.enriched_description,
+        preview_reference_url=draft.preview_reference_url,
+        rendered_image_url=draft.rendered_image_url,
+    )
+
+
+def _generation_started_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "מעולה, יוצר עכשיו את המודעה שלך. אשלח תצוגה מקדימה כשזה יהיה מוכן."
+    return "Great, generating your ad now. I will send a preview when it is ready."
+
+
+def _generation_failed_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "יש כרגע תקלה זמנית ביצירת המודעה. נסה שוב בעוד רגע."
+    return "Temporary generation service issue. Please try again in a moment."

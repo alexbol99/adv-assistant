@@ -70,6 +70,15 @@ class Settings:
     open_food_facts_base_url: str = "https://world.openfoodfacts.org"
     enrichment_http_timeout_seconds: int = 8
 
+    nana_banana_api_key: str | None = None
+    nana_banana_base_url: str | None = None
+    nana_banana_model: str = "nanobanana-2"
+    nana_banana_callback_url: str | None = None
+    nana_banana_callback_secret: str | None = None
+    nana_banana_timeout_seconds: int = 20
+    ad_render_width: int = 1920
+    ad_render_height: int = 1080
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -109,4 +118,12 @@ class Settings:
                 "OPEN_FOOD_FACTS_BASE_URL", "https://world.openfoodfacts.org"
             ),
             enrichment_http_timeout_seconds=_int_env("ENRICHMENT_HTTP_TIMEOUT_SECONDS", 8),
+            nana_banana_api_key=_optional_env("NANA_BANANA_API_KEY"),
+            nana_banana_base_url=_optional_env("NANA_BANANA_BASE_URL"),
+            nana_banana_model=os.getenv("NANA_BANANA_MODEL", "nanobanana-2"),
+            nana_banana_callback_url=_optional_env("NANA_BANANA_CALLBACK_URL"),
+            nana_banana_callback_secret=_optional_env("NANA_BANANA_CALLBACK_SECRET"),
+            nana_banana_timeout_seconds=_int_env("NANA_BANANA_TIMEOUT_SECONDS", 20),
+            ad_render_width=_int_env("AD_RENDER_WIDTH", 1920),
+            ad_render_height=_int_env("AD_RENDER_HEIGHT", 1080),
         )

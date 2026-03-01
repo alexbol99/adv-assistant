@@ -170,12 +170,12 @@ This implementation plan is execution-focused: each phase has explicit deliverab
   - model `nanobanana-2`
   - `aspect_ratio` derived from requested resolution (`1920x1080` -> `16:9`)
   - stable `idempotency_key`
-- Implement job submission, status polling, and callback handling.
+- Implement job submission and callback handling (callback-only path).
 - Verify callback authenticity via shared-secret signature.
 - Persist generation state in draft lifecycle.
 
 ### Exit Criteria
-- Polling and callback paths both complete successfully.
+- Callback path completes successfully end-to-end.
 - Retry behavior does not create duplicate jobs for same logical request.
 - Failed generation states are surfaced to operator cleanly.
 
