@@ -243,8 +243,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        await _validate_schema_compatibility(engine=engine, settings=current_settings)
         try:
+            await _validate_schema_compatibility(engine=engine, settings=current_settings)
             yield
         finally:
             await whatsapp_client.close()
