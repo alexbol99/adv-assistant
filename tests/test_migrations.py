@@ -1,0 +1,32 @@
+from pathlib import Path
+
+from alembic.config import Config
+from sqlalchemy import create_engine, inspect
+
+from alembic import command
+
+
+def test_alembic_upgrade_creates_phase1_tables(tmp_path: Path, monkeypatch) -> None:
+    db_path = tmp_path / "alembic_phase1.db"
+    database_url = f"sqlite:///{db_path}"
+
+    monkeypatch.delenv("ALEMBIC_DATABASE_URL", raising=False)
+
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", database_url)
+
+    command.upgrade(alembic_cfg, "head")
+
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    expected_tables = {
+        "operator",
+        "conversation_session",
+        "ad_draft",
+        "published_ad",
+        "system_config",
+        "audit_event",
+        "processed_inbound_message",
+    }
+    assert expected_tables.issubset(tables)

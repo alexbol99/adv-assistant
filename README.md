@@ -32,6 +32,15 @@
 4. Run with Docker:
    - `docker compose up --build`
 
+## Database Migrations
+
+- Upgrade to latest schema:
+  - `uv run alembic upgrade head`
+- Create a new migration revision:
+  - `uv run alembic revision -m "your message"`
+- Override migration DB URL:
+  - `ALEMBIC_DATABASE_URL=postgresql+psycopg://... uv run alembic upgrade head`
+
 ## CI / Staging Deploy
 
 The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
@@ -45,21 +54,21 @@ The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 
 ## Infrastructure Bootstrap Helper
 
-Use `/Users/alexanderbol/WebstormProjects/adv-assistant/scripts/bootstrap_gcp.sh` for initial GCP bootstrap (Cloud Run APIs, Cloud SQL, GCS bucket, Cloud Tasks queue).
+Use `scripts/bootstrap_gcp.sh` for initial GCP bootstrap (Cloud Run APIs, Cloud SQL, GCS bucket, Cloud Tasks queue).
 
 ## DB Access Provisioning (Staging/Production)
 
-Use `/Users/alexanderbol/WebstormProjects/adv-assistant/scripts/provision_db_access.sh` to provision:
+Use `scripts/provision_db_access.sh` to provision:
 - databases: `adv_assistant_staging`, `adv_assistant_prod`
 - service users (app + migrator per environment)
 - Secret Manager password entries
 - SQL grants and least-privilege hardening (automatic when admin DB password is available)
 
 Example:
-- `CLOUD_SQL_INSTANCE=adv-assistant-pg /Users/alexanderbol/WebstormProjects/adv-assistant/scripts/provision_db_access.sh`
+- `CLOUD_SQL_INSTANCE=adv-assistant-pg scripts/provision_db_access.sh`
 
 Recommended first run (bootstraps postgres admin password into Secret Manager and applies grants automatically):
-- `BOOTSTRAP_POSTGRES_ADMIN_PASSWORD=true CLOUD_SQL_INSTANCE=adv-assistant-pg /Users/alexanderbol/WebstormProjects/adv-assistant/scripts/provision_db_access.sh`
+- `BOOTSTRAP_POSTGRES_ADMIN_PASSWORD=true CLOUD_SQL_INSTANCE=adv-assistant-pg scripts/provision_db_access.sh`
 
 Defaults:
 - `GCP_PROJECT_ID=ads-assistant-488908`
