@@ -316,6 +316,8 @@ class OpenAILLMGateway:
             except LLMGatewayError as exc:
                 last_error = exc
                 break
+        if isinstance(last_error, LLMGatewayError):
+            raise last_error
         raise LLMSchemaError(f"Failed to parse LLM response safely: {last_error}") from last_error
 
     async def _chat_json(

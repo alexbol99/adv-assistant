@@ -13,6 +13,7 @@ from adv_assistant.llm_gateway import (
     ExtractedAdFields,
     Intent,
     IntentClassification,
+    LLMGatewayError,
     LLMSchemaError,
     OpenAILLMGateway,
     ReplyGeneration,
@@ -34,6 +35,7 @@ class FakeGateway:
         self.extracted = ExtractedAdFields()
         self.reply = ReplyGeneration(reply_text="ok")
         self.raise_schema_on_classify = False
+        self.raise_gateway_error_on_classify = False
 
     async def classify_intent(
         self,
@@ -45,6 +47,8 @@ class FakeGateway:
         self.classify_calls += 1
         if self.raise_schema_on_classify:
             raise LLMSchemaError("schema mismatch")
+        if self.raise_gateway_error_on_classify:
+            raise LLMGatewayError("transport failure")
         return self.classification
 
     async def extract_ad_fields(
@@ -130,6 +134,27 @@ async def test_schema_mismatch_falls_back_safely(
     assert result.status == "processed"
     assert result.reply_text is not None
     assert "could not safely parse" in result.reply_text.lower()
+
+
+async def test_gateway_failure_has_dedicated_fallback(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000404"
+    await _seed_operator(session_factory, phone)
+    fake_gateway = FakeGateway()
+    fake_gateway.raise_gateway_error_on_classify = True
+    processor = InboundTaskProcessor(session_factory, llm_gateway=fake_gateway)
+
+    payload = InboundTaskPayload(
+        wamid="wamid-gateway-failure",
+        operator_phone=phone,
+        raw_message={"type": "text", "text": {"body": "help me"}},
+    )
+    result = await processor.process(payload)
+
+    assert result.status == "processed"
+    assert result.reply_text is not None
+    assert "temporary ai service issue" in result.reply_text.lower()
 
 
 async def test_injection_style_message_does_not_execute_destructive_action(

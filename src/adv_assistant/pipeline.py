@@ -20,6 +20,7 @@ from adv_assistant.llm_gateway import (
     BUTTON_CONFIRM_PUBLISH,
     Intent,
     LLMGateway,
+    LLMGatewayError,
     LLMSchemaError,
     NoopLLMGateway,
     extract_button_payload_id,
@@ -227,6 +228,14 @@ class InboundTaskProcessor:
                     await audit_repo.log(
                         actor="system",
                         action="llm_schema_mismatch_fallback",
+                        operator_phone=payload.operator_phone,
+                        metadata={"wamid": payload.wamid},
+                    )
+                except LLMGatewayError:
+                    reply_text = "Temporary AI service issue. Please try again in a moment."
+                    await audit_repo.log(
+                        actor="system",
+                        action="llm_gateway_failure_fallback",
                         operator_phone=payload.operator_phone,
                         metadata={"wamid": payload.wamid},
                     )
