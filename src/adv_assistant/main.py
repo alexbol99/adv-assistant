@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Annotated
@@ -9,7 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.config import Settings
 from adv_assistant.db.base import utcnow
-from adv_assistant.db.repositories import AuditEventRepository, OperatorRepository
+from adv_assistant.db.repositories import (
+    AuditEventRepository,
+    OperatorRepository,
+    ProcessedInboundMessageRepository,
+)
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
 from adv_assistant.ingress import (
     extract_inbound_messages,
@@ -55,7 +59,7 @@ def _build_whatsapp_client(settings: Settings) -> WhatsAppClient:
 def _build_task_enqueuer(
     *,
     settings: Settings,
-    processor: InboundTaskProcessor,
+    process_callback: Callable[[InboundTaskPayload], Awaitable[object]],
 ) -> TaskEnqueuer:
     if settings.tasks_mode == "cloud":
         required = {
@@ -78,7 +82,7 @@ def _build_task_enqueuer(
             service_account_email=settings.tasks_service_account_email or "",
             oidc_audience=settings.tasks_oidc_audience or settings.tasks_handler_url,
         )
-    return InlineTaskEnqueuer(processor.process)
+    return InlineTaskEnqueuer(process_callback)
 
 
 async def _should_send_unauthorized_rejection(
@@ -114,10 +118,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     else:
         llm_gateway = NoopLLMGateway()
 
-    task_processor = InboundTaskProcessor(session_factory, llm_gateway=llm_gateway)
-    task_enqueuer = _build_task_enqueuer(settings=current_settings, processor=task_processor)
-    task_authorizer = _build_task_authorizer(current_settings)
     whatsapp_client = _build_whatsapp_client(current_settings)
+    task_processor = InboundTaskProcessor(session_factory, llm_gateway=llm_gateway)
+
+    async def process_and_maybe_send_reply(payload: InboundTaskPayload):
+        result = await task_processor.process(payload)
+        if result.reply_text and not result.duplicate and not result.unauthorized_operator:
+            try:
+                await app.state.whatsapp_client.send_text(
+                    to_phone=payload.operator_phone,
+                    message=result.reply_text,
+                )
+            except Exception as exc:
+                async with session_scope(session_factory) as cleanup_session:
+                    processed_repo = ProcessedInboundMessageRepository(cleanup_session)
+                    audit_repo = AuditEventRepository(cleanup_session)
+                    deleted = await processed_repo.delete_by_wamid(payload.wamid)
+                    await audit_repo.log(
+                        actor="system",
+                        action="outbound_reply_delivery_failed",
+                        operator_phone=payload.operator_phone,
+                        metadata={
+                            "wamid": payload.wamid,
+                            "dedup_deleted": deleted,
+                            "error": str(exc),
+                        },
+                    )
+                raise
+            else:
+                try:
+                    async with session_scope(session_factory) as audit_session:
+                        await AuditEventRepository(audit_session).log(
+                            actor="system",
+                            action="outbound_reply_sent",
+                            operator_phone=payload.operator_phone,
+                            metadata={"wamid": payload.wamid},
+                        )
+                except Exception:
+                    pass
+        return result
+
+    task_enqueuer = _build_task_enqueuer(
+        settings=current_settings,
+        process_callback=process_and_maybe_send_reply,
+    )
+    task_authorizer = _build_task_authorizer(current_settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -136,6 +181,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.task_enqueuer = task_enqueuer
     app.state.task_authorizer = task_authorizer
     app.state.whatsapp_client = whatsapp_client
+    app.state.process_and_maybe_send_reply = process_and_maybe_send_reply
 
     def get_settings() -> Settings:
         return app.state.settings
@@ -155,8 +201,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_task_authorizer() -> TaskRequestAuthorizer:
         return app.state.task_authorizer
 
-    def get_task_processor() -> InboundTaskProcessor:
-        return app.state.task_processor
+    def get_process_inbound_callback() -> Callable[[InboundTaskPayload], Awaitable[object]]:
+        return app.state.process_and_maybe_send_reply
 
     def get_whatsapp_client() -> WhatsAppClient:
         return app.state.whatsapp_client
@@ -165,7 +211,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
     TaskEnqueuerDep = Annotated[TaskEnqueuer, Depends(get_task_enqueuer)]
     TaskAuthorizerDep = Annotated[TaskRequestAuthorizer, Depends(get_task_authorizer)]
-    TaskProcessorDep = Annotated[InboundTaskProcessor, Depends(get_task_processor)]
+    ProcessInboundDep = Annotated[
+        Callable[[InboundTaskPayload], Awaitable[object]],
+        Depends(get_process_inbound_callback),
+    ]
     WhatsAppClientDep = Annotated[WhatsAppClient, Depends(get_whatsapp_client)]
 
     HubMode = Annotated[str, Query(alias="hub.mode")]
@@ -260,7 +309,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 message_timestamp=event.timestamp.isoformat() if event.timestamp else None,
                 raw_message=event.raw_message,
             )
-            await task_enqueuer_value.enqueue_inbound(payload_obj)
+            try:
+                await task_enqueuer_value.enqueue_inbound(payload_obj)
+            except Exception as exc:
+                await audit_repo.log(
+                    actor="system",
+                    action="inbound_enqueue_failed",
+                    operator_phone=event.operator_phone,
+                    metadata={
+                        "wamid": event.wamid,
+                        "tasks_mode": settings_value.tasks_mode,
+                        "error": str(exc),
+                    },
+                )
+                if settings_value.tasks_mode == "cloud":
+                    raise
+                continue
             enqueued_count += 1
 
         return {"status": "accepted", "received": len(events), "enqueued": enqueued_count}
@@ -270,13 +334,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         payload: InboundTaskPayload,
         task_authorizer_value: TaskAuthorizerDep,
-        task_processor_value: TaskProcessorDep,
+        process_inbound_value: ProcessInboundDep,
     ) -> dict[str, str]:
         authorization_header = request.headers.get("Authorization")
         if not await task_authorizer_value.is_authorized(authorization_header):
             raise HTTPException(status_code=401, detail="Unauthorized caller")
 
-        result = await task_processor_value.process(payload)
+        result = await process_inbound_value(payload)
         return {"status": result.status}
 
     return app

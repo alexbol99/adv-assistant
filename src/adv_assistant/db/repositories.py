@@ -304,6 +304,13 @@ class ProcessedInboundMessageRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def delete_by_wamid(self, wamid: str) -> bool:
+        result = await self.session.execute(
+            delete(ProcessedInboundMessage).where(ProcessedInboundMessage.wamid == wamid)
+        )
+        await self.session.flush()
+        return (result.rowcount or 0) > 0
+
     async def purge_older_than(self, cutoff: datetime) -> int:
         result = await self.session.execute(
             delete(ProcessedInboundMessage).where(ProcessedInboundMessage.expires_at < cutoff)
