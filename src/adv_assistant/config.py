@@ -37,6 +37,15 @@ class Settings:
     tasks_oidc_audience: str | None = None
     tasks_allowed_service_account_email: str | None = None
 
+    openai_api_key: str | None = None
+    openai_base_url: str | None = None
+    llm_classification_model: str = "gpt-4o-mini"
+    llm_extraction_model: str = "gpt-4o-mini"
+    llm_reply_model: str = "gpt-4o-mini"
+    llm_max_retries: int = 1
+    llm_timeout_seconds: int = 15
+    llm_max_input_chars: int = 2000
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -63,4 +72,12 @@ class Settings:
             tasks_service_account_email=os.getenv("TASKS_SERVICE_ACCOUNT_EMAIL"),
             tasks_oidc_audience=os.getenv("TASKS_OIDC_AUDIENCE"),
             tasks_allowed_service_account_email=os.getenv("TASKS_ALLOWED_SERVICE_ACCOUNT_EMAIL"),
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            openai_base_url=os.getenv("OPENAI_BASE_URL"),
+            llm_classification_model=os.getenv("LLM_CLASSIFICATION_MODEL", "gpt-4o-mini"),
+            llm_extraction_model=os.getenv("LLM_EXTRACTION_MODEL", "gpt-4o-mini"),
+            llm_reply_model=os.getenv("LLM_REPLY_MODEL", "gpt-4o-mini"),
+            llm_max_retries=_int_env("LLM_MAX_RETRIES", 1),
+            llm_timeout_seconds=_int_env("LLM_TIMEOUT_SECONDS", 15),
+            llm_max_input_chars=_int_env("LLM_MAX_INPUT_CHARS", 2000),
         )

@@ -94,8 +94,10 @@ async def test_authorized_first_message_creates_session_and_draft(
         )
         session_obj = (await session.execute(session_query)).scalar_one()
         assert session_obj.current_draft_id is not None
-        assert len(session_obj.history) == 1
+        assert len(session_obj.history) == 2
+        assert session_obj.history[0]["role"] == "user"
         assert session_obj.history[0]["text"] == "shalom"
+        assert session_obj.history[1]["role"] == "assistant"
 
         draft = await session.get(AdDraft, session_obj.current_draft_id)
         assert draft is not None
