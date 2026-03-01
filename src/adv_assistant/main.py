@@ -1,3 +1,4 @@
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -39,6 +40,8 @@ from adv_assistant.tasks_queue import (
     TaskEnqueuer,
 )
 from adv_assistant.whatsapp import MetaWhatsAppClient, NoopWhatsAppClient, WhatsAppClient
+
+logger = logging.getLogger(__name__)
 
 
 def _build_task_authorizer(settings: Settings) -> TaskRequestAuthorizer:
@@ -155,6 +158,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     message=result.reply_text,
                 )
             except Exception as exc:
+                logger.exception(
+                    "Outbound reply delivery failed (wamid=%s, operator_phone=%s)",
+                    payload.wamid,
+                    payload.operator_phone,
+                )
                 async with session_scope(session_factory) as cleanup_session:
                     processed_repo = ProcessedInboundMessageRepository(cleanup_session)
                     audit_repo = AuditEventRepository(cleanup_session)
@@ -338,6 +346,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 await task_enqueuer_value.enqueue_inbound(payload_obj)
             except Exception as exc:
+                logger.exception(
+                    "Inbound enqueue/processing failed (wamid=%s, operator_phone=%s, mode=%s)",
+                    event.wamid,
+                    event.operator_phone,
+                    settings_value.tasks_mode,
+                )
                 await audit_repo.log(
                     actor="system",
                     action="inbound_enqueue_failed",
