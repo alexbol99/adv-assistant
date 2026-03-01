@@ -1,3 +1,4 @@
+import calendar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -20,10 +21,6 @@ class RetentionPolicy:
     session_days: int = 90
     audit_months: int = 13
 
-    @property
-    def audit_days(self) -> int:
-        return self.audit_months * 30 + 5
-
 
 @dataclass(slots=True)
 class RetentionResult:
@@ -31,6 +28,25 @@ class RetentionResult:
     draft_deleted: int = 0
     session_deleted: int = 0
     audit_deleted: int = 0
+
+
+def subtract_calendar_months(value: datetime, months: int) -> datetime:
+    if months < 0:
+        msg = "months must be >= 0"
+        raise ValueError(msg)
+    if months == 0:
+        return value
+
+    year = value.year
+    month = value.month - months
+
+    while month <= 0:
+        year -= 1
+        month += 12
+
+    max_day = calendar.monthrange(year, month)[1]
+    day = min(value.day, max_day)
+    return value.replace(year=year, month=month, day=day)
 
 
 async def run_retention_jobs(
@@ -45,7 +61,7 @@ async def run_retention_jobs(
     cutoff_processed = current_time - timedelta(days=retention.processed_message_days)
     cutoff_draft = current_time - timedelta(days=retention.draft_days)
     cutoff_session = current_time - timedelta(days=retention.session_days)
-    cutoff_audit = current_time - timedelta(days=retention.audit_days)
+    cutoff_audit = subtract_calendar_months(current_time, retention.audit_months)
 
     result = RetentionResult()
 
