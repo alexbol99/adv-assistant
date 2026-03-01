@@ -23,8 +23,9 @@ from adv_assistant.db.repositories import (
 )
 from adv_assistant.db.retention import RetentionPolicy, run_retention_jobs
 
+pytestmark = pytest.mark.anyio
 
-@pytest.mark.asyncio
+
 async def test_crud_repositories(db_session: AsyncSession) -> None:
     operator_repo = OperatorRepository(db_session)
     session_repo = ConversationSessionRepository(db_session)
@@ -101,7 +102,6 @@ async def test_crud_repositories(db_session: AsyncSession) -> None:
     await db_session.commit()
 
 
-@pytest.mark.asyncio
 async def test_retention_jobs(db_session: AsyncSession) -> None:
     operator_repo = OperatorRepository(db_session)
     session_repo = ConversationSessionRepository(db_session)

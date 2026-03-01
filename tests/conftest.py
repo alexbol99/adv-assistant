@@ -1,4 +1,3 @@
-import asyncio
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -7,13 +6,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.db.base import Base
 from adv_assistant.db.session import create_engine
-
-
-@pytest.fixture(scope="session")
-def event_loop() -> asyncio.AbstractEventLoop:
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
 
 
 @pytest.fixture()
