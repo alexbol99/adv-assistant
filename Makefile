@@ -1,4 +1,4 @@
-.PHONY: install lint format test run docker-up
+.PHONY: install lint format test test-docker run docker-up
 
 install:
 	uv sync --all-groups
@@ -11,6 +11,9 @@ format:
 
 test:
 	uv run pytest
+
+test-docker:
+	docker compose run --rm -v "$$PWD":/app app sh -lc "pip install -e . pytest && pytest tests"
 
 run:
 	uv run uvicorn adv_assistant.main:app --reload --host 0.0.0.0 --port 8080
