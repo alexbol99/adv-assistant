@@ -53,12 +53,17 @@ Use `/Users/alexanderbol/WebstormProjects/adv-assistant/scripts/provision_db_acc
 - databases: `adv_assistant_staging`, `adv_assistant_prod`
 - service users (app + migrator per environment)
 - Secret Manager password entries
+- SQL grants and least-privilege hardening (automatic when admin DB password is available)
 
 Example:
 - `CLOUD_SQL_INSTANCE=adv-assistant-pg /Users/alexanderbol/WebstormProjects/adv-assistant/scripts/provision_db_access.sh`
 
+Recommended first run (bootstraps postgres admin password into Secret Manager and applies grants automatically):
+- `BOOTSTRAP_POSTGRES_ADMIN_PASSWORD=true CLOUD_SQL_INSTANCE=adv-assistant-pg /Users/alexanderbol/WebstormProjects/adv-assistant/scripts/provision_db_access.sh`
+
 Defaults:
 - `GCP_PROJECT_ID=ads-assistant-488908`
 - existing user passwords are not rotated unless `ROTATE_EXISTING_PASSWORDS=true`
+- automatic SQL grant application is enabled (`APPLY_SQL_GRANTS=true`)
 
-After the script runs, execute the printed SQL grant commands as Cloud SQL `postgres` superuser.
+If automatic grant application is unavailable (missing `psql`, `cloud-sql-proxy`, or admin password), the script prints manual SQL commands.
