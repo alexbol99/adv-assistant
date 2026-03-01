@@ -46,3 +46,19 @@ The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 ## Infrastructure Bootstrap Helper
 
 Use `/Users/alexanderbol/WebstormProjects/adv-assistant/scripts/bootstrap_gcp.sh` for initial GCP bootstrap (Cloud Run APIs, Cloud SQL, GCS bucket, Cloud Tasks queue).
+
+## DB Access Provisioning (Staging/Production)
+
+Use `/Users/alexanderbol/WebstormProjects/adv-assistant/scripts/provision_db_access.sh` to provision:
+- databases: `adv_assistant_staging`, `adv_assistant_prod`
+- service users (app + migrator per environment)
+- Secret Manager password entries
+
+Example:
+- `CLOUD_SQL_INSTANCE=adv-assistant-pg /Users/alexanderbol/WebstormProjects/adv-assistant/scripts/provision_db_access.sh`
+
+Defaults:
+- `GCP_PROJECT_ID=ads-assistant-488908`
+- existing user passwords are not rotated unless `ROTATE_EXISTING_PASSWORDS=true`
+
+After the script runs, execute the printed SQL grant commands as Cloud SQL `postgres` superuser.
