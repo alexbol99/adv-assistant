@@ -240,6 +240,7 @@ class InboundTaskProcessor:
                             language=operator.language,
                             unavailable_notice=enrichment_notice,
                         )
+                        enrichment_notice = None
 
                     if reply_text is None:
                         if classification.intent in {Intent.PUBLISH_AD, Intent.DELETE_ALL}:

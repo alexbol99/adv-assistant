@@ -345,6 +345,31 @@ async def test_unknown_intent_with_ean_triggers_deterministic_enrichment_reply(
         assert draft.enrichment_source == "open_food_facts"
 
 
+async def test_unknown_intent_with_ean_unavailable_notice_not_duplicated(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000504"
+    await _seed_operator(session_factory, phone)
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=UnknownIntentGateway(),
+        enrichment_service=StaticEnrichmentService(None),
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-unknown-ean-miss",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "7290004127326"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.reply_text is not None
+    expected = "I could not find additional product details for this barcode yet."
+    assert result.reply_text.count(expected) == 1
+
+
 def test_no_raw_enrichment_payload_field_is_defined() -> None:
     assert not hasattr(AdDraft, "enrichment_raw_payload")
     assert isinstance(NoopProductLookupProvider("none"), NoopProductLookupProvider)
