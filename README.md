@@ -80,6 +80,7 @@
 
 - Upgrade to latest schema:
   - `uv run alembic upgrade head`
+  - required after pulling schema changes (for example Phase 5 enrichment columns)
 - Create a new migration revision:
   - `uv run alembic revision -m "your message"`
 - Override migration DB URL:
