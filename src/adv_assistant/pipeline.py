@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.db.base import utcnow
 from adv_assistant.db.enums import AdDraftStatus
+from adv_assistant.db.models import AdDraft
 from adv_assistant.db.repositories import (
     AdDraftRepository,
     AuditEventRepository,
@@ -347,11 +348,11 @@ class InboundTaskProcessor:
         payload: InboundTaskPayload,
         draft_repo: AdDraftRepository,
         audit_repo: AuditEventRepository,
-        current_draft,
+        current_draft: AdDraft,
         language: str,
         detected_ean: str | None,
         allow_existing_draft_ean: bool,
-    ) -> tuple[Any, str | None]:
+    ) -> tuple[AdDraft, str | None]:
         ean = detected_ean
         if ean is None and allow_existing_draft_ean:
             ean = current_draft.ean
@@ -421,7 +422,7 @@ class InboundTaskProcessor:
 
     def _build_enrichment_update_fields(
         self,
-        current_draft,
+        current_draft: AdDraft,
         enriched: EnrichedProduct,
     ) -> dict[str, Any]:
         update_fields: dict[str, Any] = {
