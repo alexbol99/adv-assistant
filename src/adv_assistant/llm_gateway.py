@@ -115,6 +115,9 @@ def extract_button_payload_id(raw_message: dict[str, Any]) -> str | None:
 
 
 class LLMGateway(Protocol):
+    @property
+    def uses_external_llm(self) -> bool: ...
+
     async def classify_intent(
         self,
         *,
@@ -142,6 +145,10 @@ class LLMGateway(Protocol):
 
 
 class NoopLLMGateway:
+    @property
+    def uses_external_llm(self) -> bool:
+        return False
+
     async def classify_intent(
         self,
         *,
@@ -196,6 +203,10 @@ class OpenAILLMGateway:
         self._max_retries = max(0, max_retries)
         self._timeout_seconds = timeout_seconds
         self._max_input_chars = max_input_chars
+
+    @property
+    def uses_external_llm(self) -> bool:
+        return True
 
     async def classify_intent(
         self,

@@ -169,7 +169,7 @@ class InboundTaskProcessor:
                         language=operator.language,
                         history=history,
                     )
-                    llm_used = True
+                    llm_used = self._llm_gateway.uses_external_llm or llm_used
                     intent_value = classification.intent.value
 
                     extracted_fields = None
@@ -183,7 +183,7 @@ class InboundTaskProcessor:
                             language=operator.language,
                             history=history,
                         )
-                        llm_used = True
+                        llm_used = self._llm_gateway.uses_external_llm or llm_used
                         update_fields = extracted_fields.to_draft_update_fields()
                         if update_fields:
                             updated_draft = await draft_repo.update_for_operator_with_version(
@@ -217,7 +217,7 @@ class InboundTaskProcessor:
                                 language=operator.language,
                                 extracted_fields=extracted_fields,
                             )
-                            llm_used = True
+                            llm_used = self._llm_gateway.uses_external_llm or llm_used
                             reply_text = reply.reply_text
                 except LLMSchemaError:
                     reply_text = (

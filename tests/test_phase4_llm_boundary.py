@@ -26,6 +26,7 @@ pytestmark = pytest.mark.anyio
 
 class FakeGateway:
     def __init__(self) -> None:
+        self.uses_external_llm = True
         self.classify_calls = 0
         self.extract_calls = 0
         self.reply_calls = 0
@@ -155,6 +156,27 @@ async def test_injection_style_message_does_not_execute_destructive_action(
     assert result.intent == "delete_all"
     assert result.reply_text is not None
     assert "confirmation button" in result.reply_text.lower()
+
+
+async def test_noop_gateway_does_not_mark_llm_used(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000403"
+    await _seed_operator(session_factory, phone)
+    fake_gateway = FakeGateway()
+    fake_gateway.uses_external_llm = False
+    fake_gateway.classification = IntentClassification(intent=Intent.HELP)
+    processor = InboundTaskProcessor(session_factory, llm_gateway=fake_gateway)
+
+    payload = InboundTaskPayload(
+        wamid="wamid-noop-like",
+        operator_phone=phone,
+        raw_message={"type": "text", "text": {"body": "help"}},
+    )
+    result = await processor.process(payload)
+
+    assert result.status == "processed"
+    assert result.llm_used is False
 
 
 def test_sanitize_user_text_strips_html_and_control_chars() -> None:
