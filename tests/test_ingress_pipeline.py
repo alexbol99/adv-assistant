@@ -16,7 +16,8 @@ from adv_assistant.db.base import Base
 from adv_assistant.db.models import AuditEvent, ProcessedInboundMessage
 from adv_assistant.db.repositories import OperatorRepository
 from adv_assistant.db.session import session_scope
-from adv_assistant.main import create_app
+from adv_assistant.main import _build_task_authorizer, create_app
+from adv_assistant.tasks_auth import OidcTaskRequestAuthorizer, RejectAllTaskRequestAuthorizer
 from adv_assistant.tasks_queue import InboundTaskPayload
 
 pytestmark = pytest.mark.anyio
@@ -330,3 +331,18 @@ async def test_task_endpoint_deduplicates_wamid(
         )
         result = await session.execute(count_query)
         assert int(result.scalar_one()) == 1
+
+
+def test_task_authorizer_uses_handler_url_when_oidc_audience_missing() -> None:
+    settings = Settings(
+        tasks_handler_url="https://example.run.app/tasks/process-message",
+        tasks_oidc_audience=None,
+    )
+    authorizer = _build_task_authorizer(settings)
+    assert isinstance(authorizer, OidcTaskRequestAuthorizer)
+
+
+def test_task_authorizer_rejects_all_when_no_audience_or_handler_url() -> None:
+    settings = Settings(tasks_handler_url=None, tasks_oidc_audience=None)
+    authorizer = _build_task_authorizer(settings)
+    assert isinstance(authorizer, RejectAllTaskRequestAuthorizer)

@@ -32,9 +32,10 @@ from adv_assistant.whatsapp import MetaWhatsAppClient, NoopWhatsAppClient, Whats
 
 
 def _build_task_authorizer(settings: Settings) -> TaskRequestAuthorizer:
-    if settings.tasks_oidc_audience:
+    audience = settings.tasks_oidc_audience or settings.tasks_handler_url
+    if audience:
         return OidcTaskRequestAuthorizer(
-            audience=settings.tasks_oidc_audience,
+            audience=audience,
             allowed_service_account_email=settings.tasks_allowed_service_account_email,
         )
     return RejectAllTaskRequestAuthorizer()
