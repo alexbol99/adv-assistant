@@ -303,6 +303,6 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 
 ## Immediate Next Actions
 
-1. Freeze API contracts for webhook payload normalization and button callback payloads.
-2. Implement Phase 1 schema + migration + retention jobs first.
-3. Implement Phase 2 ingress security and dedup before any LLM/CMS logic.
+1. Implement Phase 2 webhook ingress endpoints (`GET /webhook`, `POST /webhook`) with signature verification and replay-window checks.
+2. Integrate Cloud Tasks enqueue + OIDC-protected task processor path, and enforce `wamid` dedup before business handling.
+3. Prepare Gate A evidence package (security tests + updated ingress ADRs) before starting Phase 3.
