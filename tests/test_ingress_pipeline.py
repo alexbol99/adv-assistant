@@ -302,6 +302,7 @@ async def test_task_endpoint_deduplicates_wamid(
     phase2_client: AsyncClient,
 ) -> None:
     phase2_app.state.task_authorizer = AllowAllTaskAuthorizer()
+    await _seed_operator(phase2_app.state.session_factory, "+972526508861")
     payload = {
         "wamid": "wamid-task-dedup",
         "operator_phone": "+972526508861",
