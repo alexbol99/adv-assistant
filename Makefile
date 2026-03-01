@@ -16,7 +16,7 @@ test-docker:
 	docker compose run --rm -v "$$PWD":/app app sh -lc "pip install -e . pytest && pytest tests"
 
 run:
-	uv run uvicorn adv_assistant.main:app --reload --host 0.0.0.0 --port 8080
+	set -a; [ -f .env ] && . ./.env; set +a; uv run uvicorn adv_assistant.main:app --reload --host 0.0.0.0 --port 8080
 
 docker-up:
 	docker compose up --build

@@ -30,9 +30,11 @@
    - `uv run pytest`
 3. Run the app locally:
    - `uv run uvicorn adv_assistant.main:app --reload --host 0.0.0.0 --port 8080`
+   - or `make run` (auto-loads `.env` into process env)
 4. Run with Docker:
    - `docker compose up --build`
    - create `.env` from `.env.example` and set a local-only `POSTGRES_PASSWORD`
+   - app container loads `.env` via `env_file`
    - never reuse local `.env` credentials in staging/production
 
 ## Webhook + Task Pipeline (Phase 2)
