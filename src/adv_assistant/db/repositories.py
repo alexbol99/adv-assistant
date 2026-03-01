@@ -129,6 +129,19 @@ class AdDraftRepository:
         result = await self.session.execute(select(AdDraft).where(AdDraft.id == draft_id))
         return result.scalar_one_or_none()
 
+    async def get_by_id_for_operator(
+        self,
+        draft_id: uuid.UUID,
+        operator_phone: str,
+    ) -> AdDraft | None:
+        result = await self.session.execute(
+            select(AdDraft).where(
+                AdDraft.id == draft_id,
+                AdDraft.operator_phone == operator_phone,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def list_by_operator_phone(self, operator_phone: str) -> list[AdDraft]:
         result = await self.session.execute(
             select(AdDraft)
@@ -151,6 +164,32 @@ class AdDraftRepository:
         result = await self.session.execute(
             update(AdDraft)
             .where(AdDraft.id == draft_id, AdDraft.version == expected_version)
+            .values(**update_values)
+        )
+        if (result.rowcount or 0) == 0:
+            return None
+        await self.session.flush()
+        return await self.get_by_id(draft_id)
+
+    async def update_for_operator_with_version(
+        self,
+        *,
+        draft_id: uuid.UUID,
+        operator_phone: str,
+        expected_version: int,
+        **fields: Any,
+    ) -> AdDraft | None:
+        update_values = dict(fields)
+        update_values["version"] = AdDraft.version + 1
+        update_values["updated_at"] = utcnow()
+
+        result = await self.session.execute(
+            update(AdDraft)
+            .where(
+                AdDraft.id == draft_id,
+                AdDraft.operator_phone == operator_phone,
+                AdDraft.version == expected_version,
+            )
             .values(**update_values)
         )
         if (result.rowcount or 0) == 0:
