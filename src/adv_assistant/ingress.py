@@ -78,6 +78,7 @@ def is_within_replay_window(
     replay_window_seconds: int,
 ) -> bool:
     if message_timestamp is None:
+        # Spec decision: enforce replay window only when provider timestamp is available.
         return True
     delta_seconds = abs((now - message_timestamp).total_seconds())
     return delta_seconds <= replay_window_seconds

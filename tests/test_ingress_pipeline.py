@@ -46,28 +46,24 @@ class AllowAllTaskAuthorizer:
         return True
 
 
-def _build_webhook_payload(*, from_phone: str, wamid: str, timestamp: datetime) -> dict[str, Any]:
+def _build_webhook_payload(
+    *,
+    from_phone: str,
+    wamid: str,
+    timestamp: datetime | None,
+) -> dict[str, Any]:
+    message_payload: dict[str, Any] = {
+        "from": from_phone,
+        "id": wamid,
+        "type": "text",
+        "text": {"body": "hello"},
+    }
+    if timestamp is not None:
+        message_payload["timestamp"] = str(int(timestamp.timestamp()))
+
     return {
         "object": "whatsapp_business_account",
-        "entry": [
-            {
-                "changes": [
-                    {
-                        "value": {
-                            "messages": [
-                                {
-                                    "from": from_phone,
-                                    "id": wamid,
-                                    "timestamp": str(int(timestamp.timestamp())),
-                                    "type": "text",
-                                    "text": {"body": "hello"},
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }
-        ],
+        "entry": [{"changes": [{"value": {"messages": [message_payload]}}]}],
     }
 
 
@@ -262,6 +258,32 @@ async def test_authorized_event_enqueued_and_stale_event_rejected(
         )
         == 1
     )
+
+
+async def test_authorized_event_without_timestamp_is_accepted(
+    phase2_app,
+    phase2_client: AsyncClient,
+) -> None:
+    fake_enqueuer = FakeTaskEnqueuer()
+    phase2_app.state.task_enqueuer = fake_enqueuer
+    await _seed_operator(phase2_app.state.session_factory, "+972526508861")
+
+    payload = _build_webhook_payload(
+        from_phone="972526508861",
+        wamid="wamid-no-ts",
+        timestamp=None,
+    )
+    body, signature = _sign_payload("phase2-test-secret", payload)
+
+    response = await phase2_client.post(
+        "/webhook",
+        content=body,
+        headers={"Content-Type": "application/json", "X-Hub-Signature-256": signature},
+    )
+
+    assert response.status_code == 200
+    assert len(fake_enqueuer.payloads) == 1
+    assert fake_enqueuer.payloads[0].wamid == "wamid-no-ts"
 
 
 async def test_task_endpoint_rejects_non_oidc_caller(phase2_client: AsyncClient) -> None:
