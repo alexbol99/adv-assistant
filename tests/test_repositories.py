@@ -102,6 +102,35 @@ async def test_crud_repositories(db_session: AsyncSession) -> None:
     await db_session.commit()
 
 
+async def test_processed_message_purge_uses_expires_at(db_session: AsyncSession) -> None:
+    processed_repo = ProcessedInboundMessageRepository(db_session)
+    now = utcnow()
+
+    db_session.add_all(
+        [
+            ProcessedInboundMessage(
+                wamid="purge-keep",
+                operator_phone="+972500000200",
+                processed_at=now - timedelta(days=120),
+                expires_at=now + timedelta(days=1),
+            ),
+            ProcessedInboundMessage(
+                wamid="purge-delete",
+                operator_phone="+972500000201",
+                processed_at=now - timedelta(days=1),
+                expires_at=now - timedelta(minutes=1),
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    deleted = await processed_repo.purge_older_than(now)
+
+    assert deleted == 1
+    assert await processed_repo.exists("purge-keep") is True
+    assert await processed_repo.exists("purge-delete") is False
+
+
 async def test_retention_jobs(db_session: AsyncSession) -> None:
     operator_repo = OperatorRepository(db_session)
     session_repo = ConversationSessionRepository(db_session)
@@ -152,7 +181,26 @@ async def test_retention_jobs(db_session: AsyncSession) -> None:
         processed_at=now,
         expires_at=now + timedelta(days=30),
     )
-    db_session.add_all([old_processed, new_processed])
+    old_but_unexpired_processed = ProcessedInboundMessage(
+        wamid="old-but-unexpired-wamid",
+        operator_phone=operator.phone,
+        processed_at=now - timedelta(days=120),
+        expires_at=now + timedelta(days=2),
+    )
+    recent_but_expired_processed = ProcessedInboundMessage(
+        wamid="recent-but-expired-wamid",
+        operator_phone=operator.phone,
+        processed_at=now - timedelta(days=1),
+        expires_at=now - timedelta(hours=1),
+    )
+    db_session.add_all(
+        [
+            old_processed,
+            new_processed,
+            old_but_unexpired_processed,
+            recent_but_expired_processed,
+        ]
+    )
 
     await audit_repo.log(
         actor="system",
@@ -179,7 +227,7 @@ async def test_retention_jobs(db_session: AsyncSession) -> None:
         now=now,
     )
 
-    assert result.processed_inbound_deleted == 1
+    assert result.processed_inbound_deleted == 2
     assert result.draft_deleted == 1
     assert result.session_deleted == 0
     assert result.audit_deleted == 1
@@ -187,6 +235,8 @@ async def test_retention_jobs(db_session: AsyncSession) -> None:
     remaining_processed = await processed_repo.exists("new-wamid")
     assert remaining_processed is True
     assert await processed_repo.exists("old-wamid") is False
+    assert await processed_repo.exists("old-but-unexpired-wamid") is True
+    assert await processed_repo.exists("recent-but-expired-wamid") is False
 
     remaining_old_draft = await draft_repo.get_by_id(old_draft.id)
     remaining_published_draft = await draft_repo.get_by_id(published_draft.id)

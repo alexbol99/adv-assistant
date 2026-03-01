@@ -249,7 +249,7 @@ class ProcessedInboundMessageRepository:
 
     async def purge_older_than(self, cutoff: datetime) -> int:
         result = await self.session.execute(
-            delete(ProcessedInboundMessage).where(ProcessedInboundMessage.processed_at < cutoff)
+            delete(ProcessedInboundMessage).where(ProcessedInboundMessage.expires_at < cutoff)
         )
         await self.session.flush()
         return result.rowcount or 0

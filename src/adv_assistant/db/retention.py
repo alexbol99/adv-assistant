@@ -58,7 +58,7 @@ async def run_retention_jobs(
     retention = policy or RetentionPolicy()
     current_time = now or datetime.now(UTC)
 
-    cutoff_processed = current_time - timedelta(days=retention.processed_message_days)
+    cutoff_processed = current_time
     cutoff_draft = current_time - timedelta(days=retention.draft_days)
     cutoff_session = current_time - timedelta(days=retention.session_days)
     cutoff_audit = subtract_calendar_months(current_time, retention.audit_months)
@@ -66,9 +66,7 @@ async def run_retention_jobs(
     result = RetentionResult()
 
     processed_result = await session.execute(
-        delete(ProcessedInboundMessage).where(
-            ProcessedInboundMessage.processed_at < cutoff_processed
-        )
+        delete(ProcessedInboundMessage).where(ProcessedInboundMessage.expires_at < cutoff_processed)
     )
     result.processed_inbound_deleted = processed_result.rowcount or 0
 
