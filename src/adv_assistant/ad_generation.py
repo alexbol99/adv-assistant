@@ -1,20 +1,23 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
+import asyncio
 import math
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
+from time import monotonic
 from typing import Any, Protocol
 
 import httpx
-from pydantic import BaseModel, Field
 
 
 class AdGenerationError(RuntimeError):
-    """Raised when generation submission or callback handling fails."""
+    """Raised when generation submission or polling fails."""
+
+
+class _RetryablePollError(AdGenerationError):
+    """Internal marker for transient poll errors."""
 
 
 class GenerationMode(StrEnum):
@@ -22,7 +25,7 @@ class GenerationMode(StrEnum):
     REFERENCE = "reference"
 
 
-class NanoBananaCallbackStatus(StrEnum):
+class NanoBananaJobStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -55,18 +58,12 @@ class GenerationSubmission:
     request_payload: dict[str, Any]
 
 
-class NanoBananaCallbackMetadata(BaseModel):
-    draft_id: str
-    operator_phone: str
-
-
-class NanoBananaCallbackPayload(BaseModel):
-    job_id: str = Field(min_length=1, max_length=256)
-    status: NanoBananaCallbackStatus
+@dataclass(slots=True)
+class GenerationPollResult:
+    status: NanoBananaJobStatus
     output_image_url: str | None = None
     error_code: str | None = None
     error_message: str | None = None
-    metadata: NanoBananaCallbackMetadata
 
 
 class AdGenerationService(Protocol):
@@ -83,6 +80,8 @@ class AdGenerationService(Protocol):
         width: int,
         height: int,
     ) -> GenerationSubmission: ...
+
+    async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult: ...
 
     async def close(self) -> None: ...
 
@@ -104,6 +103,9 @@ class NoopAdGenerationService:
     ) -> GenerationSubmission:
         raise AdGenerationError("Ad generation service is not configured")
 
+    async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult:
+        raise AdGenerationError("Ad generation service is not configured")
+
     async def close(self) -> None:
         return None
 
@@ -115,15 +117,24 @@ class NanoBananaAdGenerationService:
         api_key: str,
         api_url: str | None = None,
         base_url: str | None = None,
-        callback_url: str,
+        status_api_url_template: str | None = None,
         model: str = "nanobanana-2",
         timeout_seconds: float = 20.0,
+        poll_initial_seconds: float = 2.0,
+        poll_max_seconds: float = 10.0,
+        poll_timeout_seconds: float = 900.0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_key = api_key
         self._api_url = _resolve_generation_api_url(api_url=api_url, base_url=base_url)
-        self._callback_url = callback_url
+        self._status_api_url_template = _resolve_status_api_url_template(
+            status_api_url_template=status_api_url_template,
+            base_url=base_url,
+        )
         self._model = model
+        self._poll_initial_seconds = max(0.1, poll_initial_seconds)
+        self._poll_max_seconds = max(self._poll_initial_seconds, poll_max_seconds)
+        self._poll_timeout_seconds = max(1.0, poll_timeout_seconds)
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
 
@@ -161,7 +172,6 @@ class NanoBananaAdGenerationService:
             ),
             "size": {"width": width, "height": height},
             "aspect_ratio": aspect_ratio,
-            "callback_url": self._callback_url,
             "metadata": {
                 "draft_id": str(draft.draft_id),
                 "operator_phone": draft.operator_phone,
@@ -197,6 +207,70 @@ class NanoBananaAdGenerationService:
             idempotency_key=idempotency_key,
             mode=mode,
             request_payload=payload,
+        )
+
+    async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult:
+        interval = self._poll_initial_seconds
+        deadline = monotonic() + self._poll_timeout_seconds
+
+        while monotonic() <= deadline:
+            try:
+                result = await self._fetch_job_status(job_id=job_id)
+            except _RetryablePollError:
+                await asyncio.sleep(interval)
+                interval = min(interval * 2, self._poll_max_seconds)
+                continue
+
+            if result.status in {NanoBananaJobStatus.COMPLETED, NanoBananaJobStatus.FAILED}:
+                return result
+
+            await asyncio.sleep(interval)
+            interval = min(interval * 2, self._poll_max_seconds)
+
+        raise AdGenerationError(
+            f"Nano Banana polling timed out for job_id={job_id} after "
+            f"{self._poll_timeout_seconds:.0f} seconds"
+        )
+
+    async def _fetch_job_status(self, *, job_id: str) -> GenerationPollResult:
+        try:
+            response = await self._client.get(
+                self._status_api_url_template.format(job_id=job_id),
+                headers={"Authorization": f"Bearer {self._api_key}"},
+            )
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code is not None and (status_code == 429 or status_code >= 500):
+                raise _RetryablePollError(f"Retryable poll HTTP status: {status_code}") from exc
+            raise AdGenerationError(f"Nano Banana polling failed: {exc}") from exc
+        except httpx.RequestError as exc:
+            raise _RetryablePollError(f"Retryable poll request error: {exc}") from exc
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise AdGenerationError("Nano Banana poll response is not valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise AdGenerationError("Nano Banana poll response has unexpected format")
+
+        raw_status = payload.get("status")
+        if not isinstance(raw_status, str):
+            raise AdGenerationError("Nano Banana poll response missing status")
+
+        try:
+            status = NanoBananaJobStatus(raw_status.strip().lower())
+        except ValueError as exc:
+            raise AdGenerationError(f"Unsupported Nano Banana status: {raw_status}") from exc
+
+        output_image_url = payload.get("output_image_url")
+        error_code = payload.get("error_code")
+        error_message = payload.get("error_message")
+        return GenerationPollResult(
+            status=status,
+            output_image_url=output_image_url if isinstance(output_image_url, str) else None,
+            error_code=error_code if isinstance(error_code, str) else None,
+            error_message=error_message if isinstance(error_message, str) else None,
         )
 
     async def close(self) -> None:
@@ -256,34 +330,29 @@ def build_generation_prompt(
     return "\n".join(lines)
 
 
-def verify_nana_banana_signature(
-    *,
-    callback_secret: str | None,
-    payload_body: bytes,
-    signature_header: str | None,
-) -> bool:
-    if not callback_secret or not signature_header:
-        return False
-    if not signature_header.startswith("sha256="):
-        return False
-    provided = signature_header[len("sha256=") :]
-    expected = hmac.new(
-        callback_secret.encode("utf-8"),
-        payload_body,
-        hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(provided, expected)
-
-
-def _price_to_text(price: Decimal | None, currency: str) -> str:
-    if price is None:
-        return "not provided"
-    return f"{price} {currency}"
-
-
 def _resolve_generation_api_url(*, api_url: str | None, base_url: str | None) -> str:
     if api_url and api_url.strip():
         return api_url.strip()
     if base_url and base_url.strip():
         return f"{base_url.rstrip('/')}/v1/generate"
     raise ValueError("Either api_url or base_url is required")
+
+
+def _resolve_status_api_url_template(
+    *,
+    status_api_url_template: str | None,
+    base_url: str | None,
+) -> str:
+    if status_api_url_template and status_api_url_template.strip():
+        if "{job_id}" not in status_api_url_template:
+            raise ValueError("status_api_url_template must include '{job_id}' placeholder")
+        return status_api_url_template.strip()
+    if base_url and base_url.strip():
+        return f"{base_url.rstrip('/')}/v1/generate/{{job_id}}"
+    raise ValueError("status_api_url_template is required when base_url is not provided")
+
+
+def _price_to_text(price: Decimal | None, currency: str) -> str:
+    if price is None:
+        return "not provided"
+    return f"{price} {currency}"

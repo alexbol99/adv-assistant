@@ -125,10 +125,10 @@ This preserves integration progress without changing production decisions.
 **Nano Banana** is the chosen ad image generation service. Its API uses an **asynchronous job model**:
 
 1. The bot POSTs a generation request and receives a **job ID** immediately.
-2. Nano Banana sends a **webhook callback** when the job state changes.
+2. The bot polls the job status endpoint using the `job_id` until terminal state.
 3. On completion, the rendered image URL (or binary) is retrieved and uploaded to GCS.
 
-**Implementation mode:** Callback-only. Polling is intentionally not implemented in this phase.
+**Implementation mode:** Polling-only. Callback endpoint is intentionally not implemented in this phase.
 
 ### 5.2 Generation Modes
 
@@ -147,7 +147,7 @@ The following integration contract is now locked for implementation.
 2. **Model**: `Nanobanana 2`.
 3. **Aspect ratio derivation**: derive `aspect_ratio` from requested resolution; for `1920x1080`, use `16:9`.
 4. **Reference image input**: URL (`reference_image_url`) for reference-based regeneration.
-5. **Callback delivery**: Nano Banana posts generation status updates to a bot callback endpoint (`POST /callbacks/nano-banana`).
+5. **Polling status contract**: bot polls status endpoint by `job_id` until terminal state (`completed`/`failed`).
 
 #### 5.3.1 Recommended Request Schema (adapter contract)
 
@@ -158,7 +158,6 @@ The following integration contract is now locked for implementation.
   "size": { "width": 1920, "height": 1080 },
   "aspect_ratio": "16:9",
   "reference_image_url": "https://.../previous.png",
-  "callback_url": "https://<bot>/callbacks/nano-banana",
   "metadata": {
     "draft_id": "<uuid>",
     "operator_phone": "<e164>"
@@ -171,7 +170,7 @@ Notes:
 - `reference_image_url` is omitted for fresh generation.
 - `idempotency_key` must be stable across retries of the same logical job.
 
-#### 5.3.2 Recommended Callback Payload (adapter contract)
+#### 5.3.2 Recommended Status Payload (adapter contract)
 
 ```json
 {
@@ -188,7 +187,7 @@ Notes:
 ```
 
 Operational recommendations:
-- Verify callback authenticity (shared-secret HMAC header).
+- Validate polled status payload schema and job_id consistency.
 - Treat `429` and `5xx` as retryable; treat `4xx` (except `409`) as permanent failures.
 
 ---
@@ -263,7 +262,7 @@ All enriched data is treated as **supplementary** — the operator's explicitly 
 | Confirmation mechanism | Button payload only for publish/delete-all confirmation |
 | Unauthorized number handling | Generic rejection once per number per 60-minute window, then silent ignore |
 | Draft ownership | Private per operator, optimistic concurrency (first-write-wins) |
-| Ad generation service | Nano Banana (async job + callback) |
+| Ad generation service | Nano Banana (async job + polling) |
 | Nano Banana auth/model | Bearer token + `Nanobanana 2` |
 | Product domain | Food/grocery, Israel-focused |
 | Barcode decoding | ZXing/zbar (primary) → vision-LLM (fallback) |

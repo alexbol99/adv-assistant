@@ -9,6 +9,7 @@ from adv_assistant.ad_generation import (
     AdGenerationService,
     GenerationDraftInput,
     GenerationMode,
+    NanoBananaJobStatus,
     NoopAdGenerationService,
 )
 from adv_assistant.db.base import utcnow
@@ -301,7 +302,6 @@ class InboundTaskProcessor:
                                     )
                                 else:
                                     current_draft = updated_draft
-                                    deterministic_action = "generation_submitted"
                                     await audit_repo.log(
                                         actor="system",
                                         action="generation_job_submitted",
@@ -314,12 +314,98 @@ class InboundTaskProcessor:
                                             "idempotency_key": submission.idempotency_key,
                                         },
                                     )
-                                    reply_text = _generation_started_reply(operator.language)
+                                    poll_result = (
+                                        await self._ad_generation_service.wait_for_completion(
+                                            job_id=submission.job_id
+                                        )
+                                    )
+                                    if (
+                                        poll_result.status == NanoBananaJobStatus.COMPLETED
+                                        and poll_result.output_image_url
+                                    ):
+                                        completed_draft = (
+                                            await draft_repo.update_for_operator_with_version(
+                                                draft_id=current_draft.id,
+                                                operator_phone=payload.operator_phone,
+                                                expected_version=current_draft.version,
+                                                status=AdDraftStatus.PREVIEW_READY,
+                                                rendered_image_url=poll_result.output_image_url,
+                                                preview_reference_url=poll_result.output_image_url,
+                                            )
+                                        )
+                                        if completed_draft is None:
+                                            reply_text = (
+                                                "This draft was already changed. "
+                                                "Please refresh and try again."
+                                            )
+                                            await audit_repo.log(
+                                                actor="system",
+                                                action="draft_stale_write_detected",
+                                                operator_phone=payload.operator_phone,
+                                                metadata={"wamid": payload.wamid},
+                                            )
+                                        else:
+                                            current_draft = completed_draft
+                                            deterministic_action = "generation_completed"
+                                            await audit_repo.log(
+                                                actor="system",
+                                                action="generation_completed",
+                                                operator_phone=payload.operator_phone,
+                                                metadata={
+                                                    "wamid": payload.wamid,
+                                                    "draft_id": str(current_draft.id),
+                                                    "job_id": submission.job_id,
+                                                    "output_image_url": (
+                                                        poll_result.output_image_url
+                                                    ),
+                                                },
+                                            )
+                                            reply_text = _generation_completed_reply(
+                                                operator.language,
+                                                poll_result.output_image_url,
+                                            )
+                                    else:
+                                        failed_draft = (
+                                            await draft_repo.update_for_operator_with_version(
+                                                draft_id=current_draft.id,
+                                                operator_phone=payload.operator_phone,
+                                                expected_version=current_draft.version,
+                                                status=AdDraftStatus.DRAFT,
+                                            )
+                                        )
+                                        if failed_draft is not None:
+                                            current_draft = failed_draft
+                                        deterministic_action = "generation_failed"
+                                        await audit_repo.log(
+                                            actor="system",
+                                            action="generation_failed",
+                                            operator_phone=payload.operator_phone,
+                                            metadata={
+                                                "wamid": payload.wamid,
+                                                "draft_id": str(current_draft.id),
+                                                "job_id": submission.job_id,
+                                                "status": poll_result.status.value,
+                                                "error_code": poll_result.error_code,
+                                                "error_message": poll_result.error_message,
+                                            },
+                                        )
+                                        reply_text = _generation_failed_reply(operator.language)
                             except AdGenerationError as exc:
+                                if current_draft.status == AdDraftStatus.GENERATING:
+                                    reverted_draft = (
+                                        await draft_repo.update_for_operator_with_version(
+                                            draft_id=current_draft.id,
+                                            operator_phone=payload.operator_phone,
+                                            expected_version=current_draft.version,
+                                            status=AdDraftStatus.DRAFT,
+                                        )
+                                    )
+                                    if reverted_draft is not None:
+                                        current_draft = reverted_draft
                                 reply_text = _generation_failed_reply(operator.language)
                                 await audit_repo.log(
                                     actor="system",
-                                    action="generation_submission_failed",
+                                    action="generation_flow_failed",
                                     operator_phone=payload.operator_phone,
                                     metadata={
                                         "wamid": payload.wamid,
@@ -626,10 +712,10 @@ def _to_generation_draft_input(
     )
 
 
-def _generation_started_reply(language: str) -> str:
+def _generation_completed_reply(language: str, preview_url: str) -> str:
     if language.lower() == "he":
-        return "מעולה, יוצר עכשיו את המודעה שלך. אשלח תצוגה מקדימה כשזה יהיה מוכן."
-    return "Great, generating your ad now. I will send a preview when it is ready."
+        return f"התצוגה המקדימה מוכנה.\n{preview_url}"
+    return f"Your ad preview is ready.\n{preview_url}"
 
 
 def _generation_failed_reply(language: str) -> str:

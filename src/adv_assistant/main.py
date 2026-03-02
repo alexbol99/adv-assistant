@@ -3,26 +3,19 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Annotated
-from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import ValidationError
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.ad_generation import (
     NanoBananaAdGenerationService,
-    NanoBananaCallbackPayload,
-    NanoBananaCallbackStatus,
     NoopAdGenerationService,
-    verify_nana_banana_signature,
 )
 from adv_assistant.config import Settings
 from adv_assistant.db.base import utcnow
-from adv_assistant.db.enums import AdDraftStatus
 from adv_assistant.db.repositories import (
-    AdDraftRepository,
     AuditEventRepository,
     OperatorRepository,
     ProcessedInboundMessageRepository,
@@ -94,7 +87,6 @@ def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentServ
 def _build_ad_generation_service(settings: Settings):
     required = {
         "NANA_BANANA_API_KEY": settings.nana_banana_api_key,
-        "NANA_BANANA_CALLBACK_URL": settings.nana_banana_callback_url,
     }
     has_api_target = bool(settings.nana_banana_api_url or settings.nana_banana_base_url)
     if all(required.values()) and has_api_target:
@@ -102,9 +94,12 @@ def _build_ad_generation_service(settings: Settings):
             api_key=settings.nana_banana_api_key or "",
             api_url=settings.nana_banana_api_url,
             base_url=settings.nana_banana_base_url or "",
-            callback_url=settings.nana_banana_callback_url or "",
+            status_api_url_template=settings.nana_banana_status_api_url_template,
             model=settings.nana_banana_model,
             timeout_seconds=settings.nana_banana_timeout_seconds,
+            poll_initial_seconds=settings.nana_banana_poll_initial_seconds,
+            poll_max_seconds=settings.nana_banana_poll_max_seconds,
+            poll_timeout_seconds=settings.nana_banana_poll_timeout_seconds,
         )
     return NoopAdGenerationService()
 
@@ -331,152 +326,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ]
     WhatsAppClientDep = Annotated[WhatsAppClient, Depends(get_whatsapp_client)]
 
-    async def process_nano_banana_callback(
-        callback: NanoBananaCallbackPayload,
-        *,
-        whatsapp_client_value: WhatsAppClient,
-    ) -> str:
-        metadata = callback.metadata
-        try:
-            draft_id = UUID(metadata.draft_id)
-        except ValueError:
-            async with session_scope(session_factory) as session:
-                await AuditEventRepository(session).log(
-                    actor="system",
-                    action="generation_callback_invalid_metadata",
-                    operator_phone=metadata.operator_phone,
-                    metadata={"job_id": callback.job_id, "draft_id": metadata.draft_id},
-                )
-            return "ignored"
-
-        outgoing_message: str | None = None
-        operator_phone = metadata.operator_phone
-        async with session_scope(session_factory) as session:
-            draft_repo = AdDraftRepository(session)
-            operator_repo = OperatorRepository(session)
-            audit_repo = AuditEventRepository(session)
-
-            draft = await draft_repo.get_by_id_for_operator(
-                draft_id=draft_id,
-                operator_phone=operator_phone,
-            )
-            if draft is None:
-                await audit_repo.log(
-                    actor="system",
-                    action="generation_callback_unknown_draft",
-                    operator_phone=operator_phone,
-                    metadata={"job_id": callback.job_id, "draft_id": str(draft_id)},
-                )
-                return "ignored"
-
-            if draft.generation_job_id != callback.job_id:
-                await audit_repo.log(
-                    actor="system",
-                    action="generation_callback_job_mismatch",
-                    operator_phone=operator_phone,
-                    metadata={
-                        "job_id": callback.job_id,
-                        "draft_id": str(draft_id),
-                        "expected_job_id": draft.generation_job_id,
-                    },
-                )
-                return "ignored"
-
-            operator = await operator_repo.get_by_phone(operator_phone)
-            language = (operator.language if operator else "en").lower()
-
-            if callback.status in {
-                NanoBananaCallbackStatus.QUEUED,
-                NanoBananaCallbackStatus.RUNNING,
-            }:
-                await audit_repo.log(
-                    actor="system",
-                    action="generation_callback_progress",
-                    operator_phone=operator_phone,
-                    metadata={
-                        "job_id": callback.job_id,
-                        "draft_id": str(draft_id),
-                        "status": callback.status.value,
-                    },
-                )
-                return "accepted"
-
-            if callback.status == NanoBananaCallbackStatus.COMPLETED and callback.output_image_url:
-                updated = await draft_repo.update_for_operator_with_version(
-                    draft_id=draft.id,
-                    operator_phone=operator_phone,
-                    expected_version=draft.version,
-                    status=AdDraftStatus.PREVIEW_READY,
-                    rendered_image_url=callback.output_image_url,
-                    preview_reference_url=callback.output_image_url,
-                )
-                if updated is None:
-                    await audit_repo.log(
-                        actor="system",
-                        action="draft_stale_write_detected",
-                        operator_phone=operator_phone,
-                        metadata={"job_id": callback.job_id, "draft_id": str(draft_id)},
-                    )
-                    return "accepted"
-                await audit_repo.log(
-                    actor="system",
-                    action="generation_completed",
-                    operator_phone=operator_phone,
-                    metadata={
-                        "job_id": callback.job_id,
-                        "draft_id": str(draft_id),
-                        "output_image_url": callback.output_image_url,
-                    },
-                )
-                if language == "he":
-                    outgoing_message = f"התצוגה המקדימה מוכנה.\n{callback.output_image_url}"
-                else:
-                    outgoing_message = f"Your ad preview is ready.\n{callback.output_image_url}"
-            else:
-                updated = await draft_repo.update_for_operator_with_version(
-                    draft_id=draft.id,
-                    operator_phone=operator_phone,
-                    expected_version=draft.version,
-                    status=AdDraftStatus.DRAFT,
-                )
-                if updated is None:
-                    await audit_repo.log(
-                        actor="system",
-                        action="draft_stale_write_detected",
-                        operator_phone=operator_phone,
-                        metadata={"job_id": callback.job_id, "draft_id": str(draft_id)},
-                    )
-                    return "accepted"
-                await audit_repo.log(
-                    actor="system",
-                    action="generation_failed",
-                    operator_phone=operator_phone,
-                    metadata={
-                        "job_id": callback.job_id,
-                        "draft_id": str(draft_id),
-                        "error_code": callback.error_code,
-                        "error_message": callback.error_message,
-                    },
-                )
-                if language == "he":
-                    outgoing_message = "יצירת המודעה נכשלה. נסה שוב בעוד רגע."
-                else:
-                    outgoing_message = "Ad generation failed. Please try again in a moment."
-
-        if outgoing_message:
-            try:
-                await whatsapp_client_value.send_text(
-                    to_phone=operator_phone,
-                    message=outgoing_message,
-                )
-            except Exception:
-                logger.exception(
-                    "Generation callback notification delivery failed (job_id=%s, operator=%s)",
-                    callback.job_id,
-                    operator_phone,
-                )
-        return "accepted"
-
     HubMode = Annotated[str, Query(alias="hub.mode")]
     HubToken = Annotated[str, Query(alias="hub.verify_token")]
     HubChallenge = Annotated[str, Query(alias="hub.challenge")]
@@ -598,38 +447,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             enqueued_count += 1
 
         return {"status": "accepted", "received": len(events), "enqueued": enqueued_count}
-
-    @app.post("/callbacks/nano-banana")
-    async def receive_nano_banana_callback(
-        request: Request,
-        settings_value: SettingsDep,
-        whatsapp_client_value: WhatsAppClientDep,
-    ) -> dict[str, str]:
-        if not settings_value.nana_banana_callback_secret:
-            raise HTTPException(
-                status_code=503, detail="Nano Banana callback secret is not configured"
-            )
-
-        body = await request.body()
-        signature_header = request.headers.get("X-Nano-Banana-Signature-256")
-        if not verify_nana_banana_signature(
-            callback_secret=settings_value.nana_banana_callback_secret,
-            payload_body=body,
-            signature_header=signature_header,
-        ):
-            raise HTTPException(status_code=401, detail="Invalid callback signature")
-
-        try:
-            payload_json = await request.json()
-            callback_payload = NanoBananaCallbackPayload.model_validate(payload_json)
-        except (ValueError, ValidationError) as exc:
-            raise HTTPException(status_code=400, detail="Invalid callback payload") from exc
-
-        status = await process_nano_banana_callback(
-            callback_payload,
-            whatsapp_client_value=whatsapp_client_value,
-        )
-        return {"status": status}
 
     @app.post("/tasks/process-message")
     async def process_message_task(
