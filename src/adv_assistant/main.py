@@ -373,7 +373,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await enrichment_service.close()
             await ad_generation_service.close()
             await media_store.close()
-            await ad_generation_service.close()
             await engine.dispose()
 
     app = FastAPI(title=current_settings.app_name, lifespan=lifespan)

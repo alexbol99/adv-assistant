@@ -17,6 +17,8 @@ from adv_assistant.db.models import (
     SystemConfig,
 )
 
+_UNSET = object()
+
 
 class OperatorRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -76,9 +78,9 @@ class ConversationSessionRepository:
         operator_phone: str,
         language: str | None = None,
         history: list[dict[str, Any]] | None = None,
-        current_draft_id: uuid.UUID | None = None,
+        current_draft_id: uuid.UUID | None | object = _UNSET,
         last_active_at: datetime | None = None,
-        expires_at: datetime | None = None,
+        expires_at: datetime | None | object = _UNSET,
     ) -> ConversationSession:
         session_obj = await self.get_by_operator_phone(operator_phone)
         if session_obj is None:
@@ -86,9 +88,11 @@ class ConversationSessionRepository:
                 operator_phone=operator_phone,
                 language=language or "he",
                 history=history or [],
-                current_draft_id=current_draft_id,
+                current_draft_id=(
+                    None if current_draft_id is _UNSET else current_draft_id
+                ),
                 last_active_at=last_active_at or utcnow(),
-                expires_at=expires_at,
+                expires_at=None if expires_at is _UNSET else expires_at,
             )
             self.session.add(session_obj)
         else:
@@ -96,11 +100,11 @@ class ConversationSessionRepository:
                 session_obj.language = language
             if history is not None:
                 session_obj.history = history
-            if current_draft_id is not None:
+            if current_draft_id is not _UNSET:
                 session_obj.current_draft_id = current_draft_id
             if last_active_at is not None:
                 session_obj.last_active_at = last_active_at
-            if expires_at is not None:
+            if expires_at is not _UNSET:
                 session_obj.expires_at = expires_at
             session_obj.updated_at = utcnow()
 
