@@ -89,6 +89,15 @@
   - `NANA_BANANA_POLL_MAX_SECONDS` (default `10`)
   - `NANA_BANANA_POLL_TIMEOUT_SECONDS` (default `900`)
   - `AD_RENDER_WIDTH` / `AD_RENDER_HEIGHT` (default `1920x1080`; aspect ratio derived automatically)
+- Media lifecycle/storage configuration (Phase 6):
+  - `MEDIA_STORE_MODE` (`noop` or `gcs`, default `noop`)
+  - `MEDIA_GCS_BUCKET` (required when `MEDIA_STORE_MODE=gcs`)
+  - `MEDIA_GCS_PUBLIC_BASE_URL` (default `https://storage.googleapis.com`)
+  - `MEDIA_GCS_OBJECT_PREFIX` (default `operator-photos`)
+  - `MEDIA_LIFECYCLE_DAYS` (default `90`)
+  - `MEDIA_VERIFY_LIFECYCLE_ON_STARTUP` (default `false`; when `true`, app startup validates a matching GCS Delete lifecycle rule)
+  - `WHATSAPP_MEDIA_TIMEOUT_SECONDS` (default `15`)
+  - authorized operator image messages now trigger Meta media download + upload to configured media store and update draft `photo_url`
 
 ## Database Migrations
 

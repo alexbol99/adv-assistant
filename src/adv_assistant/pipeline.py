@@ -42,6 +42,11 @@ from adv_assistant.llm_gateway import (
     extract_button_payload_id,
     sanitize_user_text,
 )
+from adv_assistant.media_ingest import (
+    MediaIngestError,
+    NoopOperatorPhotoIngestor,
+    OperatorPhotoIngestor,
+)
 from adv_assistant.tasks_queue import InboundTaskPayload
 
 logger = logging.getLogger(__name__)
@@ -79,6 +84,19 @@ def _extract_text(raw_message: dict[str, Any]) -> str | None:
     return stripped or None
 
 
+def _extract_image_media_id(raw_message: dict[str, Any]) -> str | None:
+    if raw_message.get("type") != "image":
+        return None
+    image_payload = raw_message.get("image")
+    if not isinstance(image_payload, dict):
+        return None
+    media_id = image_payload.get("id")
+    if not isinstance(media_id, str):
+        return None
+    stripped = media_id.strip()
+    return stripped or None
+
+
 class InboundTaskProcessor:
     def __init__(
         self,
@@ -89,6 +107,7 @@ class InboundTaskProcessor:
         ad_generation_service: AdGenerationService | None = None,
         render_width: int = 1920,
         render_height: int = 1080,
+        operator_photo_ingestor: OperatorPhotoIngestor | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._llm_gateway = llm_gateway or NoopLLMGateway()
@@ -96,6 +115,7 @@ class InboundTaskProcessor:
         self._ad_generation_service = ad_generation_service or NoopAdGenerationService()
         self._render_width = render_width
         self._render_height = render_height
+        self._operator_photo_ingestor = operator_photo_ingestor or NoopOperatorPhotoIngestor()
 
     async def process(self, payload: InboundTaskPayload) -> ProcessInboundResult:
         async with session_scope(self._session_factory) as session:
@@ -160,6 +180,7 @@ class InboundTaskProcessor:
                 raise RuntimeError("current draft was not created")
 
             incoming_text = _extract_text(payload.raw_message)
+            incoming_image_media_id = _extract_image_media_id(payload.raw_message)
             button_payload_id = extract_button_payload_id(payload.raw_message)
             llm_used = False
             intent_value: str | None = None
@@ -182,6 +203,24 @@ class InboundTaskProcessor:
                     action="button_callback_resolved",
                     operator_phone=payload.operator_phone,
                     metadata={"wamid": payload.wamid, "button_id": button_payload_id},
+                )
+            elif incoming_image_media_id is not None:
+                history.append(
+                    {
+                        "role": "user",
+                        "text": "[image]",
+                        "wamid": payload.wamid,
+                    }
+                )
+                deterministic_action = "operator_photo_ingest"
+                intent_value = deterministic_action
+                current_draft, reply_text = await self._process_operator_photo_message(
+                    payload=payload,
+                    draft_repo=draft_repo,
+                    audit_repo=audit_repo,
+                    current_draft=current_draft,
+                    language=operator.language,
+                    media_id=incoming_image_media_id,
                 )
             elif incoming_text is not None:
                 sanitized_text = sanitize_user_text(incoming_text, max_chars=2000)
@@ -501,7 +540,8 @@ class InboundTaskProcessor:
                     )
             else:
                 reply_text = (
-                    "Unsupported message type. Please send text or use confirmation buttons."
+                    "Unsupported message type. Please send text, image, "
+                    "or use confirmation buttons."
                 )
 
             if reply_text is not None:
@@ -560,6 +600,105 @@ class InboundTaskProcessor:
                 reply_text=reply_text,
                 generated_image_url=generated_image_url,
             )
+
+    async def _process_operator_photo_message(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        language: str,
+        media_id: str,
+    ) -> tuple[AdDraft, str]:
+        try:
+            ingested_photo = await self._operator_photo_ingestor.ingest_whatsapp_image(
+                media_id=media_id
+            )
+        except MediaIngestError as exc:
+            await audit_repo.log(
+                actor="system",
+                action="operator_photo_ingest_failed",
+                operator_phone=payload.operator_phone,
+                metadata={"wamid": payload.wamid, "media_id": media_id, "error": str(exc)},
+            )
+            return (
+                current_draft,
+                "I could not process your photo right now. Please try sending it again.",
+            )
+
+        updated_draft = await draft_repo.update_for_operator_with_version(
+            draft_id=current_draft.id,
+            operator_phone=payload.operator_phone,
+            expected_version=current_draft.version,
+            photo_url=ingested_photo.public_url,
+        )
+        if updated_draft is None:
+            await audit_repo.log(
+                actor="system",
+                action="draft_stale_write_detected",
+                operator_phone=payload.operator_phone,
+                metadata={"wamid": payload.wamid, "media_id": media_id},
+            )
+            return (
+                current_draft,
+                "This draft was already changed. Please refresh and try again.",
+            )
+        current_draft = updated_draft
+
+        detected_ean: str | None = None
+        try:
+            detected_ean = await self._enrichment_service.decode_ean_from_image(
+                ingested_photo.content
+            )
+        except Exception as exc:
+            await audit_repo.log(
+                actor="system",
+                action="barcode_decode_failed",
+                operator_phone=payload.operator_phone,
+                metadata={"wamid": payload.wamid, "media_id": media_id, "error": str(exc)},
+            )
+
+        enrichment_notice: str | None = None
+        try:
+            current_draft, enrichment_notice = await self._enrich_current_draft(
+                payload=payload,
+                draft_repo=draft_repo,
+                audit_repo=audit_repo,
+                current_draft=current_draft,
+                language=language,
+                detected_ean=detected_ean,
+                allow_existing_draft_ean=False,
+            )
+        except Exception as exc:
+            await audit_repo.log(
+                actor="system",
+                action="photo_enrichment_failed",
+                operator_phone=payload.operator_phone,
+                metadata={"wamid": payload.wamid, "media_id": media_id, "error": str(exc)},
+            )
+
+        await audit_repo.log(
+            actor="system",
+            action="operator_photo_ingested",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "media_id": media_id,
+                "media_object_name": ingested_photo.object_name,
+                "photo_url": ingested_photo.public_url,
+                "detected_ean": detected_ean,
+            },
+        )
+
+        reply_text = _build_photo_ingest_reply(
+            draft=current_draft,
+            language=language,
+            detected_ean=detected_ean,
+        )
+        if enrichment_notice:
+            reply_text = f"{reply_text}\n\n{enrichment_notice}"
+        return current_draft, reply_text
 
     async def _enrich_current_draft(
         self,
@@ -769,3 +908,26 @@ def _generation_failed_reply(language: str) -> str:
     if language.lower() == "he":
         return "יש כרגע תקלה זמנית ביצירת המודעה. נסה שוב בעוד רגע."
     return "Temporary generation service issue. Please try again in a moment."
+
+
+def _build_photo_ingest_reply(
+    *,
+    draft: AdDraft,
+    language: str,
+    detected_ean: str | None,
+) -> str:
+    product_name = draft.product_name or draft.enriched_brand
+    if detected_ean and product_name:
+        if language.lower() == "he":
+            return f"קיבלתי את התמונה, זיהיתי ברקוד {detected_ean}, והמוצר הוא: {product_name}."
+        return (
+            f"I received your photo, detected barcode {detected_ean}, "
+            f"and found product: {product_name}."
+        )
+    if detected_ean:
+        if language.lower() == "he":
+            return f"קיבלתי את התמונה וזיהיתי ברקוד {detected_ean}."
+        return f"I received your photo and detected barcode {detected_ean}."
+    if language.lower() == "he":
+        return "קיבלתי את התמונה ושמרתי אותה בטיוטה."
+    return "I received your photo and saved it to the current draft."

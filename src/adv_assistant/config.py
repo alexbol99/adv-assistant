@@ -55,6 +55,7 @@ class Settings:
     whatsapp_access_token: str | None = None
     whatsapp_phone_number_id: str | None = None
     whatsapp_graph_api_version: str = "v21.0"
+    whatsapp_media_timeout_seconds: int = 15
 
     tasks_mode: str = "inline"
     gcp_project_id: str | None = None
@@ -93,6 +94,13 @@ class Settings:
     ad_render_width: int = 1920
     ad_render_height: int = 1080
 
+    media_store_mode: str = "noop"
+    media_gcs_bucket: str | None = None
+    media_gcs_public_base_url: str = "https://storage.googleapis.com"
+    media_gcs_object_prefix: str = "operator-photos"
+    media_lifecycle_days: int = 90
+    media_verify_lifecycle_on_startup: bool = False
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -111,6 +119,7 @@ class Settings:
             whatsapp_access_token=os.getenv("WHATSAPP_ACCESS_TOKEN"),
             whatsapp_phone_number_id=os.getenv("PHONE_NUMBER_ID"),
             whatsapp_graph_api_version=os.getenv("GRAPH_API_VERSION", "v21.0"),
+            whatsapp_media_timeout_seconds=_int_env("WHATSAPP_MEDIA_TIMEOUT_SECONDS", 15),
             tasks_mode=os.getenv("TASKS_MODE", "inline"),
             gcp_project_id=os.getenv("GCP_PROJECT_ID"),
             tasks_region=os.getenv("TASKS_REGION") or os.getenv("GCP_REGION"),
@@ -154,4 +163,12 @@ class Settings:
             nana_banana_poll_timeout_seconds=_int_env("NANA_BANANA_POLL_TIMEOUT_SECONDS", 900),
             ad_render_width=_int_env("AD_RENDER_WIDTH", 1920),
             ad_render_height=_int_env("AD_RENDER_HEIGHT", 1080),
+            media_store_mode=os.getenv("MEDIA_STORE_MODE", "noop"),
+            media_gcs_bucket=_optional_env("MEDIA_GCS_BUCKET"),
+            media_gcs_public_base_url=os.getenv(
+                "MEDIA_GCS_PUBLIC_BASE_URL", "https://storage.googleapis.com"
+            ),
+            media_gcs_object_prefix=os.getenv("MEDIA_GCS_OBJECT_PREFIX", "operator-photos"),
+            media_lifecycle_days=_int_env("MEDIA_LIFECYCLE_DAYS", 90),
+            media_verify_lifecycle_on_startup=_bool_env("MEDIA_VERIFY_LIFECYCLE_ON_STARTUP", False),
         )

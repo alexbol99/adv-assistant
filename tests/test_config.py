@@ -19,3 +19,9 @@ def test_nana_banana_model_and_type_fallback_to_defaults_when_blank(monkeypatch)
     settings = Settings.from_env()
     assert settings.nana_banana_model == "nanobanana-2"
     assert settings.nana_banana_generation_type == "TEXTTOIAMGE"
+
+
+def test_blank_media_bucket_is_normalized_to_none(monkeypatch) -> None:
+    monkeypatch.setenv("MEDIA_GCS_BUCKET", "  ")
+    settings = Settings.from_env()
+    assert settings.media_gcs_bucket is None
