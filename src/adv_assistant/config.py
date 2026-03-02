@@ -75,6 +75,9 @@ class Settings:
     nana_banana_base_url: str | None = None
     nana_banana_status_api_url_template: str | None = None
     nana_banana_model: str = "nanobanana-2"
+    nana_banana_generation_type: str = "TEXTTOIAMGE"
+    nana_banana_num_images: int = 1
+    nana_banana_watermark: bool | None = None
     nana_banana_timeout_seconds: int = 20
     nana_banana_poll_initial_seconds: int = 2
     nana_banana_poll_max_seconds: int = 10
@@ -128,6 +131,13 @@ class Settings:
                 "NANA_BANANA_STATUS_API_URL_TEMPLATE"
             ),
             nana_banana_model=os.getenv("NANA_BANANA_MODEL", "nanobanana-2"),
+            nana_banana_generation_type=os.getenv("NANA_BANANA_GENERATION_TYPE", "TEXTTOIAMGE"),
+            nana_banana_num_images=_int_env("NANA_BANANA_NUM_IMAGES", 1),
+            nana_banana_watermark=(
+                _bool_env("NANA_BANANA_WATERMARK", False)
+                if os.getenv("NANA_BANANA_WATERMARK") is not None
+                else None
+            ),
             nana_banana_timeout_seconds=_int_env("NANA_BANANA_TIMEOUT_SECONDS", 20),
             nana_banana_poll_initial_seconds=_int_env("NANA_BANANA_POLL_INITIAL_SECONDS", 2),
             nana_banana_poll_max_seconds=_int_env("NANA_BANANA_POLL_MAX_SECONDS", 10),

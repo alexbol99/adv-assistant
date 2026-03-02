@@ -144,50 +144,48 @@ Both generation modes (defined in the arch spec) map to Nano Banana API paramete
 The following integration contract is now locked for implementation.
 
 1. **Authentication**: `Authorization: Bearer <token>`.
-2. **Model**: `Nanobanana 2`.
-3. **Aspect ratio derivation**: derive `aspect_ratio` from requested resolution; for `1920x1080`, use `16:9`.
-4. **Reference image input**: URL (`reference_image_url`) for reference-based regeneration.
-5. **Polling status contract**: bot polls status endpoint by `job_id` until terminal state (`completed`/`failed`).
+2. **Base URL**: `https://api.nanobananaapi.ai/api/v1/nanobanana`.
+3. **Generate endpoint**: `POST /generate` returning `data.taskId`.
+4. **Status endpoint**: `GET /record-info?taskId=<taskId>`.
+5. **Status mapping**: `successFlag` values `0` (generating), `1` (success), `2/3` (failed).
 
 #### 5.3.1 Recommended Request Schema (adapter contract)
 
 ```json
 {
-  "model": "nanobanana-2",
   "prompt": "<render prompt>",
-  "size": { "width": 1920, "height": 1080 },
-  "aspect_ratio": "16:9",
-  "reference_image_url": "https://.../previous.png",
+  "type": "TEXTTOIAMGE",
+  "numImages": 1,
+  "watermark": false,
+  "imageUrls": ["https://.../previous.png"],
   "metadata": {
     "draft_id": "<uuid>",
-    "operator_phone": "<e164>"
-  },
-  "idempotency_key": "<uuid>"
+    "operator_phone": "<e164>",
+    "idempotency_key": "<uuid>",
+    "size": { "width": 1920, "height": 1080 },
+    "aspect_ratio": "16:9"
+  }
 }
 ```
 
 Notes:
-- `reference_image_url` is omitted for fresh generation.
+- `imageUrls` is omitted for fresh generation.
 - `idempotency_key` must be stable across retries of the same logical job.
 
 #### 5.3.2 Recommended Status Payload (adapter contract)
 
 ```json
 {
-  "job_id": "<string>",
-  "status": "queued|running|completed|failed",
-  "output_image_url": "https://...",
-  "error_code": "<string|null>",
-  "error_message": "<string|null>",
-  "metadata": {
-    "draft_id": "<uuid>",
-    "operator_phone": "<e164>"
-  }
+  "successFlag": 0,
+  "response": {
+    "resultImageUrl": "https://..."
+  },
+  "errorMessage": "<string|null>"
 }
 ```
 
 Operational recommendations:
-- Validate polled status payload schema and job_id consistency.
+- Validate polled payload schema and `successFlag` semantics.
 - Treat `429` and `5xx` as retryable; treat `4xx` (except `409`) as permanent failures.
 
 ---

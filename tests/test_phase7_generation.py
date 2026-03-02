@@ -146,7 +146,10 @@ async def test_nano_banana_service_submits_expected_payload() -> None:
         observed["url_path"] = request.url.path
         observed["authorization"] = request.headers.get("Authorization")
         observed["body"] = json.loads(request.content.decode("utf-8"))
-        return httpx.Response(status_code=200, json={"job_id": "job-server-1"})
+        return httpx.Response(
+            status_code=200,
+            json={"code": 200, "msg": "ok", "data": {"taskId": "job-server-1"}},
+        )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     service = NanoBananaAdGenerationService(
@@ -193,6 +196,9 @@ async def test_nano_banana_service_submits_expected_payload() -> None:
     assert observed["authorization"] == "Bearer test-key"
     body = observed["body"]
     assert isinstance(body, dict)
+    assert body["type"] == "TEXTTOIAMGE"
+    assert body["numImages"] == 1
+    assert body["watermark"] is None
     assert body["model"] == "nanobanana-2"
     assert body["aspect_ratio"] == "16:9"
     assert body["metadata"]["draft_id"] == str(draft_id)
@@ -205,17 +211,20 @@ async def test_nano_banana_service_polls_until_completion() -> None:
     state = {"status_calls": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/generate-2"):
-            return httpx.Response(status_code=200, json={"job_id": "job-server-2"})
-        if request.url.path.endswith("/jobs/job-server-2"):
+        if (
+            request.url.path.endswith("/record-info")
+            and request.url.params.get("taskId") == "job-server-2"
+        ):
             state["status_calls"] += 1
             if state["status_calls"] < 3:
-                return httpx.Response(status_code=200, json={"status": "running"})
+                return httpx.Response(status_code=200, json={"successFlag": 0})
             return httpx.Response(
                 status_code=200,
                 json={
-                    "status": "completed",
-                    "output_image_url": "https://storage.googleapis.com/media/preview.png",
+                    "successFlag": 1,
+                    "response": {
+                        "resultImageUrl": "https://storage.googleapis.com/media/preview.png"
+                    },
                 },
             )
         return httpx.Response(status_code=404)
@@ -223,8 +232,7 @@ async def test_nano_banana_service_polls_until_completion() -> None:
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     service = NanoBananaAdGenerationService(
         api_key="test-key",
-        api_url="https://nano.example/api/v1/nanobanana/generate-2",
-        status_api_url_template="https://nano.example/api/v1/nanobanana/jobs/{job_id}",
+        base_url="https://nano.example/api/v1/nanobanana",
         poll_initial_seconds=0.01,
         poll_max_seconds=0.02,
         poll_timeout_seconds=1,

@@ -119,6 +119,9 @@ class NanoBananaAdGenerationService:
         base_url: str | None = None,
         status_api_url_template: str | None = None,
         model: str = "nanobanana-2",
+        generation_type: str = "TEXTTOIAMGE",
+        num_images: int = 1,
+        watermark: bool | None = None,
         timeout_seconds: float = 20.0,
         poll_initial_seconds: float = 2.0,
         poll_max_seconds: float = 10.0,
@@ -132,6 +135,9 @@ class NanoBananaAdGenerationService:
             base_url=base_url,
         )
         self._model = model
+        self._generation_type = generation_type
+        self._num_images = max(1, num_images)
+        self._watermark = watermark
         self._poll_initial_seconds = max(0.1, poll_initial_seconds)
         self._poll_max_seconds = max(self._poll_initial_seconds, poll_max_seconds)
         self._poll_timeout_seconds = max(1.0, poll_timeout_seconds)
@@ -164,23 +170,26 @@ class NanoBananaAdGenerationService:
             mode=mode,
         )
         payload = {
-            "model": self._model,
             "prompt": build_generation_prompt(
                 draft=draft,
                 mode=mode,
                 instruction_text=instruction_text,
             ),
-            "size": {"width": width, "height": height},
+            "type": self._generation_type,
+            "numImages": self._num_images,
+            "watermark": self._watermark,
+            "model": self._model,
             "aspect_ratio": aspect_ratio,
             "metadata": {
                 "draft_id": str(draft.draft_id),
                 "operator_phone": draft.operator_phone,
+                "idempotency_key": idempotency_key,
+                "size": {"width": width, "height": height},
             },
-            "idempotency_key": idempotency_key,
         }
         reference_image_url = draft.preview_reference_url or draft.rendered_image_url
         if mode == GenerationMode.REFERENCE and reference_image_url:
-            payload["reference_image_url"] = reference_image_url
+            payload["imageUrls"] = [reference_image_url]
 
         try:
             response = await self._client.post(
@@ -198,9 +207,17 @@ class NanoBananaAdGenerationService:
             raise AdGenerationError("Nano Banana response is not valid JSON") from exc
         if not isinstance(response_payload, dict):
             raise AdGenerationError("Nano Banana response has unexpected format")
-        job_id = response_payload.get("job_id")
+        if int(response_payload.get("code", 0)) != 200:
+            message = response_payload.get("msg")
+            raise AdGenerationError(
+                f"Nano Banana generation rejected: {message or 'Unknown error'}"
+            )
+        data = response_payload.get("data")
+        if not isinstance(data, dict):
+            raise AdGenerationError("Nano Banana response missing data object")
+        job_id = data.get("taskId")
         if not isinstance(job_id, str) or not job_id.strip():
-            raise AdGenerationError("Nano Banana response missing job_id")
+            raise AdGenerationError("Nano Banana response missing data.taskId")
 
         return GenerationSubmission(
             job_id=job_id.strip(),
@@ -254,24 +271,31 @@ class NanoBananaAdGenerationService:
         if not isinstance(payload, dict):
             raise AdGenerationError("Nano Banana poll response has unexpected format")
 
-        raw_status = payload.get("status")
-        if not isinstance(raw_status, str):
-            raise AdGenerationError("Nano Banana poll response missing status")
+        success_flag = payload.get("successFlag")
+        if not isinstance(success_flag, int):
+            raise AdGenerationError("Nano Banana poll response missing successFlag")
 
-        try:
-            status = NanoBananaJobStatus(raw_status.strip().lower())
-        except ValueError as exc:
-            raise AdGenerationError(f"Unsupported Nano Banana status: {raw_status}") from exc
-
-        output_image_url = payload.get("output_image_url")
-        error_code = payload.get("error_code")
-        error_message = payload.get("error_message")
-        return GenerationPollResult(
-            status=status,
-            output_image_url=output_image_url if isinstance(output_image_url, str) else None,
-            error_code=error_code if isinstance(error_code, str) else None,
-            error_message=error_message if isinstance(error_message, str) else None,
-        )
+        if success_flag == 0:
+            return GenerationPollResult(status=NanoBananaJobStatus.RUNNING)
+        if success_flag == 1:
+            response_data = payload.get("response")
+            output_image_url: str | None = None
+            if isinstance(response_data, dict):
+                result_image = response_data.get("resultImageUrl")
+                if isinstance(result_image, str):
+                    output_image_url = result_image
+            return GenerationPollResult(
+                status=NanoBananaJobStatus.COMPLETED,
+                output_image_url=output_image_url,
+            )
+        if success_flag in {2, 3}:
+            error_message = payload.get("errorMessage")
+            return GenerationPollResult(
+                status=NanoBananaJobStatus.FAILED,
+                error_code=str(success_flag),
+                error_message=error_message if isinstance(error_message, str) else None,
+            )
+        raise AdGenerationError(f"Unsupported Nano Banana successFlag: {success_flag}")
 
     async def close(self) -> None:
         if self._owns_client:
@@ -334,7 +358,7 @@ def _resolve_generation_api_url(*, api_url: str | None, base_url: str | None) ->
     if api_url and api_url.strip():
         return api_url.strip()
     if base_url and base_url.strip():
-        return f"{base_url.rstrip('/')}/v1/generate"
+        return f"{base_url.rstrip('/')}/generate"
     raise ValueError("Either api_url or base_url is required")
 
 
@@ -348,7 +372,7 @@ def _resolve_status_api_url_template(
             raise ValueError("status_api_url_template must include '{job_id}' placeholder")
         return status_api_url_template.strip()
     if base_url and base_url.strip():
-        return f"{base_url.rstrip('/')}/v1/generate/{{job_id}}"
+        return f"{base_url.rstrip('/')}/record-info?taskId={{job_id}}"
     raise ValueError("status_api_url_template is required when base_url is not provided")
 
 
