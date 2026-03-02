@@ -75,6 +75,20 @@
   - `ENRICHMENT_HTTP_TIMEOUT_SECONDS` (default `8`)
   - provider chain order: Open Food Facts -> EAN fallback -> web-search fallback
   - only normalized enrichment fields are stored in DB; raw provider payloads are not persisted
+- Ad generation configuration (Phase 7, polling-only):
+  - `NANA_BANANA_API_KEY`
+  - `NANA_BANANA_BASE_URL` (quickstart style, e.g. `https://api.nanobananaapi.ai/api/v1/nanobanana`)
+  - `NANA_BANANA_API_URL` (optional explicit override for generate endpoint)
+  - `NANA_BANANA_STATUS_API_URL_TEMPLATE` (optional explicit status endpoint template; must include `{job_id}`)
+  - `NANA_BANANA_MODEL` (default `nanobanana-2`)
+  - `NANA_BANANA_GENERATION_TYPE` (default `TEXTTOIAMGE`, per provider quickstart)
+  - `NANA_BANANA_NUM_IMAGES` (default `1`)
+  - `NANA_BANANA_WATERMARK` (optional boolean)
+  - `NANA_BANANA_TIMEOUT_SECONDS` (default `20`)
+  - `NANA_BANANA_POLL_INITIAL_SECONDS` (default `2`)
+  - `NANA_BANANA_POLL_MAX_SECONDS` (default `10`)
+  - `NANA_BANANA_POLL_TIMEOUT_SECONDS` (default `900`)
+  - `AD_RENDER_WIDTH` / `AD_RENDER_HEIGHT` (default `1920x1080`; aspect ratio derived automatically)
 - Media lifecycle/storage configuration (Phase 6):
   - `MEDIA_STORE_MODE` (`noop` or `gcs`, default `noop`)
   - `MEDIA_GCS_BUCKET` (required when `MEDIA_STORE_MODE=gcs`)

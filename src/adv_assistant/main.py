@@ -9,6 +9,10 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adv_assistant.ad_generation import (
+    NanoBananaAdGenerationService,
+    NoopAdGenerationService,
+)
 from adv_assistant.config import Settings
 from adv_assistant.db.base import utcnow
 from adv_assistant.db.repositories import (
@@ -90,6 +94,29 @@ def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentServ
             NoopProductLookupProvider("web_search"),
         ]
     )
+
+
+def _build_ad_generation_service(settings: Settings):
+    required = {
+        "NANA_BANANA_API_KEY": settings.nana_banana_api_key,
+    }
+    has_api_target = bool(settings.nana_banana_api_url or settings.nana_banana_base_url)
+    if all(required.values()) and has_api_target:
+        return NanoBananaAdGenerationService(
+            api_key=settings.nana_banana_api_key or "",
+            api_url=settings.nana_banana_api_url,
+            base_url=settings.nana_banana_base_url or "",
+            status_api_url_template=settings.nana_banana_status_api_url_template,
+            model=settings.nana_banana_model,
+            generation_type=settings.nana_banana_generation_type,
+            num_images=settings.nana_banana_num_images,
+            watermark=settings.nana_banana_watermark,
+            timeout_seconds=settings.nana_banana_timeout_seconds,
+            poll_initial_seconds=settings.nana_banana_poll_initial_seconds,
+            poll_max_seconds=settings.nana_banana_poll_max_seconds,
+            poll_timeout_seconds=settings.nana_banana_poll_timeout_seconds,
+        )
+    return NoopAdGenerationService()
 
 
 def _build_media_store(settings: Settings) -> MediaStore:
@@ -254,6 +281,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     whatsapp_client = _build_whatsapp_client(current_settings)
     whatsapp_media_client = _build_whatsapp_media_client(current_settings)
     enrichment_service = _build_enrichment_service(current_settings)
+    ad_generation_service = _build_ad_generation_service(current_settings)
     media_store = _build_media_store(current_settings)
     operator_photo_ingestor = _build_operator_photo_ingestor(
         media_store=media_store,
@@ -263,17 +291,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session_factory,
         llm_gateway=llm_gateway,
         enrichment_service=enrichment_service,
+        ad_generation_service=ad_generation_service,
+        render_width=current_settings.ad_render_width,
+        render_height=current_settings.ad_render_height,
         operator_photo_ingestor=operator_photo_ingestor,
     )
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):
         result = await task_processor.process(payload)
-        if result.reply_text and not result.duplicate and not result.unauthorized_operator:
+        if (
+            (result.generated_image_url or result.reply_text)
+            and not result.duplicate
+            and not result.unauthorized_operator
+        ):
             try:
-                await app.state.whatsapp_client.send_text(
-                    to_phone=payload.operator_phone,
-                    message=result.reply_text,
-                )
+                if result.generated_image_url:
+                    await app.state.whatsapp_client.send_image(
+                        to_phone=payload.operator_phone,
+                        image_url=result.generated_image_url,
+                        caption=result.reply_text,
+                    )
+                elif result.reply_text:
+                    await app.state.whatsapp_client.send_text(
+                        to_phone=payload.operator_phone,
+                        message=result.reply_text,
+                    )
             except Exception as exc:
                 logger.exception(
                     "Outbound reply delivery failed (wamid=%s, operator_phone=%s)",
@@ -302,7 +344,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             actor="system",
                             action="outbound_reply_sent",
                             operator_phone=payload.operator_phone,
-                            metadata={"wamid": payload.wamid},
+                            metadata={
+                                "wamid": payload.wamid,
+                                "sent_text": bool(result.reply_text),
+                                "sent_image": bool(result.generated_image_url),
+                            },
                         )
                 except Exception:
                     pass
@@ -325,7 +371,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await whatsapp_client.close()
             await whatsapp_media_client.close()
             await enrichment_service.close()
+            await ad_generation_service.close()
             await media_store.close()
+            await ad_generation_service.close()
             await engine.dispose()
 
     app = FastAPI(title=current_settings.app_name, lifespan=lifespan)
@@ -337,6 +385,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.task_enqueuer = task_enqueuer
     app.state.task_authorizer = task_authorizer
     app.state.whatsapp_client = whatsapp_client
+    app.state.ad_generation_service = ad_generation_service
     app.state.whatsapp_media_client = whatsapp_media_client
     app.state.media_store = media_store
     app.state.process_and_maybe_send_reply = process_and_maybe_send_reply

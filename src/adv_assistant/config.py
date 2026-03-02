@@ -31,6 +31,14 @@ def _optional_env(name: str) -> str | None:
     return stripped or None
 
 
+def _env_with_default(name: str, default: str) -> str:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    stripped = raw_value.strip()
+    return stripped or default
+
+
 @dataclass(slots=True)
 class Settings:
     app_name: str = "adv-assistant"
@@ -70,6 +78,21 @@ class Settings:
     enrichment_enabled: bool = True
     open_food_facts_base_url: str = "https://world.openfoodfacts.org"
     enrichment_http_timeout_seconds: int = 8
+
+    nana_banana_api_key: str | None = None
+    nana_banana_api_url: str | None = None
+    nana_banana_base_url: str | None = None
+    nana_banana_status_api_url_template: str | None = None
+    nana_banana_model: str = "nanobanana-2"
+    nana_banana_generation_type: str = "TEXTTOIAMGE"
+    nana_banana_num_images: int = 1
+    nana_banana_watermark: bool | None = None
+    nana_banana_timeout_seconds: int = 20
+    nana_banana_poll_initial_seconds: int = 2
+    nana_banana_poll_max_seconds: int = 10
+    nana_banana_poll_timeout_seconds: int = 900
+    ad_render_width: int = 1920
+    ad_render_height: int = 1080
 
     media_store_mode: str = "noop"
     media_gcs_bucket: str | None = None
@@ -118,6 +141,28 @@ class Settings:
                 "OPEN_FOOD_FACTS_BASE_URL", "https://world.openfoodfacts.org"
             ),
             enrichment_http_timeout_seconds=_int_env("ENRICHMENT_HTTP_TIMEOUT_SECONDS", 8),
+            nana_banana_api_key=_optional_env("NANA_BANANA_API_KEY"),
+            nana_banana_api_url=_optional_env("NANA_BANANA_API_URL"),
+            nana_banana_base_url=_optional_env("NANA_BANANA_BASE_URL"),
+            nana_banana_status_api_url_template=_optional_env(
+                "NANA_BANANA_STATUS_API_URL_TEMPLATE"
+            ),
+            nana_banana_model=_env_with_default("NANA_BANANA_MODEL", "nanobanana-2"),
+            nana_banana_generation_type=_env_with_default(
+                "NANA_BANANA_GENERATION_TYPE", "TEXTTOIAMGE"
+            ),
+            nana_banana_num_images=_int_env("NANA_BANANA_NUM_IMAGES", 1),
+            nana_banana_watermark=(
+                _bool_env("NANA_BANANA_WATERMARK", False)
+                if _optional_env("NANA_BANANA_WATERMARK") is not None
+                else None
+            ),
+            nana_banana_timeout_seconds=_int_env("NANA_BANANA_TIMEOUT_SECONDS", 20),
+            nana_banana_poll_initial_seconds=_int_env("NANA_BANANA_POLL_INITIAL_SECONDS", 2),
+            nana_banana_poll_max_seconds=_int_env("NANA_BANANA_POLL_MAX_SECONDS", 10),
+            nana_banana_poll_timeout_seconds=_int_env("NANA_BANANA_POLL_TIMEOUT_SECONDS", 900),
+            ad_render_width=_int_env("AD_RENDER_WIDTH", 1920),
+            ad_render_height=_int_env("AD_RENDER_HEIGHT", 1080),
             media_store_mode=os.getenv("MEDIA_STORE_MODE", "noop"),
             media_gcs_bucket=_optional_env("MEDIA_GCS_BUCKET"),
             media_gcs_public_base_url=os.getenv(

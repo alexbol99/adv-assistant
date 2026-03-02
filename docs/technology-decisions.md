@@ -125,10 +125,10 @@ This preserves integration progress without changing production decisions.
 **Nano Banana** is the chosen ad image generation service. Its API uses an **asynchronous job model**:
 
 1. The bot POSTs a generation request and receives a **job ID** immediately.
-2. The bot polls the job status endpoint using the job ID until the job is `completed` or `failed`.
+2. The bot polls the job status endpoint using the `job_id` until terminal state.
 3. On completion, the rendered image URL (or binary) is retrieved and uploaded to GCS.
 
-**Callback support:** Nano Banana also supports a **webhook callback** (the service POSTs to a bot-provided URL when the job completes). The implementation should support both polling and callback modes; the callback mode is preferred in production to reduce polling overhead and latency.
+**Implementation mode:** Polling-only. Callback endpoint is intentionally not implemented in this phase.
 
 ### 5.2 Generation Modes
 
@@ -144,52 +144,48 @@ Both generation modes (defined in the arch spec) map to Nano Banana API paramete
 The following integration contract is now locked for implementation.
 
 1. **Authentication**: `Authorization: Bearer <token>`.
-2. **Model**: `Nanobanana 2`.
-3. **Aspect ratio derivation**: derive `aspect_ratio` from requested resolution; for `1920x1080`, use `16:9`.
-4. **Reference image input**: URL (`reference_image_url`) for reference-based regeneration.
-5. **Callback delivery**: Nano Banana posts generation status updates to a bot callback endpoint (`POST /callbacks/nano-banana`).
+2. **Base URL**: `https://api.nanobananaapi.ai/api/v1/nanobanana`.
+3. **Generate endpoint**: `POST /generate` returning `data.taskId`.
+4. **Status endpoint**: `GET /record-info?taskId=<taskId>`.
+5. **Status mapping**: `successFlag` values `0` (generating), `1` (success), `2/3` (failed).
 
 #### 5.3.1 Recommended Request Schema (adapter contract)
 
 ```json
 {
-  "model": "nanobanana-2",
   "prompt": "<render prompt>",
-  "size": { "width": 1920, "height": 1080 },
-  "aspect_ratio": "16:9",
-  "reference_image_url": "https://.../previous.png",
-  "callback_url": "https://<bot>/callbacks/nano-banana",
+  "type": "TEXTTOIAMGE",
+  "numImages": 1,
+  "watermark": false,
+  "imageUrls": ["https://.../previous.png"],
   "metadata": {
     "draft_id": "<uuid>",
-    "operator_phone": "<e164>"
-  },
-  "idempotency_key": "<uuid>"
-}
-```
-
-Notes:
-- `reference_image_url` is omitted for fresh generation.
-- `idempotency_key` must be stable across retries of the same logical job.
-
-#### 5.3.2 Recommended Callback Payload (adapter contract)
-
-```json
-{
-  "job_id": "<string>",
-  "status": "queued|running|completed|failed",
-  "output_image_url": "https://...",
-  "error_code": "<string|null>",
-  "error_message": "<string|null>",
-  "metadata": {
-    "draft_id": "<uuid>",
-    "operator_phone": "<e164>"
+    "operator_phone": "<e164>",
+    "idempotency_key": "<uuid>",
+    "size": { "width": 1920, "height": 1080 },
+    "aspect_ratio": "16:9"
   }
 }
 ```
 
+Notes:
+- `imageUrls` is omitted for fresh generation.
+- `idempotency_key` must be stable across retries of the same logical job.
+
+#### 5.3.2 Recommended Status Payload (adapter contract)
+
+```json
+{
+  "successFlag": 0,
+  "response": {
+    "resultImageUrl": "https://..."
+  },
+  "errorMessage": "<string|null>"
+}
+```
+
 Operational recommendations:
-- Verify callback authenticity (shared-secret HMAC header).
-- Keep polling as fallback with exponential intervals (`2s`, `5s`, `10s`) up to `15` minutes total.
+- Validate polled payload schema and `successFlag` semantics.
 - Treat `429` and `5xx` as retryable; treat `4xx` (except `409`) as permanent failures.
 
 ---
@@ -264,7 +260,7 @@ All enriched data is treated as **supplementary** — the operator's explicitly 
 | Confirmation mechanism | Button payload only for publish/delete-all confirmation |
 | Unauthorized number handling | Generic rejection once per number per 60-minute window, then silent ignore |
 | Draft ownership | Private per operator, optimistic concurrency (first-write-wins) |
-| Ad generation service | Nano Banana (async job + polling; callback supported) |
+| Ad generation service | Nano Banana (async job + polling) |
 | Nano Banana auth/model | Bearer token + `Nanobanana 2` |
 | Product domain | Food/grocery, Israel-focused |
 | Barcode decoding | ZXing/zbar (primary) → vision-LLM (fallback) |
