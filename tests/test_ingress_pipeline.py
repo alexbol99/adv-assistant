@@ -34,9 +34,19 @@ class FakeTaskEnqueuer:
 class FakeWhatsAppClient:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
+        self.images: list[tuple[str, str, str | None]] = []
 
     async def send_text(self, *, to_phone: str, message: str) -> None:
         self.messages.append((to_phone, message))
+
+    async def send_image(
+        self,
+        *,
+        to_phone: str,
+        image_url: str,
+        caption: str | None = None,
+    ) -> None:
+        self.images.append((to_phone, image_url, caption))
 
     async def close(self) -> None:
         return None
@@ -44,6 +54,15 @@ class FakeWhatsAppClient:
 
 class FailingWhatsAppClient:
     async def send_text(self, *, to_phone: str, message: str) -> None:
+        raise RuntimeError("401 Unauthorized")
+
+    async def send_image(
+        self,
+        *,
+        to_phone: str,
+        image_url: str,
+        caption: str | None = None,
+    ) -> None:
         raise RuntimeError("401 Unauthorized")
 
     async def close(self) -> None:

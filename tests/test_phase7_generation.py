@@ -399,6 +399,8 @@ async def test_pipeline_submits_generation_job_and_sets_preview_ready(
     assert result.deterministic_action == "generation_completed"
     assert result.reply_text is not None
     assert "preview is ready" in result.reply_text.lower()
+    assert "http" not in result.reply_text.lower()
+    assert result.generated_image_url == "https://storage.googleapis.com/media/preview-1.png"
     assert fake_gateway.reply_calls == 0
     assert fake_generation.calls == 1
     assert fake_generation.wait_calls == 1
@@ -446,6 +448,7 @@ async def test_pipeline_generation_failure_returns_fallback_message(
     assert result.deterministic_action == "generation_failed"
     assert result.reply_text is not None
     assert "temporary generation service issue" in result.reply_text.lower()
+    assert result.generated_image_url is None
 
     async with session_scope(session_factory) as session:
         draft = (

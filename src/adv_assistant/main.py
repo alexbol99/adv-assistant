@@ -226,12 +226,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):
         result = await task_processor.process(payload)
-        if result.reply_text and not result.duplicate and not result.unauthorized_operator:
+        if (
+            (result.generated_image_url or result.reply_text)
+            and not result.duplicate
+            and not result.unauthorized_operator
+        ):
             try:
-                await app.state.whatsapp_client.send_text(
-                    to_phone=payload.operator_phone,
-                    message=result.reply_text,
-                )
+                if result.generated_image_url:
+                    await app.state.whatsapp_client.send_image(
+                        to_phone=payload.operator_phone,
+                        image_url=result.generated_image_url,
+                        caption=result.reply_text,
+                    )
+                elif result.reply_text:
+                    await app.state.whatsapp_client.send_text(
+                        to_phone=payload.operator_phone,
+                        message=result.reply_text,
+                    )
             except Exception as exc:
                 logger.exception(
                     "Outbound reply delivery failed (wamid=%s, operator_phone=%s)",
@@ -260,7 +271,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             actor="system",
                             action="outbound_reply_sent",
                             operator_phone=payload.operator_phone,
-                            metadata={"wamid": payload.wamid},
+                            metadata={
+                                "wamid": payload.wamid,
+                                "sent_text": bool(result.reply_text),
+                                "sent_image": bool(result.generated_image_url),
+                            },
                         )
                 except Exception:
                     pass

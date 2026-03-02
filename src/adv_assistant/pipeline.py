@@ -57,6 +57,7 @@ class ProcessInboundResult:
     intent: str | None = None
     deterministic_action: str | None = None
     reply_text: str | None = None
+    generated_image_url: str | None = None
 
     @property
     def status(self) -> str:
@@ -164,6 +165,7 @@ class InboundTaskProcessor:
             intent_value: str | None = None
             deterministic_action: str | None = None
             reply_text: str | None = None
+            generated_image_url: str | None = None
 
             if button_payload_id:
                 history.append(
@@ -383,9 +385,9 @@ class InboundTaskProcessor:
                                                 submission.job_id,
                                                 poll_result.output_image_url,
                                             )
+                                            generated_image_url = poll_result.output_image_url
                                             reply_text = _generation_completed_reply(
                                                 operator.language,
-                                                poll_result.output_image_url,
                                             )
                                     else:
                                         failed_draft = (
@@ -556,6 +558,7 @@ class InboundTaskProcessor:
                 intent=intent_value,
                 deterministic_action=deterministic_action,
                 reply_text=reply_text,
+                generated_image_url=generated_image_url,
             )
 
     async def _enrich_current_draft(
@@ -756,10 +759,10 @@ def _to_generation_draft_input(
     )
 
 
-def _generation_completed_reply(language: str, preview_url: str) -> str:
+def _generation_completed_reply(language: str) -> str:
     if language.lower() == "he":
-        return f"התצוגה המקדימה מוכנה.\n{preview_url}"
-    return f"Your ad preview is ready.\n{preview_url}"
+        return "התצוגה המקדימה מוכנה."
+    return "Your ad preview is ready."
 
 
 def _generation_failed_reply(language: str) -> str:
