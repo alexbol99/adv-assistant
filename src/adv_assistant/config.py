@@ -154,7 +154,7 @@ class Settings:
             nana_banana_num_images=_int_env("NANA_BANANA_NUM_IMAGES", 1),
             nana_banana_watermark=(
                 _bool_env("NANA_BANANA_WATERMARK", False)
-                if os.getenv("NANA_BANANA_WATERMARK") is not None
+                if _optional_env("NANA_BANANA_WATERMARK") is not None
                 else None
             ),
             nana_banana_timeout_seconds=_int_env("NANA_BANANA_TIMEOUT_SECONDS", 20),
