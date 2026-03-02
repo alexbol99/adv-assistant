@@ -247,6 +247,128 @@ async def test_nano_banana_service_polls_until_completion() -> None:
     await client.aclose()
 
 
+async def test_nano_banana_service_accepts_legacy_submit_response_shape() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(status_code=200, json={"job_id": "legacy-job-1"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = NanoBananaAdGenerationService(
+        api_key="test-key",
+        api_url="https://nano.example/api/v1/nanobanana/generate-2",
+        status_api_url_template="https://nano.example/api/v1/nanobanana/jobs/{job_id}",
+        client=client,
+    )
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="קוטג",
+        price=Decimal("19.90"),
+        currency="ILS",
+        promo_text="מבצע",
+        ean="7290004127326",
+        photo_url=None,
+        enriched_brand=None,
+        enriched_category=None,
+        enriched_description=None,
+        preview_reference_url=None,
+        rendered_image_url=None,
+    )
+
+    submission = await service.submit_for_draft(
+        draft=draft,
+        mode=GenerationMode.FRESH,
+        instruction_text="generate ad",
+        wamid="wamid-legacy-submit",
+        width=1920,
+        height=1080,
+    )
+
+    assert submission.job_id == "legacy-job-1"
+    await client.aclose()
+
+
+async def test_nano_banana_service_accepts_legacy_poll_status_shape() -> None:
+    state = {"status_calls": 0}
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        state["status_calls"] += 1
+        if state["status_calls"] < 2:
+            return httpx.Response(status_code=200, json={"status": "running"})
+        return httpx.Response(
+            status_code=200,
+            json={
+                "status": "completed",
+                "output_image_url": "https://storage.googleapis.com/media/legacy-preview.png",
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = NanoBananaAdGenerationService(
+        api_key="test-key",
+        api_url="https://nano.example/api/v1/nanobanana/generate-2",
+        status_api_url_template="https://nano.example/api/v1/nanobanana/jobs/{job_id}",
+        poll_initial_seconds=0.01,
+        poll_max_seconds=0.02,
+        poll_timeout_seconds=1,
+        client=client,
+    )
+
+    result = await service.wait_for_completion(job_id="legacy-job-2")
+
+    assert result.status == NanoBananaJobStatus.COMPLETED
+    assert result.output_image_url == "https://storage.googleapis.com/media/legacy-preview.png"
+    assert state["status_calls"] == 2
+    await client.aclose()
+
+
+async def test_nano_banana_service_falls_back_from_jobs_to_record_info() -> None:
+    state = {"jobs_calls": 0, "record_info_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/jobs/fallback-job-1"):
+            state["jobs_calls"] += 1
+            return httpx.Response(
+                status_code=404,
+                json={
+                    "status": 404,
+                    "error": "Not Found",
+                    "path": "/api/v1/nanobanana/jobs/fallback-job-1",
+                },
+            )
+        if request.url.path.endswith("/record-info"):
+            state["record_info_calls"] += 1
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "successFlag": 1,
+                    "response": {
+                        "resultImageUrl": "https://storage.googleapis.com/media/fallback.png"
+                    },
+                },
+            )
+        return httpx.Response(status_code=404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = NanoBananaAdGenerationService(
+        api_key="test-key",
+        api_url="https://nano.example/api/v1/nanobanana/generate-2",
+        status_api_url_template="https://nano.example/api/v1/nanobanana/jobs/{job_id}",
+        poll_initial_seconds=0.01,
+        poll_max_seconds=0.02,
+        poll_timeout_seconds=1,
+        client=client,
+    )
+
+    result = await service.wait_for_completion(job_id="fallback-job-1")
+
+    assert result.status == NanoBananaJobStatus.COMPLETED
+    assert result.output_image_url == "https://storage.googleapis.com/media/fallback.png"
+    assert state["jobs_calls"] == 1
+    assert state["record_info_calls"] == 1
+    await client.aclose()
+
+
 async def test_pipeline_submits_generation_job_and_sets_preview_ready(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

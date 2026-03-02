@@ -11,3 +11,11 @@ def test_openai_base_url_preserves_non_empty_value(monkeypatch) -> None:
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.local/v1")
     settings = Settings.from_env()
     assert settings.openai_base_url == "https://example.local/v1"
+
+
+def test_nana_banana_model_and_type_fallback_to_defaults_when_blank(monkeypatch) -> None:
+    monkeypatch.setenv("NANA_BANANA_MODEL", "   ")
+    monkeypatch.setenv("NANA_BANANA_GENERATION_TYPE", "")
+    settings = Settings.from_env()
+    assert settings.nana_banana_model == "nanobanana-2"
+    assert settings.nana_banana_generation_type == "TEXTTOIAMGE"

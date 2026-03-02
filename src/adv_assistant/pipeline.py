@@ -1,3 +1,4 @@
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -42,6 +43,8 @@ from adv_assistant.llm_gateway import (
     sanitize_user_text,
 )
 from adv_assistant.tasks_queue import InboundTaskPayload
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -314,6 +317,16 @@ class InboundTaskProcessor:
                                             "idempotency_key": submission.idempotency_key,
                                         },
                                     )
+                                    logger.info(
+                                        "Generation job submitted "
+                                        "(wamid=%s, operator_phone=%s, draft_id=%s, "
+                                        "job_id=%s, mode=%s)",
+                                        payload.wamid,
+                                        payload.operator_phone,
+                                        current_draft.id,
+                                        submission.job_id,
+                                        submission.mode.value,
+                                    )
                                     poll_result = (
                                         await self._ad_generation_service.wait_for_completion(
                                             job_id=submission.job_id
@@ -360,6 +373,16 @@ class InboundTaskProcessor:
                                                     ),
                                                 },
                                             )
+                                            logger.info(
+                                                "Generation job completed "
+                                                "(wamid=%s, operator_phone=%s, draft_id=%s, "
+                                                "job_id=%s, output=%s)",
+                                                payload.wamid,
+                                                payload.operator_phone,
+                                                current_draft.id,
+                                                submission.job_id,
+                                                poll_result.output_image_url,
+                                            )
                                             reply_text = _generation_completed_reply(
                                                 operator.language,
                                                 poll_result.output_image_url,
@@ -389,6 +412,19 @@ class InboundTaskProcessor:
                                                 "error_message": poll_result.error_message,
                                             },
                                         )
+                                        logger.warning(
+                                            "Generation job failed status "
+                                            "(wamid=%s, operator_phone=%s, draft_id=%s, "
+                                            "job_id=%s, status=%s, error_code=%s, "
+                                            "error_message=%s)",
+                                            payload.wamid,
+                                            payload.operator_phone,
+                                            current_draft.id,
+                                            submission.job_id,
+                                            poll_result.status.value,
+                                            poll_result.error_code,
+                                            poll_result.error_message,
+                                        )
                                         reply_text = _generation_failed_reply(operator.language)
                             except AdGenerationError as exc:
                                 if current_draft.status == AdDraftStatus.GENERATING:
@@ -413,6 +449,14 @@ class InboundTaskProcessor:
                                         "mode": mode.value,
                                         "error": str(exc),
                                     },
+                                )
+                                logger.exception(
+                                    "Generation flow failed "
+                                    "(wamid=%s, operator_phone=%s, draft_id=%s, mode=%s)",
+                                    payload.wamid,
+                                    payload.operator_phone,
+                                    current_draft.id,
+                                    mode.value,
                                 )
 
                     if reply_text is None:

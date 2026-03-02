@@ -31,6 +31,14 @@ def _optional_env(name: str) -> str | None:
     return stripped or None
 
 
+def _env_with_default(name: str, default: str) -> str:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    stripped = raw_value.strip()
+    return stripped or default
+
+
 @dataclass(slots=True)
 class Settings:
     app_name: str = "adv-assistant"
@@ -130,8 +138,10 @@ class Settings:
             nana_banana_status_api_url_template=_optional_env(
                 "NANA_BANANA_STATUS_API_URL_TEMPLATE"
             ),
-            nana_banana_model=os.getenv("NANA_BANANA_MODEL", "nanobanana-2"),
-            nana_banana_generation_type=os.getenv("NANA_BANANA_GENERATION_TYPE", "TEXTTOIAMGE"),
+            nana_banana_model=_env_with_default("NANA_BANANA_MODEL", "nanobanana-2"),
+            nana_banana_generation_type=_env_with_default(
+                "NANA_BANANA_GENERATION_TYPE", "TEXTTOIAMGE"
+            ),
             nana_banana_num_images=_int_env("NANA_BANANA_NUM_IMAGES", 1),
             nana_banana_watermark=(
                 _bool_env("NANA_BANANA_WATERMARK", False)
