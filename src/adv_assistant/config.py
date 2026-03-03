@@ -101,6 +101,11 @@ class Settings:
     media_lifecycle_days: int = 90
     media_verify_lifecycle_on_startup: bool = False
 
+    cms_cityscreen_base_url: str = "https://play.eu.cityscreen.cloud"
+    cms_cityscreen_app_token: str | None = "90b93b88177b6ad4616d28e563a9b700"
+    cms_cityscreen_campaign_id: int = 157
+    cms_cityscreen_playlist_id: int = 139
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -171,4 +176,12 @@ class Settings:
             media_gcs_object_prefix=os.getenv("MEDIA_GCS_OBJECT_PREFIX", "operator-photos"),
             media_lifecycle_days=_int_env("MEDIA_LIFECYCLE_DAYS", 90),
             media_verify_lifecycle_on_startup=_bool_env("MEDIA_VERIFY_LIFECYCLE_ON_STARTUP", False),
+            cms_cityscreen_base_url=os.getenv(
+                "CMS_CITYSCREEN_BASE_URL",
+                "https://play.eu.cityscreen.cloud",
+            ),
+            cms_cityscreen_app_token=_optional_env("CMS_CITYSCREEN_APP_TOKEN")
+            or "90b93b88177b6ad4616d28e563a9b700",
+            cms_cityscreen_campaign_id=_int_env("CMS_CITYSCREEN_CAMPAIGN_ID", 157),
+            cms_cityscreen_playlist_id=_int_env("CMS_CITYSCREEN_PLAYLIST_ID", 139),
         )

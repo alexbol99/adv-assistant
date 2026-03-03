@@ -14,6 +14,13 @@ class WhatsAppClient(Protocol):
         image_url: str,
         caption: str | None = None,
     ) -> None: ...
+    async def send_buttons(
+        self,
+        *,
+        to_phone: str,
+        body_text: str,
+        buttons: list[tuple[str, str]],
+    ) -> None: ...
 
     async def close(self) -> None: ...
 
@@ -28,6 +35,15 @@ class NoopWhatsAppClient:
         to_phone: str,
         image_url: str,
         caption: str | None = None,
+    ) -> None:
+        return None
+
+    async def send_buttons(
+        self,
+        *,
+        to_phone: str,
+        body_text: str,
+        buttons: list[tuple[str, str]],
     ) -> None:
         return None
 
@@ -87,6 +103,39 @@ class MetaWhatsAppClient:
                 "to": to_phone,
                 "type": "image",
                 "image": image_payload,
+            },
+        )
+        response.raise_for_status()
+
+    async def send_buttons(
+        self,
+        *,
+        to_phone: str,
+        body_text: str,
+        buttons: list[tuple[str, str]],
+    ) -> None:
+        interactive_buttons = [
+            {
+                "type": "reply",
+                "reply": {"id": button_id, "title": title[:20]},
+            }
+            for button_id, title in buttons[:3]
+        ]
+        if not interactive_buttons:
+            raise ValueError("at least one button is required")
+
+        response = await self._client.post(
+            self._url,
+            headers=self._auth_header,
+            json={
+                "messaging_product": "whatsapp",
+                "to": to_phone,
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": {"text": body_text[:1024]},
+                    "action": {"buttons": interactive_buttons},
+                },
             },
         )
         response.raise_for_status()

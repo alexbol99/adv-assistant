@@ -19,6 +19,7 @@ SUPPORTED_INTENTS = (
 )
 
 BUTTON_CONFIRM_PUBLISH = "confirm_publish"
+BUTTON_CANCEL_PUBLISH = "cancel_publish"
 BUTTON_CONFIRM_DELETE_ALL = "confirm_delete_all"
 BUTTON_CANCEL_DELETE_ALL = "cancel_delete_all"
 

@@ -35,6 +35,7 @@ class FakeWhatsAppClient:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
         self.images: list[tuple[str, str, str | None]] = []
+        self.buttons: list[tuple[str, str, list[tuple[str, str]]]] = []
 
     async def send_text(self, *, to_phone: str, message: str) -> None:
         self.messages.append((to_phone, message))
@@ -47,6 +48,15 @@ class FakeWhatsAppClient:
         caption: str | None = None,
     ) -> None:
         self.images.append((to_phone, image_url, caption))
+
+    async def send_buttons(
+        self,
+        *,
+        to_phone: str,
+        body_text: str,
+        buttons: list[tuple[str, str]],
+    ) -> None:
+        self.buttons.append((to_phone, body_text, buttons))
 
     async def close(self) -> None:
         return None
@@ -62,6 +72,15 @@ class FailingWhatsAppClient:
         to_phone: str,
         image_url: str,
         caption: str | None = None,
+    ) -> None:
+        raise RuntimeError("401 Unauthorized")
+
+    async def send_buttons(
+        self,
+        *,
+        to_phone: str,
+        body_text: str,
+        buttons: list[tuple[str, str]],
     ) -> None:
         raise RuntimeError("401 Unauthorized")
 

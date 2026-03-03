@@ -14,6 +14,7 @@ from adv_assistant.ad_generation import (
     NoopAdGenerationService,
 )
 from adv_assistant.config import Settings
+from adv_assistant.cms_cityscreen import CMSPublisher, CityScreenCMSPublisher, NoopCMSPublisher
 from adv_assistant.db.base import utcnow
 from adv_assistant.db.repositories import (
     AuditEventRepository,
@@ -31,7 +32,12 @@ from adv_assistant.ingress import (
     is_within_replay_window,
     verify_x_hub_signature,
 )
-from adv_assistant.llm_gateway import NoopLLMGateway, OpenAILLMGateway
+from adv_assistant.llm_gateway import (
+    BUTTON_CANCEL_PUBLISH,
+    BUTTON_CONFIRM_PUBLISH,
+    NoopLLMGateway,
+    OpenAILLMGateway,
+)
 from adv_assistant.media_ingest import (
     DefaultOperatorPhotoIngestor,
     NoopWhatsAppMediaClient,
@@ -143,6 +149,17 @@ def _build_whatsapp_media_client(settings: Settings) -> WhatsAppMediaClient:
             timeout_seconds=settings.whatsapp_media_timeout_seconds,
         )
     return NoopWhatsAppMediaClient()
+
+
+def _build_cms_publisher(settings: Settings) -> CMSPublisher:
+    if settings.cms_cityscreen_app_token:
+        return CityScreenCMSPublisher(
+            base_url=settings.cms_cityscreen_base_url,
+            app_token=settings.cms_cityscreen_app_token,
+            campaign_id=settings.cms_cityscreen_campaign_id,
+            playlist_id=settings.cms_cityscreen_playlist_id,
+        )
+    return NoopCMSPublisher()
 
 
 def _build_operator_photo_ingestor(
@@ -283,6 +300,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     enrichment_service = _build_enrichment_service(current_settings)
     ad_generation_service = _build_ad_generation_service(current_settings)
     media_store = _build_media_store(current_settings)
+    cms_publisher = _build_cms_publisher(current_settings)
     operator_photo_ingestor = _build_operator_photo_ingestor(
         media_store=media_store,
         whatsapp_media_client=whatsapp_media_client,
@@ -295,12 +313,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         render_width=current_settings.ad_render_width,
         render_height=current_settings.ad_render_height,
         operator_photo_ingestor=operator_photo_ingestor,
+        cms_publisher=cms_publisher,
     )
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):
         result = await task_processor.process(payload)
         if (
-            (result.generated_image_url or result.reply_text)
+            (result.generated_image_url or result.reply_text or result.publish_buttons_prompt)
             and not result.duplicate
             and not result.unauthorized_operator
         ):
@@ -315,6 +334,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     await app.state.whatsapp_client.send_text(
                         to_phone=payload.operator_phone,
                         message=result.reply_text,
+                    )
+                if result.publish_buttons_prompt:
+                    await app.state.whatsapp_client.send_buttons(
+                        to_phone=payload.operator_phone,
+                        body_text=result.publish_buttons_prompt,
+                        buttons=[
+                            (BUTTON_CONFIRM_PUBLISH, "Apply"),
+                            (BUTTON_CANCEL_PUBLISH, "Cancel"),
+                        ],
                     )
             except Exception as exc:
                 logger.exception(
@@ -348,6 +376,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 "wamid": payload.wamid,
                                 "sent_text": bool(result.reply_text),
                                 "sent_image": bool(result.generated_image_url),
+                                "sent_buttons": bool(result.publish_buttons_prompt),
                             },
                         )
                 except Exception:
@@ -372,6 +401,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await whatsapp_media_client.close()
             await enrichment_service.close()
             await ad_generation_service.close()
+            await cms_publisher.close()
             await media_store.close()
             await engine.dispose()
 
@@ -387,6 +417,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.ad_generation_service = ad_generation_service
     app.state.whatsapp_media_client = whatsapp_media_client
     app.state.media_store = media_store
+    app.state.cms_publisher = cms_publisher
     app.state.process_and_maybe_send_reply = process_and_maybe_send_reply
 
     def get_settings() -> Settings:
