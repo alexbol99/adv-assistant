@@ -88,9 +88,7 @@ class ConversationSessionRepository:
                 operator_phone=operator_phone,
                 language=language or "he",
                 history=history or [],
-                current_draft_id=(
-                    None if current_draft_id is _UNSET else current_draft_id
-                ),
+                current_draft_id=(None if current_draft_id is _UNSET else current_draft_id),
                 last_active_at=last_active_at or utcnow(),
                 expires_at=None if expires_at is _UNSET else expires_at,
             )

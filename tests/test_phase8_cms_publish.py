@@ -113,7 +113,9 @@ async def test_confirm_publish_button_publishes_to_cms_and_marks_draft_published
     assert result.status == "processed"
     assert result.deterministic_action == "confirm_publish"
     assert result.reply_text is not None
-    assert "הפרסום הצליח" in result.reply_text or "publishing succeeded" in result.reply_text.lower()
+    assert (
+        "הפרסום הצליח" in result.reply_text or "publishing succeeded" in result.reply_text.lower()
+    )
     assert cms.calls == 1
     assert cms.last_image_url == "https://storage.googleapis.com/media/preview.png"
     assert cms.last_title == "Milk"
@@ -123,7 +125,9 @@ async def test_confirm_publish_button_publishes_to_cms_and_marks_draft_published
         assert updated_draft is not None
         assert updated_draft.status == AdDraftStatus.PUBLISHED
 
-        published = await session.execute(select(PublishedAd).where(PublishedAd.ad_draft_id == draft_id))
+        published = await session.execute(
+            select(PublishedAd).where(PublishedAd.ad_draft_id == draft_id)
+        )
         published_row = published.scalar_one_or_none()
         assert published_row is not None
         assert published_row.cms_id == "975"
