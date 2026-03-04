@@ -730,8 +730,7 @@ class InboundTaskProcessor:
                 current_draft.id,
             )
             print(
-                "[CMS] publish failed "
-                f"draft_id={current_draft.id} error={exc}",
+                f"[CMS] publish failed draft_id={current_draft.id} error={exc}",
                 flush=True,
             )
             if language.lower() == "he":
