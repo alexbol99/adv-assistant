@@ -9,8 +9,9 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
 RUN pip install --no-cache-dir uv && \
-    uv sync --frozen --no-dev && \
-    uv pip install --system .
+    uv sync --frozen --no-dev
+
+ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8080
 

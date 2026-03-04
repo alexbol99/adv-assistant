@@ -300,8 +300,21 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 
 ---
 
+## Current Repository Status (as of March 2, 2026)
+
+Based on the current codebase and automated test coverage:
+
+- **Implemented and test-covered:** Phase 0 through Phase 7.
+- **Gate A / Gate B evidence:** present in the current test suite (`tests/test_ingress_pipeline.py`, `tests/test_tasks_auth.py`, `tests/test_phase4_llm_boundary.py`, `tests/test_phase5_enrichment.py`, `tests/test_phase6_media.py`, `tests/test_phase7_generation.py`).
+- **Pending operational/compliance work:** Phase 5 compliance checklist sign-off remains open (`docs/phase5-compliance-checklist.md` is not yet completed).
+- **Not yet implemented:** Phase 8 CMS integration, Phase 9 Admin control plane, Phase 10 hardening, and Phase 11 launch verification.
+- **Current behavior note:** publish/delete confirmation buttons are resolved deterministically, but final CMS side effects are still deferred to Phase 8.
+
+---
+
 ## Immediate Next Actions
 
-1. Implement Phase 2 webhook ingress endpoints (`GET /webhook`, `POST /webhook`) with signature verification and replay-window checks.
-2. Integrate Cloud Tasks enqueue + OIDC-protected task processor path, and enforce `wamid` dedup before business handling.
-3. Prepare Gate A evidence package (security tests + updated ingress ADRs) before starting Phase 3.
+1. Implement Phase 8 `CMSClient` (`publish_ad`, `list_ads`, `delete_all_ads`) and wire deterministic button confirmations to real CMS operations.
+2. Add Phase 8 contract tests against a local mock CMS and document timeout/retry semantics for publish/list/delete-all.
+3. Start Phase 9 Admin API/Auth foundation (operator CRUD + config + audit endpoints), then complete Admin UI flows.
+4. Complete and sign off the Phase 5 compliance checklist before enabling enrichment in staging/production.

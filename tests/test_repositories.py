@@ -131,6 +131,36 @@ async def test_processed_message_purge_uses_expires_at(db_session: AsyncSession)
     assert await processed_repo.exists("purge-delete") is False
 
 
+async def test_session_repository_can_clear_nullable_fields(db_session: AsyncSession) -> None:
+    operator_repo = OperatorRepository(db_session)
+    session_repo = ConversationSessionRepository(db_session)
+    draft_repo = AdDraftRepository(db_session)
+
+    operator = await operator_repo.create(phone="+972500000555")
+    draft = await draft_repo.create(
+        operator_phone=operator.phone,
+        status=AdDraftStatus.DRAFT,
+    )
+    initial_expiry = utcnow() + timedelta(days=1)
+
+    created = await session_repo.create_or_update(
+        operator_phone=operator.phone,
+        history=[{"role": "user", "text": "hello"}],
+        current_draft_id=draft.id,
+        expires_at=initial_expiry,
+    )
+    assert created.current_draft_id == draft.id
+    assert created.expires_at == initial_expiry
+
+    cleared = await session_repo.create_or_update(
+        operator_phone=operator.phone,
+        current_draft_id=None,
+        expires_at=None,
+    )
+    assert cleared.current_draft_id is None
+    assert cleared.expires_at is None
+
+
 async def test_retention_jobs(db_session: AsyncSession) -> None:
     operator_repo = OperatorRepository(db_session)
     session_repo = ConversationSessionRepository(db_session)

@@ -13,6 +13,7 @@ from adv_assistant.ad_generation import (
     NanoBananaJobStatus,
     NoopAdGenerationService,
 )
+from adv_assistant.cms_cityscreen import CMSPublisher, CMSPublishError, NoopCMSPublisher
 from adv_assistant.db.base import utcnow
 from adv_assistant.db.enums import AdDraftStatus
 from adv_assistant.db.models import AdDraft
@@ -22,6 +23,7 @@ from adv_assistant.db.repositories import (
     ConversationSessionRepository,
     OperatorRepository,
     ProcessedInboundMessageRepository,
+    PublishedAdRepository,
 )
 from adv_assistant.db.session import session_scope
 from adv_assistant.enrichment import (
@@ -32,6 +34,7 @@ from adv_assistant.enrichment import (
 )
 from adv_assistant.llm_gateway import (
     BUTTON_CANCEL_DELETE_ALL,
+    BUTTON_CANCEL_PUBLISH,
     BUTTON_CONFIRM_DELETE_ALL,
     BUTTON_CONFIRM_PUBLISH,
     Intent,
@@ -63,6 +66,7 @@ class ProcessInboundResult:
     deterministic_action: str | None = None
     reply_text: str | None = None
     generated_image_url: str | None = None
+    publish_buttons_prompt: str | None = None
 
     @property
     def status(self) -> str:
@@ -108,6 +112,7 @@ class InboundTaskProcessor:
         render_width: int = 1920,
         render_height: int = 1080,
         operator_photo_ingestor: OperatorPhotoIngestor | None = None,
+        cms_publisher: CMSPublisher | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._llm_gateway = llm_gateway or NoopLLMGateway()
@@ -116,12 +121,14 @@ class InboundTaskProcessor:
         self._render_width = render_width
         self._render_height = render_height
         self._operator_photo_ingestor = operator_photo_ingestor or NoopOperatorPhotoIngestor()
+        self._cms_publisher = cms_publisher or NoopCMSPublisher()
 
     async def process(self, payload: InboundTaskPayload) -> ProcessInboundResult:
         async with session_scope(self._session_factory) as session:
             operator_repo = OperatorRepository(session)
             session_repo = ConversationSessionRepository(session)
             draft_repo = AdDraftRepository(session)
+            published_repo = PublishedAdRepository(session)
             processed_repo = ProcessedInboundMessageRepository(session)
             audit_repo = AuditEventRepository(session)
 
@@ -187,6 +194,7 @@ class InboundTaskProcessor:
             deterministic_action: str | None = None
             reply_text: str | None = None
             generated_image_url: str | None = None
+            publish_buttons_prompt: str | None = None
 
             if button_payload_id:
                 history.append(
@@ -196,8 +204,20 @@ class InboundTaskProcessor:
                         "wamid": payload.wamid,
                     }
                 )
-                deterministic_action, reply_text = _resolve_button_action(button_payload_id)
-                intent_value = deterministic_action
+                if button_payload_id == BUTTON_CONFIRM_PUBLISH:
+                    deterministic_action = "confirm_publish"
+                    intent_value = deterministic_action
+                    current_draft, reply_text = await self._confirm_publish_to_cms(
+                        payload=payload,
+                        draft_repo=draft_repo,
+                        published_repo=published_repo,
+                        audit_repo=audit_repo,
+                        current_draft=current_draft,
+                        language=operator.language,
+                    )
+                else:
+                    deterministic_action, reply_text = _resolve_button_action(button_payload_id)
+                    intent_value = deterministic_action
                 await audit_repo.log(
                     actor="system",
                     action="button_callback_resolved",
@@ -428,6 +448,9 @@ class InboundTaskProcessor:
                                             reply_text = _generation_completed_reply(
                                                 operator.language,
                                             )
+                                            publish_buttons_prompt = _publish_buttons_prompt(
+                                                operator.language
+                                            )
                                     else:
                                         failed_draft = (
                                             await draft_repo.update_for_operator_with_version(
@@ -501,7 +524,10 @@ class InboundTaskProcessor:
                                 )
 
                     if reply_text is None:
-                        if classification.intent in {Intent.PUBLISH_AD, Intent.DELETE_ALL}:
+                        if classification.intent == Intent.PUBLISH_AD:
+                            reply_text = _publish_confirmation_prompt(operator.language)
+                            publish_buttons_prompt = _publish_buttons_prompt(operator.language)
+                        elif classification.intent == Intent.DELETE_ALL:
                             reply_text = (
                                 "Please use the confirmation button to continue with this action."
                             )
@@ -599,7 +625,117 @@ class InboundTaskProcessor:
                 deterministic_action=deterministic_action,
                 reply_text=reply_text,
                 generated_image_url=generated_image_url,
+                publish_buttons_prompt=publish_buttons_prompt,
             )
+
+    async def _confirm_publish_to_cms(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        published_repo: PublishedAdRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        language: str,
+    ) -> tuple[AdDraft, str]:
+        if current_draft.rendered_image_url is None:
+            if language.lower() == "he":
+                return current_draft, "אין כרגע תמונת תצוגה מוכנה לפרסום."
+            return current_draft, "There is no generated preview image ready for publishing."
+
+        if not self._cms_publisher.enabled:
+            if language.lower() == "he":
+                return current_draft, "הפרסום ל-CMS לא מוגדר כרגע במערכת."
+            return current_draft, "CMS publishing is not configured yet."
+
+        title = current_draft.product_name or f"draft-{current_draft.id}"
+        logger.info(
+            "CMS publish requested (wamid=%s, operator_phone=%s, draft_id=%s, image_url=%s)",
+            payload.wamid,
+            payload.operator_phone,
+            current_draft.id,
+            current_draft.rendered_image_url,
+        )
+        print(
+            "[CMS] publish requested "
+            f"wamid={payload.wamid} operator_phone={payload.operator_phone} "
+            f"draft_id={current_draft.id}",
+            flush=True,
+        )
+
+        try:
+            publish_result = await self._cms_publisher.publish_generated_image(
+                image_url=current_draft.rendered_image_url,
+                title=title,
+            )
+            cms_id = str(publish_result.advertisement_id)
+            existing = await published_repo.get_by_cms_id(cms_id)
+            if existing is None:
+                await published_repo.create(cms_id=cms_id, ad_draft_id=current_draft.id)
+
+            updated_draft = await draft_repo.update_for_operator_with_version(
+                draft_id=current_draft.id,
+                operator_phone=payload.operator_phone,
+                expected_version=current_draft.version,
+                status=AdDraftStatus.PUBLISHED,
+            )
+            if updated_draft is not None:
+                current_draft = updated_draft
+
+            await audit_repo.log(
+                actor="system",
+                action="publish_ad_success",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "cms_id": cms_id,
+                    "file_id": publish_result.file_id,
+                    "advertisement_id": publish_result.advertisement_id,
+                    "slot_id": publish_result.slot_id,
+                },
+            )
+            logger.info(
+                "CMS publish succeeded (wamid=%s, operator_phone=%s, draft_id=%s, "
+                "cms_id=%s, slot_id=%s)",
+                payload.wamid,
+                payload.operator_phone,
+                current_draft.id,
+                cms_id,
+                publish_result.slot_id,
+            )
+            print(
+                "[CMS] publish succeeded "
+                f"draft_id={current_draft.id} cms_id={cms_id} slot_id={publish_result.slot_id}",
+                flush=True,
+            )
+            if language.lower() == "he":
+                return current_draft, "הפרסום הצליח. המודעה נוספה לפלייליסט."
+            return current_draft, "Publishing succeeded. Your ad was added to the playlist."
+        except CMSPublishError as exc:
+            await audit_repo.log(
+                actor="system",
+                action="publish_ad_failed",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "error": str(exc),
+                },
+            )
+            logger.exception(
+                "CMS publish failed (wamid=%s, operator_phone=%s, draft_id=%s)",
+                payload.wamid,
+                payload.operator_phone,
+                current_draft.id,
+            )
+            print(
+                f"[CMS] publish failed draft_id={current_draft.id} error={exc}",
+                flush=True,
+            )
+            if language.lower() == "he":
+                return current_draft, f"הפרסום נכשל: {exc}"
+            return current_draft, f"Publishing failed: {exc}"
 
     async def _process_operator_photo_message(
         self,
@@ -814,10 +950,9 @@ class InboundTaskProcessor:
 
 def _resolve_button_action(button_id: str) -> tuple[str | None, str]:
     if button_id == BUTTON_CONFIRM_PUBLISH:
-        return (
-            "confirm_publish",
-            "Publish confirmed. Publishing flow will be handled in the next phase.",
-        )
+        return "confirm_publish", "Publishing confirmed."
+    if button_id == BUTTON_CANCEL_PUBLISH:
+        return "cancel_publish", "Publishing canceled."
     if button_id == BUTTON_CONFIRM_DELETE_ALL:
         return (
             "confirm_delete_all",
@@ -902,6 +1037,18 @@ def _generation_completed_reply(language: str) -> str:
     if language.lower() == "he":
         return "התצוגה המקדימה מוכנה."
     return "Your ad preview is ready."
+
+
+def _publish_confirmation_prompt(language: str) -> str:
+    if language.lower() == "he":
+        return "בחר האם לפרסם עכשיו ל-CMS או לבטל."
+    return "Choose whether to publish to CMS now or cancel."
+
+
+def _publish_buttons_prompt(language: str) -> str:
+    if language.lower() == "he":
+        return "לפרסם את המודעה הזו ל-CMS?"
+    return "Publish this ad to CMS?"
 
 
 def _generation_failed_reply(language: str) -> str:

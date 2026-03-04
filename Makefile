@@ -13,7 +13,7 @@ test:
 	uv run pytest
 
 test-docker:
-	docker compose run --rm -v "$$PWD":/app app sh -lc "pip install -e . pytest && pytest tests"
+	docker compose run --rm -v "$$PWD":/app app sh -lc "UV_PROJECT_ENVIRONMENT=/tmp/adv-assistant-venv uv sync --frozen --all-groups && UV_PROJECT_ENVIRONMENT=/tmp/adv-assistant-venv uv run pytest tests"
 
 migrate:
 	set -a; [ -f .env ] && . ./.env; set +a; uv run alembic upgrade head
