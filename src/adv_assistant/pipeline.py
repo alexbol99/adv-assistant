@@ -679,8 +679,39 @@ class InboundTaskProcessor:
                 expected_version=current_draft.version,
                 status=AdDraftStatus.PUBLISHED,
             )
-            if updated_draft is not None:
-                current_draft = updated_draft
+            if updated_draft is None:
+                await audit_repo.log(
+                    actor="system",
+                    action="draft_stale_write_detected",
+                    operator_phone=payload.operator_phone,
+                    metadata={
+                        "wamid": payload.wamid,
+                        "draft_id": str(current_draft.id),
+                        "cms_id": cms_id,
+                        "expected_version": current_draft.version,
+                        "context": "cms_publish_status_update",
+                    },
+                )
+                logger.warning(
+                    "Stale draft write detected after CMS publish "
+                    "(wamid=%s, operator_phone=%s, draft_id=%s, expected_version=%s)",
+                    payload.wamid,
+                    payload.operator_phone,
+                    current_draft.id,
+                    current_draft.version,
+                )
+                if language.lower() == "he":
+                    return (
+                        current_draft,
+                        "הפרסום בוצע, אך התרחשה שגיאה זמנית בעדכון סטטוס הטיוטה. "
+                        "אנא רענן את השיחה ונסה שוב.",
+                    )
+                return (
+                    current_draft,
+                    "Your ad was published, but there was a temporary issue updating "
+                    "the draft status. Please refresh and try again.",
+                )
+            current_draft = updated_draft
 
             await audit_repo.log(
                 actor="system",
@@ -735,8 +766,8 @@ class InboundTaskProcessor:
                 flush=True,
             )
             if language.lower() == "he":
-                return current_draft, f"הפרסום נכשל: {exc}"
-            return current_draft, f"Publishing failed: {exc}"
+                return current_draft, "הפרסום נכשל כרגע. נסה שוב בעוד רגע."
+            return current_draft, "Publishing failed right now. Please try again in a moment."
 
     async def _process_operator_photo_message(
         self,
