@@ -27,7 +27,19 @@ def test_blank_media_bucket_is_normalized_to_none(monkeypatch) -> None:
     assert settings.media_gcs_bucket is None
 
 
+def test_blank_media_s3_bucket_is_normalized_to_none(monkeypatch) -> None:
+    monkeypatch.setenv("MEDIA_S3_BUCKET", "   ")
+    settings = Settings.from_env()
+    assert settings.media_s3_bucket is None
+
+
 def test_blank_nana_banana_watermark_is_normalized_to_none(monkeypatch) -> None:
     monkeypatch.setenv("NANA_BANANA_WATERMARK", "   ")
     settings = Settings.from_env()
     assert settings.nana_banana_watermark is None
+
+
+def test_gemini_model_falls_back_to_default_when_blank(monkeypatch) -> None:
+    monkeypatch.setenv("GEMINI_MODEL", "   ")
+    settings = Settings.from_env()
+    assert settings.gemini_model == "gemini-3.1-flash-image-preview"

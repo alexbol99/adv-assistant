@@ -16,7 +16,7 @@ from adv_assistant.media_ingest import (
     MediaIngestError,
     OperatorPhotoIngestor,
 )
-from adv_assistant.media_store import GCSMediaStore, MediaStore, MediaUpload
+from adv_assistant.media_store import GCSMediaStore, MediaStore, MediaUpload, S3MediaStore
 from adv_assistant.pipeline import InboundTaskProcessor
 from adv_assistant.tasks_queue import InboundTaskPayload
 
@@ -54,6 +54,33 @@ class FakeStorageClient:
         if name not in self._buckets:
             self._buckets[name] = FakeStorageBucket(name)
         return self._buckets[name]
+
+
+class FakeS3LifecycleError(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+
+
+class FakeS3Client:
+    def __init__(self) -> None:
+        self.uploads: dict[tuple[str, str], tuple[bytes, str]] = {}
+        self.lifecycle_rules: list[dict[str, object]] | None = []
+
+    def put_object(
+        self,
+        *,
+        Bucket: str,
+        Key: str,
+        Body: bytes,
+        ContentType: str,
+    ) -> None:
+        self.uploads[(Bucket, Key)] = (Body, ContentType)
+
+    def get_bucket_lifecycle_configuration(self, *, Bucket: str) -> dict[str, object]:
+        if self.lifecycle_rules is None:
+            raise FakeS3LifecycleError("NoSuchLifecycleConfiguration")
+        return {"Rules": self.lifecycle_rules}
 
 
 class StaticMediaStore(MediaStore):
@@ -159,6 +186,28 @@ async def test_gcs_media_store_upload_and_lifecycle_rule_check() -> None:
     assert await store.has_delete_lifecycle_rule(days=90) is True
     assert await store.has_delete_lifecycle_rule(days=30) is False
     assert bucket.reloaded is True
+
+
+async def test_s3_media_store_upload_and_lifecycle_rule_check() -> None:
+    fake_client = FakeS3Client()
+    fake_client.lifecycle_rules = [{"Status": "Enabled", "Expiration": {"Days": 90}}]
+    store = S3MediaStore(
+        bucket_name="test-media",
+        region_name="eu-west-1",
+        client=fake_client,
+    )
+
+    upload = await store.upload_bytes(content=b"img", content_type="image/png", suffix=".png")
+
+    assert upload.object_name.startswith("operator-photos/")
+    assert upload.object_name.endswith(".png")
+    assert upload.public_url.startswith("https://test-media.s3.eu-west-1.amazonaws.com/")
+    assert fake_client.uploads[("test-media", upload.object_name)] == (b"img", "image/png")
+    assert await store.has_delete_lifecycle_rule(days=90) is True
+    assert await store.has_delete_lifecycle_rule(days=30) is False
+
+    fake_client.lifecycle_rules = None
+    assert await store.has_delete_lifecycle_rule(days=90) is False
 
 
 async def test_default_operator_photo_ingestor_uploads_image() -> None:

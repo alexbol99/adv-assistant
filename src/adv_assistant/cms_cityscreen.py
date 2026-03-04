@@ -1,9 +1,11 @@
 import logging
 from dataclasses import dataclass
+from io import BytesIO
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
 import httpx
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,8 @@ class CityScreenCMSPublisher:
         app_token: str,
         campaign_id: int,
         playlist_id: int,
+        expected_width: int = 1920,
+        expected_height: int = 1080,
         picture_duration_ms: int = 10000,
         timeout_seconds: float = 30.0,
         client: httpx.AsyncClient | None = None,
@@ -65,6 +69,8 @@ class CityScreenCMSPublisher:
         self._base_url = base_url.rstrip("/")
         self._campaign_id = campaign_id
         self._playlist_id = playlist_id
+        self._expected_width = max(1, expected_width)
+        self._expected_height = max(1, expected_height)
         self._picture_duration_ms = picture_duration_ms
         self._headers = {"x-app-token": app_token}
         self._owns_client = client is None
@@ -87,6 +93,26 @@ class CityScreenCMSPublisher:
             image_url,
         )
         image_bytes, content_type = await self._download_image(image_url=image_url)
+        prepared = _normalize_image_for_cityscreen(
+            content=image_bytes,
+            content_type=content_type,
+            expected_width=self._expected_width,
+            expected_height=self._expected_height,
+        )
+        self._debug(
+            "image normalized source=%sx%s output=%sx%s content_type=%s transformed=%s",
+            prepared.source_width,
+            prepared.source_height,
+            prepared.width,
+            prepared.height,
+            prepared.content_type,
+            prepared.transformed,
+        )
+        image_bytes = prepared.content
+        content_type = prepared.content_type
+        width = prepared.width
+        height = prepared.height
+
         upload_file_name = _guess_upload_filename(image_url=image_url, content_type=content_type)
         upload_info = await self._upload_picture(
             file_name=upload_file_name,
@@ -94,11 +120,14 @@ class CityScreenCMSPublisher:
             content_type=content_type,
         )
         file_id = _as_int(upload_info.get("id"), field="upload.id")
-        width = _as_int(upload_info.get("width") or 1920, field="upload.width")
-        height = _as_int(upload_info.get("height") or 1080, field="upload.height")
+        upload_width = _as_optional_int(upload_info.get("width"))
+        upload_height = _as_optional_int(upload_info.get("height"))
         self._debug(
-            "upload done file_id=%s width=%s height=%s",
+            "upload done file_id=%s upload_width=%s upload_height=%s "
+            "using_width=%s using_height=%s",
             file_id,
+            upload_width,
+            upload_height,
             width,
             height,
         )
@@ -257,6 +286,76 @@ class CityScreenCMSPublisher:
         rendered = message % args if args else message
         logger.info("[CityScreen] %s", rendered)
         print(f"[CityScreen] {rendered}", flush=True)
+
+
+@dataclass(slots=True)
+class _PreparedImage:
+    content: bytes
+    content_type: str
+    width: int
+    height: int
+    source_width: int
+    source_height: int
+    transformed: bool
+
+
+def _normalize_image_for_cityscreen(
+    *,
+    content: bytes,
+    content_type: str,
+    expected_width: int,
+    expected_height: int,
+) -> _PreparedImage:
+    if not content:
+        raise CMSPublishError("Generated image URL returned empty content")
+
+    normalized_content_type = content_type.strip().lower()
+    if not normalized_content_type.startswith("image/"):
+        raise CMSPublishError(
+            f"Generated image URL returned unsupported content-type: {content_type}"
+        )
+
+    try:
+        with Image.open(BytesIO(content)) as image:
+            source_width, source_height = image.size
+            if source_width <= 0 or source_height <= 0:
+                raise CMSPublishError("Generated image has invalid dimensions")
+
+            if source_width == expected_width and source_height == expected_height:
+                return _PreparedImage(
+                    content=content,
+                    content_type=normalized_content_type,
+                    width=expected_width,
+                    height=expected_height,
+                    source_width=source_width,
+                    source_height=source_height,
+                    transformed=False,
+                )
+
+            resized = ImageOps.contain(
+                image.convert("RGBA"),
+                (expected_width, expected_height),
+                method=Image.Resampling.LANCZOS,
+            )
+            canvas = Image.new("RGBA", (expected_width, expected_height), (255, 255, 255, 255))
+            offset_x = (expected_width - resized.width) // 2
+            offset_y = (expected_height - resized.height) // 2
+            canvas.paste(resized, (offset_x, offset_y), resized)
+            output_buffer = BytesIO()
+            canvas.save(output_buffer, format="PNG", optimize=True)
+            normalized_bytes = output_buffer.getvalue()
+    except UnidentifiedImageError as exc:
+        raise CMSPublishError("Generated image bytes are not a valid image file") from exc
+
+    return _PreparedImage(
+        content=normalized_bytes,
+        content_type="image/png",
+        width=expected_width,
+        height=expected_height,
+        source_width=source_width,
+        source_height=source_height,
+        transformed=True,
+    )
 
 
 def _raise_for_status(response: httpx.Response, action: str) -> None:
