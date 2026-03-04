@@ -94,19 +94,29 @@ class CityScreenCMSPublisher:
             content_type=content_type,
         )
         file_id = _as_int(upload_info.get("id"), field="upload.id")
-        width = _as_int(upload_info.get("width") or 1920, field="upload.width")
-        height = _as_int(upload_info.get("height") or 1080, field="upload.height")
+        upload_width = _as_int(upload_info.get("width") or 1920, field="upload.width")
+        upload_height = _as_int(upload_info.get("height") or 1080, field="upload.height")
         self._debug(
             "upload done file_id=%s width=%s height=%s",
             file_id,
-            width,
-            height,
+            upload_width,
+            upload_height,
         )
+        campaign_resolution = await self._resolve_campaign_resolution()
+        if campaign_resolution is not None:
+            self._debug(
+                "campaign target resolution width=%s height=%s",
+                campaign_resolution[0],
+                campaign_resolution[1],
+            )
 
+        resolution_candidates = _build_resolution_candidates(
+            campaign_resolution=campaign_resolution,
+            upload_resolution=(upload_width, upload_height),
+        )
         advertisement_id = await self._create_picture_advertisement(
             file_id=file_id,
-            width=width,
-            height=height,
+            resolution_candidates=resolution_candidates,
             title=title,
         )
         self._debug("advertisement created advertisement_id=%s", advertisement_id)
@@ -167,29 +177,90 @@ class CityScreenCMSPublisher:
         self,
         *,
         file_id: int,
-        width: int,
-        height: int,
+        resolution_candidates: list[tuple[int, int]],
         title: str,
     ) -> int:
         url = f"{self._base_url}/api/v1.4/advertiser/campaigns/{self._campaign_id}/advertisements"
-        payload = {
-            "title": title[:120],
-            "type": "picture",
-            "cost": 0,
-            "duration": self._picture_duration_ms,
-            "medias": [
-                {
-                    "fileId": file_id,
-                    "resolutions": [{"width": width, "height": height}],
-                }
-            ],
-        }
-        response = await self._client.put(url, headers=self._headers, json=payload)
-        _raise_for_status(response, "create advertisement")
-        body = _safe_json(response, "create advertisement")
-        if not isinstance(body, dict):
-            raise CMSPublishError("create advertisement returned invalid payload")
-        return _as_int(body.get("id"), field="advertisement.id")
+        for width, height in resolution_candidates:
+            payload = {
+                "title": title[:120],
+                "type": "picture",
+                "cost": 0,
+                "duration": self._picture_duration_ms,
+                "medias": [
+                    {
+                        "fileId": file_id,
+                        "resolutions": [{"width": width, "height": height}],
+                    }
+                ],
+            }
+            response = await self._client.put(url, headers=self._headers, json=payload)
+            if response.status_code >= 400:
+                text = response.text[:800] if response.text else ""
+                if (
+                    response.status_code == 400
+                    and "Invalid media files resolutions" in text
+                ):
+                    self._debug(
+                        "resolution rejected width=%s height=%s response=%s",
+                        width,
+                        height,
+                        text[:200],
+                    )
+                    continue
+                _raise_for_status(response, "create advertisement")
+
+            body = _safe_json(response, "create advertisement")
+            if not isinstance(body, dict):
+                raise CMSPublishError("create advertisement returned invalid payload")
+            return _as_int(body.get("id"), field="advertisement.id")
+
+        raise CMSPublishError(
+            "create advertisement failed: no compatible media resolution for campaign"
+        )
+
+    async def _resolve_campaign_resolution(self) -> tuple[int, int] | None:
+        url = (
+            f"{self._base_url}/api/v1.4/advertiser/campaigns/"
+            f"{self._campaign_id}/advertisements?amount=20&offset=0"
+        )
+        try:
+            response = await self._client.get(url, headers=self._headers)
+            _raise_for_status(response, "load campaign advertisements")
+            payload = _safe_json(response, "load campaign advertisements")
+        except CMSPublishError as exc:
+            self._debug("campaign resolution lookup failed: %s", exc)
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        items = payload.get("list")
+        if not isinstance(items, list):
+            return None
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            medias = item.get("medias")
+            if not isinstance(medias, list):
+                continue
+            for media_item in medias:
+                if not isinstance(media_item, dict):
+                    continue
+                resolutions = media_item.get("resolutions")
+                if not isinstance(resolutions, list):
+                    continue
+                for resolution in resolutions:
+                    if not isinstance(resolution, dict):
+                        continue
+                    width = _as_optional_int(resolution.get("width"))
+                    height = _as_optional_int(resolution.get("height"))
+                    if width is None or height is None:
+                        continue
+                    if width <= 0 or height <= 0:
+                        continue
+                    return (width, height)
+        return None
 
     async def _append_advertisement_to_playlist(self, *, advertisement_id: int) -> int | None:
         playlist = await self._load_playlist()
@@ -342,3 +413,26 @@ def _normalize_playlist_slot(slot: dict[str, Any]) -> dict[str, Any] | None:
         "weight": weight,
         "duration": duration,
     }
+
+
+def _build_resolution_candidates(
+    *,
+    campaign_resolution: tuple[int, int] | None,
+    upload_resolution: tuple[int, int],
+) -> list[tuple[int, int]]:
+    ordered: list[tuple[int, int]] = []
+    for candidate in (
+        campaign_resolution,
+        (1920, 1080),
+        (1080, 1920),
+        upload_resolution,
+    ):
+        if candidate is None:
+            continue
+        width, height = candidate
+        if width <= 0 or height <= 0:
+            continue
+        if candidate in ordered:
+            continue
+        ordered.append(candidate)
+    return ordered

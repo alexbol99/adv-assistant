@@ -157,4 +157,4 @@ async def test_confirm_publish_button_returns_error_message_when_cms_fails(
     assert result.deterministic_action == "confirm_publish"
     assert result.reply_text is not None
     assert "הפרסום נכשל" in result.reply_text or "publishing failed" in result.reply_text.lower()
-    assert "cityscreen 400" in result.reply_text
+    assert "cityscreen 400" not in result.reply_text
