@@ -304,17 +304,18 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 
 Based on the current codebase and automated test coverage:
 
-- **Implemented and test-covered:** Phase 0 through Phase 7.
+- **Implemented and test-covered:** Phase 0 through Phase 8 (publish flow).
 - **Gate A / Gate B evidence:** present in the current test suite (`tests/test_ingress_pipeline.py`, `tests/test_tasks_auth.py`, `tests/test_phase4_llm_boundary.py`, `tests/test_phase5_enrichment.py`, `tests/test_phase6_media.py`, `tests/test_phase7_generation.py`).
 - **Pending operational/compliance work:** Phase 5 compliance checklist sign-off remains open (`docs/phase5-compliance-checklist.md` is not yet completed).
-- **Not yet implemented:** Phase 8 CMS integration, Phase 9 Admin control plane, Phase 10 hardening, and Phase 11 launch verification.
-- **Current behavior note:** publish/delete confirmation buttons are resolved deterministically, but final CMS side effects are still deferred to Phase 8.
+- **Phase 8 status:** real CityScreen publish side effects are implemented for `confirm_publish` (upload image -> create advertisement -> append to playlist) with deterministic Apply/Cancel button handling and test coverage (`tests/test_phase8_cms_publish.py`).
+- **Not yet implemented:** Phase 8 `list_ads` / `delete_all_ads` flows, Phase 9 Admin control plane, Phase 10 hardening, and Phase 11 launch verification.
+- **Current behavior note:** publish confirmation now executes real CMS publish; delete-all side effects remain deferred.
 
 ---
 
 ## Immediate Next Actions
 
-1. Implement Phase 8 `CMSClient` (`publish_ad`, `list_ads`, `delete_all_ads`) and wire deterministic button confirmations to real CMS operations.
-2. Add Phase 8 contract tests against a local mock CMS and document timeout/retry semantics for publish/list/delete-all.
+1. Complete remaining Phase 8 scope: `list_ads` and `delete_all_ads` CMS operations and their deterministic confirmation flows.
+2. Expand Phase 8 contract tests and document timeout/retry semantics for publish/list/delete-all.
 3. Start Phase 9 Admin API/Auth foundation (operator CRUD + config + audit endpoints), then complete Admin UI flows.
 4. Complete and sign off the Phase 5 compliance checklist before enabling enrichment in staging/production.
