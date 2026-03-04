@@ -656,12 +656,6 @@ class InboundTaskProcessor:
             current_draft.id,
             current_draft.rendered_image_url,
         )
-        print(
-            "[CMS] publish requested "
-            f"wamid={payload.wamid} operator_phone={payload.operator_phone} "
-            f"draft_id={current_draft.id}",
-            flush=True,
-        )
 
         try:
             publish_result = await self._cms_publisher.publish_generated_image(
@@ -735,11 +729,6 @@ class InboundTaskProcessor:
                 cms_id,
                 publish_result.slot_id,
             )
-            print(
-                "[CMS] publish succeeded "
-                f"draft_id={current_draft.id} cms_id={cms_id} slot_id={publish_result.slot_id}",
-                flush=True,
-            )
             if language.lower() == "he":
                 return current_draft, "הפרסום הצליח. המודעה נוספה לפלייליסט."
             return current_draft, "Publishing succeeded. Your ad was added to the playlist."
@@ -759,11 +748,6 @@ class InboundTaskProcessor:
                 payload.wamid,
                 payload.operator_phone,
                 current_draft.id,
-            )
-            print(
-                "[CMS] publish failed "
-                f"draft_id={current_draft.id} error={exc}",
-                flush=True,
             )
             if language.lower() == "he":
                 return current_draft, "הפרסום נכשל כרגע. נסה שוב בעוד רגע."
