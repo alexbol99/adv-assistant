@@ -31,3 +31,15 @@ def test_blank_nana_banana_watermark_is_normalized_to_none(monkeypatch) -> None:
     monkeypatch.setenv("NANA_BANANA_WATERMARK", "   ")
     settings = Settings.from_env()
     assert settings.nana_banana_watermark is None
+
+
+def test_missing_cityscreen_token_remains_none(monkeypatch) -> None:
+    monkeypatch.delenv("CMS_CITYSCREEN_APP_TOKEN", raising=False)
+    settings = Settings.from_env()
+    assert settings.cms_cityscreen_app_token is None
+
+
+def test_cityscreen_token_comes_only_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("CMS_CITYSCREEN_APP_TOKEN", "token-from-env")
+    settings = Settings.from_env()
+    assert settings.cms_cityscreen_app_token == "token-from-env"
