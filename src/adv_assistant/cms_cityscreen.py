@@ -256,7 +256,6 @@ class CityScreenCMSPublisher:
     def _debug(self, message: str, *args: Any) -> None:
         rendered = message % args if args else message
         logger.info("[CityScreen] %s", rendered)
-        print(f"[CityScreen] {rendered}", flush=True)
 
 
 def _raise_for_status(response: httpx.Response, action: str) -> None:
