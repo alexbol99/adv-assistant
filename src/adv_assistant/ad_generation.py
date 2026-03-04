@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import math
 import uuid
@@ -11,6 +12,8 @@ from time import monotonic
 from typing import Any, Protocol
 
 import httpx
+
+from adv_assistant.media_store import MediaStore, MediaStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +114,224 @@ class NoopAdGenerationService:
 
     async def close(self) -> None:
         return None
+
+
+class GeminiFlashImageAdGenerationService:
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        media_store: MediaStore,
+        model: str = "gemini-3.1-flash-image-preview",
+        base_url: str = "https://generativelanguage.googleapis.com/v1beta",
+        timeout_seconds: float = 30.0,
+        max_submit_attempts: int = 3,
+        retry_base_seconds: float = 1.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._api_key = api_key.strip()
+        self._model = model.strip()
+        self._generate_url = f"{base_url.rstrip('/')}/models/{self._model}:generateContent"
+        self._media_store = media_store
+        self._max_submit_attempts = max(1, max_submit_attempts)
+        self._retry_base_seconds = max(0.0, retry_base_seconds)
+        self._owns_client = client is None
+        self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
+        self._results: dict[str, GenerationPollResult] = {}
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    async def submit_for_draft(
+        self,
+        *,
+        draft: GenerationDraftInput,
+        mode: GenerationMode,
+        instruction_text: str,
+        wamid: str,
+        width: int,
+        height: int,
+    ) -> GenerationSubmission:
+        if mode == GenerationMode.REFERENCE and not (
+            draft.preview_reference_url or draft.rendered_image_url
+        ):
+            raise AdGenerationError("Reference regeneration requires an existing preview image")
+
+        idempotency_key = stable_idempotency_key(
+            draft_id=draft.draft_id,
+            wamid=wamid,
+            mode=mode,
+        )
+        aspect_ratio = derive_aspect_ratio(width=width, height=height)
+        prompt = build_generation_prompt(
+            draft=draft,
+            mode=mode,
+            instruction_text=instruction_text,
+        )
+        prompt = f"{prompt}\nTarget aspect ratio: {aspect_ratio}."
+        payload = await self._build_request_payload(
+            prompt=prompt,
+            mode=mode,
+            draft=draft,
+        )
+
+        response: httpx.Response | None = None
+        for attempt in range(1, self._max_submit_attempts + 1):
+            try:
+                response = await self._client.post(
+                    self._generate_url,
+                    params={"key": self._api_key},
+                    json=payload,
+                )
+                response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                body_excerpt = _response_excerpt(exc.response)
+                detail = body_excerpt or "No response body"
+                retryable = _is_retryable_gemini_http_status(status_code)
+                if retryable and attempt < self._max_submit_attempts:
+                    retry_delay = _retry_delay_seconds(
+                        attempt=attempt,
+                        base_seconds=self._retry_base_seconds,
+                    )
+                    logger.warning(
+                        "Gemini HTTP error (status=%s, attempt=%s/%s). Retrying in %.2fs. body=%s",
+                        status_code,
+                        attempt,
+                        self._max_submit_attempts,
+                        retry_delay,
+                        body_excerpt,
+                    )
+                    await asyncio.sleep(retry_delay)
+                    continue
+                logger.warning(
+                    "Gemini image generation HTTP error (status=%s, body=%s)",
+                    status_code,
+                    body_excerpt,
+                )
+                raise AdGenerationError(
+                    f"Gemini image generation failed with HTTP {status_code}. {detail}"
+                ) from exc
+            except httpx.RequestError as exc:
+                detail = str(exc).strip() or exc.__class__.__name__
+                retryable = _is_retryable_gemini_request_error(exc)
+                if retryable and attempt < self._max_submit_attempts:
+                    retry_delay = _retry_delay_seconds(
+                        attempt=attempt,
+                        base_seconds=self._retry_base_seconds,
+                    )
+                    logger.warning(
+                        "Gemini request error (%s, attempt=%s/%s). Retrying in %.2fs. detail=%s",
+                        exc.__class__.__name__,
+                        attempt,
+                        self._max_submit_attempts,
+                        retry_delay,
+                        detail,
+                    )
+                    await asyncio.sleep(retry_delay)
+                    continue
+                logger.warning(
+                    "Gemini image generation request error (%s): %s",
+                    exc.__class__.__name__,
+                    detail,
+                )
+                raise AdGenerationError(
+                    f"Gemini image generation request error ({exc.__class__.__name__}): {detail}"
+                ) from exc
+
+        if response is None:
+            raise AdGenerationError("Gemini image generation failed before receiving a response")
+
+        try:
+            response_payload = response.json()
+        except ValueError as exc:
+            logger.warning("Gemini image generation returned invalid JSON")
+            raise AdGenerationError("Gemini response is not valid JSON") from exc
+        if not isinstance(response_payload, dict):
+            raise AdGenerationError("Gemini response has unexpected format")
+
+        image_bytes, mime_type = _extract_gemini_inline_image(response_payload)
+        try:
+            uploaded = await self._media_store.upload_bytes(
+                content=image_bytes,
+                content_type=mime_type,
+                suffix=_image_suffix_for_mime_type(mime_type),
+            )
+        except MediaStoreError as exc:
+            raise AdGenerationError(
+                "Gemini generated an image but media storage is not configured. "
+                "Configure MEDIA_STORE_MODE=gcs or MEDIA_STORE_MODE=s3 to publish preview images."
+            ) from exc
+
+        job_id = str(uuid.uuid4())
+        self._results[job_id] = GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url=uploaded.public_url,
+        )
+        logger.info("Gemini image generation completed (job_id=%s)", job_id)
+
+        return GenerationSubmission(
+            job_id=job_id,
+            idempotency_key=idempotency_key,
+            mode=mode,
+            request_payload=payload,
+        )
+
+    async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult:
+        result = self._results.get(job_id)
+        if result is None:
+            raise AdGenerationError(f"Unknown Gemini generation job ID: {job_id}")
+        return result
+
+    async def close(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+    async def _build_request_payload(
+        self,
+        *,
+        prompt: str,
+        mode: GenerationMode,
+        draft: GenerationDraftInput,
+    ) -> dict[str, Any]:
+        parts: list[dict[str, Any]] = [{"text": prompt}]
+        reference_url = draft.preview_reference_url or draft.rendered_image_url
+        if mode == GenerationMode.REFERENCE and reference_url:
+            reference_content, reference_mime_type = await self._download_reference_image(
+                reference_url
+            )
+            parts.append(
+                {
+                    "inline_data": {
+                        "mime_type": reference_mime_type,
+                        "data": base64.b64encode(reference_content).decode("ascii"),
+                    }
+                }
+            )
+
+        return {
+            "contents": [{"parts": parts}],
+            "generationConfig": {"responseModalities": ["IMAGE"]},
+        }
+
+    async def _download_reference_image(self, url: str) -> tuple[bytes, str]:
+        try:
+            response = await self._client.get(url)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            raise AdGenerationError(
+                f"Failed to fetch reference image for Gemini regeneration: {exc}"
+            ) from exc
+        except httpx.RequestError as exc:
+            raise AdGenerationError(
+                f"Failed to fetch reference image for Gemini regeneration: {exc}"
+            ) from exc
+
+        content_type_header = response.headers.get("content-type", "image/png")
+        mime_type = content_type_header.split(";", 1)[0].strip().lower() or "image/png"
+        return response.content, mime_type
 
 
 class NanoBananaAdGenerationService:
@@ -638,6 +859,61 @@ def _extract_output_image_url(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_gemini_inline_image(payload: dict[str, Any]) -> tuple[bytes, str]:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        raise AdGenerationError("Gemini response did not include any candidates")
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        if not isinstance(content, dict):
+            continue
+        parts = content.get("parts")
+        if not isinstance(parts, list):
+            continue
+
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            inline_data = part.get("inlineData")
+            if not isinstance(inline_data, dict):
+                inline_data = part.get("inline_data")
+            if not isinstance(inline_data, dict):
+                continue
+
+            encoded = inline_data.get("data")
+            if not isinstance(encoded, str) or not encoded.strip():
+                continue
+
+            mime_type_raw = inline_data.get("mimeType") or inline_data.get("mime_type")
+            mime_type = (
+                mime_type_raw.strip().lower()
+                if isinstance(mime_type_raw, str) and mime_type_raw.strip()
+                else "image/png"
+            )
+            try:
+                return base64.b64decode(encoded, validate=True), mime_type
+            except ValueError as exc:
+                raise AdGenerationError(
+                    "Gemini response included invalid base64 image data"
+                ) from exc
+
+    raise AdGenerationError("Gemini response did not include an image output")
+
+
+def _image_suffix_for_mime_type(mime_type: str) -> str:
+    normalized = mime_type.strip().lower()
+    if normalized == "image/png":
+        return ".png"
+    if normalized == "image/jpeg":
+        return ".jpg"
+    if normalized == "image/webp":
+        return ".webp"
+    return ".img"
+
+
 def _response_excerpt(response: httpx.Response | None, *, limit: int = 300) -> str | None:
     if response is None:
         return None
@@ -648,3 +924,26 @@ def _response_excerpt(response: httpx.Response | None, *, limit: int = 300) -> s
     if len(compact) > limit:
         return f"{compact[:limit]}..."
     return compact
+
+
+def _is_retryable_gemini_http_status(status_code: int | None) -> bool:
+    return status_code in {408, 429, 500, 502, 503, 504}
+
+
+def _is_retryable_gemini_request_error(exc: httpx.RequestError) -> bool:
+    return isinstance(
+        exc,
+        (
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            httpx.WriteTimeout,
+            httpx.PoolTimeout,
+            httpx.ConnectError,
+            httpx.RemoteProtocolError,
+        ),
+    )
+
+
+def _retry_delay_seconds(*, attempt: int, base_seconds: float) -> float:
+    # Exponential backoff capped to keep inline webhook processing responsive.
+    return min(base_seconds * (2 ** (attempt - 1)), 4.0)

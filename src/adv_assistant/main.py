@@ -10,6 +10,7 @@ from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.ad_generation import (
+    GeminiFlashImageAdGenerationService,
     NanoBananaAdGenerationService,
     NoopAdGenerationService,
 )
@@ -44,7 +45,7 @@ from adv_assistant.media_ingest import (
     OperatorPhotoIngestor,
     WhatsAppMediaClient,
 )
-from adv_assistant.media_store import GCSMediaStore, MediaStore, NoopMediaStore
+from adv_assistant.media_store import GCSMediaStore, MediaStore, NoopMediaStore, S3MediaStore
 from adv_assistant.pipeline import InboundTaskProcessor
 from adv_assistant.tasks_auth import (
     OidcTaskRequestAuthorizer,
@@ -102,7 +103,16 @@ def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentServ
     )
 
 
-def _build_ad_generation_service(settings: Settings):
+def _build_ad_generation_service(*, settings: Settings, media_store: MediaStore):
+    if settings.gemini_api_key:
+        return GeminiFlashImageAdGenerationService(
+            api_key=settings.gemini_api_key,
+            media_store=media_store,
+            model=settings.gemini_model,
+            base_url=settings.gemini_base_url,
+            timeout_seconds=settings.gemini_timeout_seconds,
+        )
+
     required = {
         "NANA_BANANA_API_KEY": settings.nana_banana_api_key,
     }
@@ -138,6 +148,16 @@ def _build_media_store(settings: Settings) -> MediaStore:
             public_base_url=settings.media_gcs_public_base_url,
             object_prefix=settings.media_gcs_object_prefix,
         )
+    if mode == "s3":
+        if not settings.media_s3_bucket:
+            raise RuntimeError("MEDIA_S3_BUCKET is required when MEDIA_STORE_MODE=s3")
+        return S3MediaStore(
+            bucket_name=settings.media_s3_bucket,
+            region_name=settings.media_s3_region,
+            public_base_url=settings.media_s3_public_base_url,
+            object_prefix=settings.media_s3_object_prefix,
+            endpoint_url=settings.media_s3_endpoint_url,
+        )
     raise RuntimeError(f"Unsupported MEDIA_STORE_MODE='{settings.media_store_mode}'")
 
 
@@ -158,6 +178,8 @@ def _build_cms_publisher(settings: Settings) -> CMSPublisher:
             app_token=settings.cms_cityscreen_app_token,
             campaign_id=settings.cms_cityscreen_campaign_id,
             playlist_id=settings.cms_cityscreen_playlist_id,
+            expected_width=settings.ad_render_width,
+            expected_height=settings.ad_render_height,
         )
     return NoopCMSPublisher()
 
@@ -298,9 +320,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     whatsapp_client = _build_whatsapp_client(current_settings)
     whatsapp_media_client = _build_whatsapp_media_client(current_settings)
     enrichment_service = _build_enrichment_service(current_settings)
-    ad_generation_service = _build_ad_generation_service(current_settings)
     media_store = _build_media_store(current_settings)
     cms_publisher = _build_cms_publisher(current_settings)
+    ad_generation_service = _build_ad_generation_service(
+        settings=current_settings,
+        media_store=media_store,
+    )
     operator_photo_ingestor = _build_operator_photo_ingestor(
         media_store=media_store,
         whatsapp_media_client=whatsapp_media_client,

@@ -29,7 +29,7 @@
    - `uv run ruff format --check .`
    - `uv run pytest`
 3. Run the app locally:
-   - `uv run uvicorn adv_assistant.main:app --reload --host 0.0.0.0 --port 8080`
+   - `uv run uvicorn --app-dir src adv_assistant.main:app --reload --host 0.0.0.0 --port 8080`
    - or `make run` (auto-loads `.env` into process env)
 4. Run with Docker:
    - `docker compose up --build`
@@ -75,25 +75,37 @@
   - `ENRICHMENT_HTTP_TIMEOUT_SECONDS` (default `8`)
   - provider chain order: Open Food Facts -> EAN fallback -> web-search fallback
   - only normalized enrichment fields are stored in DB; raw provider payloads are not persisted
-- Ad generation configuration (Phase 7, polling-only):
-  - `NANA_BANANA_API_KEY`
-  - `NANA_BANANA_BASE_URL` (quickstart style, e.g. `https://api.nanobananaapi.ai/api/v1/nanobanana`)
-  - `NANA_BANANA_API_URL` (optional explicit override for generate endpoint)
-  - `NANA_BANANA_STATUS_API_URL_TEMPLATE` (optional explicit status endpoint template; must include `{job_id}`)
-  - `NANA_BANANA_MODEL` (default `nanobanana-2`)
-  - `NANA_BANANA_GENERATION_TYPE` (default `TEXTTOIAMGE`, per provider quickstart)
-  - `NANA_BANANA_NUM_IMAGES` (default `1`)
-  - `NANA_BANANA_WATERMARK` (optional boolean)
-  - `NANA_BANANA_TIMEOUT_SECONDS` (default `20`)
-  - `NANA_BANANA_POLL_INITIAL_SECONDS` (default `2`)
-  - `NANA_BANANA_POLL_MAX_SECONDS` (default `10`)
-  - `NANA_BANANA_POLL_TIMEOUT_SECONDS` (default `900`)
+- Ad generation configuration (Phase 7):
+  - Gemini (preferred):
+    - `GEMINI_API_KEY`
+    - `GEMINI_MODEL` (default `gemini-3.1-flash-image-preview`)
+    - `GEMINI_BASE_URL` (default `https://generativelanguage.googleapis.com/v1beta`)
+    - `GEMINI_TIMEOUT_SECONDS` (default `30`)
+  - Nano Banana (legacy fallback):
+    - `NANA_BANANA_API_KEY`
+    - `NANA_BANANA_BASE_URL` (quickstart style, e.g. `https://api.nanobananaapi.ai/api/v1/nanobanana`)
+    - `NANA_BANANA_API_URL` (optional explicit override for generate endpoint)
+    - `NANA_BANANA_STATUS_API_URL_TEMPLATE` (optional explicit status endpoint template; must include `{job_id}`)
+    - `NANA_BANANA_MODEL` (default `nanobanana-2`)
+    - `NANA_BANANA_GENERATION_TYPE` (default `TEXTTOIAMGE`, per provider quickstart)
+    - `NANA_BANANA_NUM_IMAGES` (default `1`)
+    - `NANA_BANANA_WATERMARK` (optional boolean)
+    - `NANA_BANANA_TIMEOUT_SECONDS` (default `20`)
+    - `NANA_BANANA_POLL_INITIAL_SECONDS` (default `2`)
+    - `NANA_BANANA_POLL_MAX_SECONDS` (default `10`)
+    - `NANA_BANANA_POLL_TIMEOUT_SECONDS` (default `900`)
   - `AD_RENDER_WIDTH` / `AD_RENDER_HEIGHT` (default `1920x1080`; aspect ratio derived automatically)
+  - when using Gemini image generation, set `MEDIA_STORE_MODE` to a cloud backend (`gcs` or `s3`) for public preview URLs
 - Media lifecycle/storage configuration (Phase 6):
-  - `MEDIA_STORE_MODE` (`noop` or `gcs`, default `noop`)
+  - `MEDIA_STORE_MODE` (`noop`, `gcs`, or `s3`, default `noop`)
   - `MEDIA_GCS_BUCKET` (required when `MEDIA_STORE_MODE=gcs`)
   - `MEDIA_GCS_PUBLIC_BASE_URL` (default `https://storage.googleapis.com`)
   - `MEDIA_GCS_OBJECT_PREFIX` (default `operator-photos`)
+  - `MEDIA_S3_BUCKET` (required when `MEDIA_STORE_MODE=s3`)
+  - `MEDIA_S3_REGION` (recommended for `MEDIA_STORE_MODE=s3`)
+  - `MEDIA_S3_PUBLIC_BASE_URL` (optional full public prefix, for example a CloudFront URL)
+  - `MEDIA_S3_OBJECT_PREFIX` (default `operator-photos`)
+  - `MEDIA_S3_ENDPOINT_URL` (optional, for S3-compatible endpoints)
   - `MEDIA_LIFECYCLE_DAYS` (default `90`)
   - `MEDIA_VERIFY_LIFECYCLE_ON_STARTUP` (default `false`; when `true`, app startup validates a matching GCS Delete lifecycle rule)
   - `WHATSAPP_MEDIA_TIMEOUT_SECONDS` (default `15`)

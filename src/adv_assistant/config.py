@@ -79,6 +79,11 @@ class Settings:
     open_food_facts_base_url: str = "https://world.openfoodfacts.org"
     enrichment_http_timeout_seconds: int = 8
 
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-3.1-flash-image-preview"
+    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
+    gemini_timeout_seconds: int = 30
+
     nana_banana_api_key: str | None = None
     nana_banana_api_url: str | None = None
     nana_banana_base_url: str | None = None
@@ -98,6 +103,11 @@ class Settings:
     media_gcs_bucket: str | None = None
     media_gcs_public_base_url: str = "https://storage.googleapis.com"
     media_gcs_object_prefix: str = "operator-photos"
+    media_s3_bucket: str | None = None
+    media_s3_region: str | None = None
+    media_s3_public_base_url: str | None = None
+    media_s3_object_prefix: str = "operator-photos"
+    media_s3_endpoint_url: str | None = None
     media_lifecycle_days: int = 90
     media_verify_lifecycle_on_startup: bool = False
 
@@ -146,6 +156,13 @@ class Settings:
                 "OPEN_FOOD_FACTS_BASE_URL", "https://world.openfoodfacts.org"
             ),
             enrichment_http_timeout_seconds=_int_env("ENRICHMENT_HTTP_TIMEOUT_SECONDS", 8),
+            gemini_api_key=_optional_env("GEMINI_API_KEY"),
+            gemini_model=_env_with_default("GEMINI_MODEL", "gemini-3.1-flash-image-preview"),
+            gemini_base_url=_env_with_default(
+                "GEMINI_BASE_URL",
+                "https://generativelanguage.googleapis.com/v1beta",
+            ),
+            gemini_timeout_seconds=_int_env("GEMINI_TIMEOUT_SECONDS", 30),
             nana_banana_api_key=_optional_env("NANA_BANANA_API_KEY"),
             nana_banana_api_url=_optional_env("NANA_BANANA_API_URL"),
             nana_banana_base_url=_optional_env("NANA_BANANA_BASE_URL"),
@@ -174,6 +191,11 @@ class Settings:
                 "MEDIA_GCS_PUBLIC_BASE_URL", "https://storage.googleapis.com"
             ),
             media_gcs_object_prefix=os.getenv("MEDIA_GCS_OBJECT_PREFIX", "operator-photos"),
+            media_s3_bucket=_optional_env("MEDIA_S3_BUCKET"),
+            media_s3_region=_optional_env("MEDIA_S3_REGION"),
+            media_s3_public_base_url=_optional_env("MEDIA_S3_PUBLIC_BASE_URL"),
+            media_s3_object_prefix=os.getenv("MEDIA_S3_OBJECT_PREFIX", "operator-photos"),
+            media_s3_endpoint_url=_optional_env("MEDIA_S3_ENDPOINT_URL"),
             media_lifecycle_days=_int_env("MEDIA_LIFECYCLE_DAYS", 90),
             media_verify_lifecycle_on_startup=_bool_env("MEDIA_VERIFY_LIFECYCLE_ON_STARTUP", False),
             cms_cityscreen_base_url=os.getenv(
