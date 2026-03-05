@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from adv_assistant.db.base import utcnow
+from adv_assistant.db.enums import AdDraftStatus
 from adv_assistant.db.models import (
     AdDraft,
     AuditEvent,
@@ -32,6 +33,9 @@ class OperatorRepository:
         language: str = "he",
         currency: str = "ILS",
         active: bool = True,
+        business_name: str | None = None,
+        logo_url: str | None = None,
+        brand_colors: list[str] | None = None,
     ) -> Operator:
         operator = Operator(
             phone=phone,
@@ -39,6 +43,9 @@ class OperatorRepository:
             language=language,
             currency=currency,
             active=active,
+            business_name=business_name,
+            logo_url=logo_url,
+            brand_colors=brand_colors,
         )
         self.session.add(operator)
         await self.session.flush()
@@ -61,6 +68,29 @@ class OperatorRepository:
         await self.session.flush()
         return (result.rowcount or 0) > 0
 
+    async def update_branding(
+        self,
+        phone: str,
+        *,
+        business_name: str | None | object = _UNSET,
+        logo_url: str | None | object = _UNSET,
+        brand_colors: list[str] | None | object = _UNSET,
+    ) -> bool:
+        values: dict[str, Any] = {"updated_at": utcnow()}
+        if business_name is not _UNSET:
+            values["business_name"] = business_name
+        if logo_url is not _UNSET:
+            values["logo_url"] = logo_url
+        if brand_colors is not _UNSET:
+            values["brand_colors"] = brand_colors
+        if len(values) == 1:
+            return False
+        result = await self.session.execute(
+            update(Operator).where(Operator.phone == phone).values(**values)
+        )
+        await self.session.flush()
+        return (result.rowcount or 0) > 0
+
 
 class ConversationSessionRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -79,6 +109,7 @@ class ConversationSessionRepository:
         language: str | None = None,
         history: list[dict[str, Any]] | None = None,
         current_draft_id: uuid.UUID | None | object = _UNSET,
+        pending_upload_type: str | None | object = _UNSET,
         last_active_at: datetime | None = None,
         expires_at: datetime | None | object = _UNSET,
     ) -> ConversationSession:
@@ -89,6 +120,9 @@ class ConversationSessionRepository:
                 language=language or "he",
                 history=history or [],
                 current_draft_id=(None if current_draft_id is _UNSET else current_draft_id),
+                pending_upload_type=(
+                    None if pending_upload_type is _UNSET else pending_upload_type
+                ),
                 last_active_at=last_active_at or utcnow(),
                 expires_at=None if expires_at is _UNSET else expires_at,
             )
@@ -100,6 +134,8 @@ class ConversationSessionRepository:
                 session_obj.history = history
             if current_draft_id is not _UNSET:
                 session_obj.current_draft_id = current_draft_id
+            if pending_upload_type is not _UNSET:
+                session_obj.pending_upload_type = pending_upload_type
             if last_active_at is not None:
                 session_obj.last_active_at = last_active_at
             if expires_at is not _UNSET:
@@ -198,6 +234,38 @@ class AdDraftRepository:
             return None
         await self.session.flush()
         return await self.get_by_id(draft_id)
+
+    async def reset_product_fields(
+        self,
+        *,
+        draft_id: uuid.UUID,
+        operator_phone: str,
+        expected_version: int,
+        currency: str = "ILS",
+    ) -> AdDraft | None:
+        """Clear all product-specific fields for a fresh ad creation."""
+        return await self.update_for_operator_with_version(
+            draft_id=draft_id,
+            operator_phone=operator_phone,
+            expected_version=expected_version,
+            product_name=None,
+            product_brand=None,
+            price=None,
+            currency=currency,
+            promo_text=None,
+            ean=None,
+            photo_url=None,
+            enriched_brand=None,
+            enriched_category=None,
+            enriched_description=None,
+            enriched_image_url=None,
+            enrichment_source="none",
+            enrichment_unavailable_notified_at=None,
+            generation_job_id=None,
+            preview_reference_url=None,
+            rendered_image_url=None,
+            status=AdDraftStatus.DRAFT,
+        )
 
 
 class PublishedAdRepository:

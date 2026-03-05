@@ -111,6 +111,8 @@ def _build_ad_generation_service(*, settings: Settings, media_store: MediaStore)
             model=settings.gemini_model,
             base_url=settings.gemini_base_url,
             timeout_seconds=settings.gemini_timeout_seconds,
+            max_submit_attempts=settings.gemini_max_submit_attempts,
+            retry_base_seconds=settings.gemini_retry_base_seconds,
         )
 
     required = {
@@ -243,42 +245,57 @@ async def _validate_schema_compatibility(
     engine,
     settings: Settings,
 ) -> None:
-    if not settings.enrichment_enabled:
-        return
-
-    required_columns = {
-        "enriched_brand",
-        "enriched_category",
-        "enriched_description",
-        "enriched_image_url",
-        "enrichment_source",
-        "enrichment_unavailable_notified_at",
+    required_columns_by_table: dict[str, set[str]] = {
+        "operator": {"business_name", "logo_url", "brand_colors"},
+        "conversation_session": {"pending_upload_type"},
+        "ad_draft": {"product_brand"},
     }
+    if settings.enrichment_enabled:
+        required_columns_by_table["ad_draft"].update(
+            {
+                "enriched_brand",
+                "enriched_category",
+                "enriched_description",
+                "enriched_image_url",
+                "enrichment_source",
+                "enrichment_unavailable_notified_at",
+            }
+        )
 
     async with engine.begin() as connection:
-        table_names, ad_draft_columns = await connection.run_sync(_inspect_schema)
+        table_names, columns_by_table = await connection.run_sync(_inspect_schema)
 
-    if "ad_draft" not in table_names:
+    for table_name in required_columns_by_table:
+        if table_name in table_names:
+            continue
         raise RuntimeError(
-            "Database schema is not initialized (missing 'ad_draft'). "
+            f"Database schema is not initialized (missing '{table_name}'). "
             "Run `uv run alembic upgrade head`."
         )
 
-    missing_columns = sorted(required_columns - ad_draft_columns)
-    if missing_columns:
+    for table_name, required_columns in required_columns_by_table.items():
+        table_columns = columns_by_table.get(table_name, set())
+        missing_columns = sorted(required_columns - table_columns)
+        if not missing_columns:
+            continue
         raise RuntimeError(
-            "Database schema is behind application code. Missing columns in 'ad_draft': "
-            f"{', '.join(missing_columns)}. Run `uv run alembic upgrade head`."
+            "Database schema is behind application code. "
+            f"Missing columns in '{table_name}': {', '.join(missing_columns)}. "
+            "Run `uv run alembic upgrade head`."
         )
 
 
-def _inspect_schema(sync_connection) -> tuple[set[str], set[str]]:
+def _inspect_schema(sync_connection) -> tuple[set[str], dict[str, set[str]]]:
     schema_inspector = inspect(sync_connection)
     table_names = set(schema_inspector.get_table_names())
-    ad_draft_columns: set[str] = set()
-    if "ad_draft" in table_names:
-        ad_draft_columns = {column["name"] for column in schema_inspector.get_columns("ad_draft")}
-    return table_names, ad_draft_columns
+    columns_by_table: dict[str, set[str]] = {}
+    for table_name in ("operator", "conversation_session", "ad_draft"):
+        if table_name not in table_names:
+            continue
+        columns_by_table[table_name] = {
+            column["name"] for column in schema_inspector.get_columns(table_name)
+        }
+    return table_names, columns_by_table
 
 
 async def _validate_media_lifecycle(
@@ -339,6 +356,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         render_height=current_settings.ad_render_height,
         operator_photo_ingestor=operator_photo_ingestor,
         cms_publisher=cms_publisher,
+        whatsapp_client=whatsapp_client,
     )
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):

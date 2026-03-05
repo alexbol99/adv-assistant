@@ -54,6 +54,10 @@ class GenerationDraftInput:
     enriched_description: str | None
     preview_reference_url: str | None
     rendered_image_url: str | None
+    product_brand: str | None = None
+    business_name: str | None = None
+    logo_url: str | None = None
+    brand_colors: list[str] | None = None
 
 
 @dataclass(slots=True)
@@ -297,6 +301,29 @@ class GeminiFlashImageAdGenerationService:
         draft: GenerationDraftInput,
     ) -> dict[str, Any]:
         parts: list[dict[str, Any]] = [{"text": prompt}]
+
+        # Include operator product photo as inline image data so the model
+        # can actually "see" the product.
+        if draft.photo_url:
+            try:
+                photo_content, photo_mime_type = await self._download_reference_image(
+                    draft.photo_url
+                )
+                parts.append(
+                    {
+                        "inline_data": {
+                            "mime_type": photo_mime_type,
+                            "data": base64.b64encode(photo_content).decode("ascii"),
+                        }
+                    }
+                )
+            except AdGenerationError:
+                logger.warning(
+                    "Could not download product photo for inline generation (url=%s)",
+                    draft.photo_url,
+                )
+
+        # Include reference image for REFERENCE mode.
         reference_url = draft.preview_reference_url or draft.rendered_image_url
         if mode == GenerationMode.REFERENCE and reference_url:
             reference_content, reference_mime_type = await self._download_reference_image(
@@ -416,9 +443,14 @@ class NanoBananaAdGenerationService:
                 "size": {"width": width, "height": height},
             },
         }
+        image_urls: list[str] = []
         reference_image_url = draft.preview_reference_url or draft.rendered_image_url
         if mode == GenerationMode.REFERENCE and reference_image_url:
-            payload["imageUrls"] = [reference_image_url]
+            image_urls.append(reference_image_url)
+        if draft.photo_url and draft.photo_url not in image_urls:
+            image_urls.append(draft.photo_url)
+        if image_urls:
+            payload["imageUrls"] = image_urls
 
         try:
             response = await self._client.post(
@@ -732,33 +764,75 @@ def build_generation_prompt(
     mode: GenerationMode,
     instruction_text: str,
 ) -> str:
-    lines = [
-        "Generate a retail ad image.",
+    sections: list[str] = [
+        "Generate a professional retail advertisement image.",
         f"Language: {draft.language}.",
         f"Mode: {mode.value}.",
-        f"Product: {draft.product_name or 'unknown'}.",
-        f"Price: {_price_to_text(draft.price, draft.currency)}.",
-        f"Promo: {draft.promo_text or 'none'}.",
     ]
+
+    # --- PRIMARY: must be large and prominent in the ad ---
+    sections.append("")
+    sections.append("=== PRIMARY (must be large and prominent in the ad) ===")
+    sections.append(f"Product Name: {draft.product_name or 'unknown'}.")
+    resolved_brand = draft.product_brand or draft.enriched_brand
+    if resolved_brand:
+        sections.append(f"Brand: {resolved_brand}.")
+    if (
+        draft.product_brand
+        and draft.enriched_brand
+        and draft.product_brand.strip().casefold() != draft.enriched_brand.strip().casefold()
+    ):
+        sections.append(
+            "Brand source note: Use the operator-provided brand as the final displayed brand."
+        )
+    sections.append(f"Price: {_price_to_text(draft.price, draft.currency)}.")
+
+    # --- BUSINESS BRANDING ---
+    has_branding = draft.business_name or draft.logo_url or draft.brand_colors
+    if has_branding:
+        sections.append("")
+        sections.append("=== BUSINESS BRANDING ===")
+        if draft.business_name:
+            sections.append(f"Business Name: {draft.business_name}.")
+        if draft.brand_colors:
+            colors_text = ", ".join(draft.brand_colors)
+            sections.append(
+                f"Brand Colors: {colors_text}. Use these as the dominant color palette."
+            )
+        if draft.logo_url:
+            sections.append(f"Business Logo URL: {draft.logo_url}.")
+
+    # --- SUPPORTING DETAILS ---
+    supporting: list[str] = []
+    if draft.promo_text:
+        supporting.append(f"Promo Text: {draft.promo_text}.")
     if draft.ean:
-        lines.append(f"EAN: {draft.ean}.")
+        supporting.append(f"EAN: {draft.ean}.")
     if draft.photo_url:
-        lines.append(f"Product photo URL: {draft.photo_url}.")
-    if draft.enriched_brand:
-        lines.append(f"Brand: {draft.enriched_brand}.")
+        supporting.append(f"Product Photo URL: {draft.photo_url}.")
     if draft.enriched_category:
-        lines.append(f"Category: {draft.enriched_category}.")
+        supporting.append(f"Category: {draft.enriched_category}.")
     if draft.enriched_description:
-        lines.append(f"Description: {draft.enriched_description}.")
+        supporting.append(f"Description: {draft.enriched_description}.")
+    if supporting:
+        sections.append("")
+        sections.append("=== SUPPORTING DETAILS ===")
+        sections.extend(supporting)
+
+    # --- Reference mode ---
     if mode == GenerationMode.REFERENCE and (
         draft.preview_reference_url or draft.rendered_image_url
     ):
-        lines.append("Preserve the overall visual style of the previous preview.")
+        sections.append("")
+        sections.append("Preserve the overall visual style of the previous preview.")
 
+    # --- Operator instruction ---
     cleaned_instruction = " ".join(instruction_text.split()).strip()
     if cleaned_instruction:
-        lines.append(f"Operator instruction: {cleaned_instruction}.")
-    return "\n".join(lines)
+        sections.append("")
+        sections.append(f"Operator instruction: {cleaned_instruction}.")
+
+    return "\n".join(sections)
 
 
 def _resolve_generation_api_url(*, api_url: str | None, base_url: str | None) -> str:

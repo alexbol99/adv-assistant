@@ -79,6 +79,21 @@ class FakeGateway:
         return ReplyGeneration(reply_text="LLM reply fallback")
 
 
+class FakeGatewayNoPrice(FakeGateway):
+    async def extract_ad_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> ExtractedAdFields:
+        return ExtractedAdFields(
+            product_name="Cottage Cheese",
+            currency="ILS",
+            promo_text="Fresh and tasty",
+        )
+
+
 class FakeGenerationService:
     enabled = True
 
@@ -89,6 +104,7 @@ class FakeGenerationService:
     ) -> None:
         self.calls = 0
         self.last_mode: GenerationMode | None = None
+        self.last_draft: GenerationDraftInput | None = None
         self.wait_calls = 0
         self._poll_result = poll_result
 
@@ -104,6 +120,7 @@ class FakeGenerationService:
     ) -> GenerationSubmission:
         self.calls += 1
         self.last_mode = mode
+        self.last_draft = draft
         return GenerationSubmission(
             job_id="job-123",
             idempotency_key="fixed-key",
@@ -665,6 +682,53 @@ async def test_pipeline_submits_generation_job_and_sets_preview_ready(
         assert draft.status == AdDraftStatus.PREVIEW_READY
         assert draft.generation_job_id == "job-123"
         assert draft.rendered_image_url == "https://storage.googleapis.com/media/preview-1.png"
+
+
+async def test_pipeline_generates_preview_without_price_and_requests_followup(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000703"
+    await _seed_operator(session_factory, phone)
+    fake_gateway = FakeGatewayNoPrice()
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-no-price.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=fake_gateway,
+        ad_generation_service=fake_generation,
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-generate-no-price",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "create ad for cottage"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.deterministic_action == "generation_completed"
+    assert result.generated_image_url == "https://storage.googleapis.com/media/preview-no-price.png"
+    assert result.reply_text is not None
+    assert "preview is ready" in result.reply_text.lower()
+    assert "price" in result.reply_text.lower()
+    assert fake_generation.calls == 1
+    assert fake_generation.last_draft is not None
+    assert fake_generation.last_draft.price is None
+
+    async with session_scope(session_factory) as session:
+        draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert draft is not None
+        assert draft.status == AdDraftStatus.PREVIEW_READY
+        assert draft.price is None
 
 
 async def test_pipeline_generation_failure_returns_fallback_message(

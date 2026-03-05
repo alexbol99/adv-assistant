@@ -1,4 +1,5 @@
 from collections.abc import AsyncIterator
+from decimal import Decimal
 from pathlib import Path
 
 import httpx
@@ -119,6 +120,92 @@ class StaticEnrichmentService:
 
     async def close(self) -> None:
         return None
+
+
+class TwoCreateAdGateway:
+    uses_external_llm = False
+
+    def __init__(self) -> None:
+        self._calls = 0
+
+    async def classify_intent(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> IntentClassification:
+        return IntentClassification(intent=Intent.CREATE_AD)
+
+    async def extract_ad_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> ExtractedAdFields:
+        self._calls += 1
+        if self._calls == 1:
+            return ExtractedAdFields(
+                product_name="Milk 3%",
+                product_brand="BrandOne",
+                price=Decimal("11.90"),
+                currency="ILS",
+                promo_text="First promo",
+            )
+        return ExtractedAdFields(
+            product_name="Pizza Family",
+            price=Decimal("29.90"),
+            currency="ILS",
+        )
+
+    async def generate_reply(
+        self,
+        *,
+        intent: Intent,
+        message_text: str,
+        language: str,
+        extracted_fields: ExtractedAdFields | None,
+    ) -> ReplyGeneration:
+        return ReplyGeneration(reply_text="Draft updated.")
+
+
+class BrandConflictGateway:
+    uses_external_llm = False
+
+    async def classify_intent(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> IntentClassification:
+        return IntentClassification(intent=Intent.CREATE_AD)
+
+    async def extract_ad_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> ExtractedAdFields:
+        return ExtractedAdFields(
+            product_name="גבינה לבנה",
+            product_brand="מותג פרטי",
+            price=Decimal("14.90"),
+            currency="ILS",
+            ean="7290001234567",
+        )
+
+    async def generate_reply(
+        self,
+        *,
+        intent: Intent,
+        message_text: str,
+        language: str,
+        extracted_fields: ExtractedAdFields | None,
+    ) -> ReplyGeneration:
+        return ReplyGeneration(reply_text="Draft updated.")
 
 
 @pytest.fixture()
@@ -296,9 +383,24 @@ async def test_enrichment_unavailable_notified_once_per_draft(
 ) -> None:
     phone = "+972500000502"
     await _seed_operator(session_factory, phone)
+
+    # Use a gateway that returns CREATE_AD for the first message and
+    # REGENERATE_FROM_SCRATCH for the second so the draft is not reset.
+    class _CreateThenRegenerateGateway(FakeGateway):
+        def __init__(self):
+            self._call_count = 0
+
+        async def classify_intent(
+            self, *, message_text: str, language: str, history: list[dict[str, str]]
+        ) -> IntentClassification:
+            self._call_count += 1
+            if self._call_count == 1:
+                return IntentClassification(intent=Intent.CREATE_AD)
+            return IntentClassification(intent=Intent.REGENERATE_FROM_SCRATCH)
+
     processor = InboundTaskProcessor(
         session_factory,
-        llm_gateway=FakeGateway(),
+        llm_gateway=_CreateThenRegenerateGateway(),
         enrichment_service=StaticEnrichmentService(None),
     )
 
@@ -313,7 +415,7 @@ async def test_enrichment_unavailable_notified_once_per_draft(
         InboundTaskPayload(
             wamid="wamid-enrich-miss-2",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "create ad 7290001234567"}},
+            raw_message={"type": "text", "text": {"body": "update ad 7290001234567"}},
         )
     )
 
@@ -405,3 +507,97 @@ async def test_unknown_intent_with_ean_unavailable_notice_not_duplicated(
 def test_no_raw_enrichment_payload_field_is_defined() -> None:
     assert not hasattr(AdDraft, "enrichment_raw_payload")
     assert isinstance(NoopProductLookupProvider("none"), NoopProductLookupProvider)
+
+
+async def test_create_ad_creates_new_draft_and_does_not_reuse_previous_product_fields(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000505"
+    await _seed_operator(session_factory, phone)
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=TwoCreateAdGateway(),
+        enrichment_service=StaticEnrichmentService(None),
+    )
+
+    first = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-create-new-1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "create ad for milk"}},
+        )
+    )
+    second = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-create-new-2",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "create ad for pizza"}},
+        )
+    )
+
+    assert first.status == "processed"
+    assert second.status == "processed"
+
+    async with session_scope(session_factory) as session:
+        session_obj = (
+            await session.execute(
+                select(ConversationSession).where(ConversationSession.operator_phone == phone)
+            )
+        ).scalar_one()
+        drafts = (
+            await session.execute(
+                select(AdDraft)
+                .where(AdDraft.operator_phone == phone)
+                .order_by(AdDraft.created_at.asc())
+            )
+        ).scalars()
+        draft_list = list(drafts)
+        assert len(draft_list) >= 2
+        current_draft = await session.get(AdDraft, session_obj.current_draft_id)
+        assert current_draft is not None
+        assert current_draft.id == draft_list[-1].id
+        assert current_draft.product_name == "Pizza Family"
+        assert current_draft.price == Decimal("29.90")
+        assert current_draft.product_brand is None
+        assert current_draft.promo_text is None
+
+
+async def test_product_brand_conflict_keeps_operator_brand_and_adds_followup(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000506"
+    await _seed_operator(session_factory, phone)
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=BrandConflictGateway(),
+        enrichment_service=StaticEnrichmentService(
+            EnrichedProduct(
+                product_name="גבינה לבנה",
+                brand="תנובה",
+                source="open_food_facts",
+            )
+        ),
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-brand-conflict-1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "create ad גבינה לבנה 14.90"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.reply_text is not None
+    assert "מותג" in result.reply_text
+
+    async with session_scope(session_factory) as session:
+        session_obj = (
+            await session.execute(
+                select(ConversationSession).where(ConversationSession.operator_phone == phone)
+            )
+        ).scalar_one()
+        draft = await session.get(AdDraft, session_obj.current_draft_id)
+        assert draft is not None
+        assert draft.product_brand == "מותג פרטי"
+        assert draft.enriched_brand == "תנובה"
