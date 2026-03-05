@@ -417,7 +417,9 @@ async def test_pipeline_set_logo_routes_next_image_to_operator_logo(
         operator = (
             await session.execute(select(Operator).where(Operator.phone == phone))
         ).scalar_one()
-        assert operator.logo_url == "https://storage.googleapis.com/test-media/operator-logos/l1.jpg"
+        assert (
+            operator.logo_url == "https://storage.googleapis.com/test-media/operator-logos/l1.jpg"
+        )
 
         session_obj = (
             await session.execute(

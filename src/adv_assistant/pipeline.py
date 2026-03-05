@@ -622,15 +622,11 @@ class InboundTaskProcessor:
                                 )
 
                     if reply_text is None:
-                        if (
-                            classification.intent
-                            in {
-                                Intent.CREATE_AD,
-                                Intent.REGENERATE_WITH_REFERENCE,
-                                Intent.REGENERATE_FROM_SCRATCH,
-                            }
-                            and not _is_ready_for_generation(current_draft)
-                        ):
+                        if classification.intent in {
+                            Intent.CREATE_AD,
+                            Intent.REGENERATE_WITH_REFERENCE,
+                            Intent.REGENERATE_FROM_SCRATCH,
+                        } and not _is_ready_for_generation(current_draft):
                             reply_text = _missing_product_name_reply(operator.language)
                         elif classification.intent == Intent.SET_BRANDING:
                             branding = await self._llm_gateway.extract_branding_fields(
@@ -1233,13 +1229,13 @@ def _build_brand_conflict_followup(*, draft: AdDraft, language: str) -> str | No
     if language.lower() == "he":
         return (
             "יצרתי מודעה ראשונית לפי המותג שכתבת. "
-            f"רשמתי מותג מוצר: \"{operator_brand}\" "
-            f"בעוד שבמאגר נמצא: \"{catalog_brand}\". "
+            f'רשמתי מותג מוצר: "{operator_brand}" '
+            f'בעוד שבמאגר נמצא: "{catalog_brand}". '
             "אם צריך, תכתוב לי איזה מותג לשמור להמשך."
         )
     return (
         "I generated the first ad using the brand you provided. "
-        f"You wrote \"{operator_brand}\", while barcode enrichment found \"{catalog_brand}\". "
+        f'You wrote "{operator_brand}", while barcode enrichment found "{catalog_brand}". '
         "If needed, tell me which brand to keep going forward."
     )
 
