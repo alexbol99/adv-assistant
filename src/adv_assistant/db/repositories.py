@@ -29,20 +29,26 @@ class OperatorRepository:
         self,
         *,
         phone: str,
+        meta_user_id: str | None = None,
         display_name: str | None = None,
         language: str = "he",
         currency: str = "ILS",
         active: bool = True,
+        cms_campaign_id: int | None = None,
+        cms_playlist_id: int | None = None,
         business_name: str | None = None,
         logo_url: str | None = None,
         brand_colors: list[str] | None = None,
     ) -> Operator:
         operator = Operator(
             phone=phone,
+            meta_user_id=meta_user_id,
             display_name=display_name,
             language=language,
             currency=currency,
             active=active,
+            cms_campaign_id=cms_campaign_id,
+            cms_playlist_id=cms_playlist_id,
             business_name=business_name,
             logo_url=logo_url,
             brand_colors=brand_colors,
@@ -53,6 +59,12 @@ class OperatorRepository:
 
     async def get_by_phone(self, phone: str) -> Operator | None:
         result = await self.session.execute(select(Operator).where(Operator.phone == phone))
+        return result.scalar_one_or_none()
+
+    async def get_by_meta_user_id(self, meta_user_id: str) -> Operator | None:
+        result = await self.session.execute(
+            select(Operator).where(Operator.meta_user_id == meta_user_id)
+        )
         return result.scalar_one_or_none()
 
     async def list_active(self) -> list[Operator]:
@@ -85,6 +97,30 @@ class OperatorRepository:
             values["brand_colors"] = brand_colors
         if len(values) == 1:
             return False
+        result = await self.session.execute(
+            update(Operator).where(Operator.phone == phone).values(**values)
+        )
+        await self.session.flush()
+        return (result.rowcount or 0) > 0
+
+    async def update_cms_mapping(
+        self,
+        phone: str,
+        *,
+        meta_user_id: str | None | object = _UNSET,
+        cms_campaign_id: int | None | object = _UNSET,
+        cms_playlist_id: int | None | object = _UNSET,
+    ) -> bool:
+        values: dict[str, Any] = {"updated_at": utcnow()}
+        if meta_user_id is not _UNSET:
+            values["meta_user_id"] = meta_user_id
+        if cms_campaign_id is not _UNSET:
+            values["cms_campaign_id"] = cms_campaign_id
+        if cms_playlist_id is not _UNSET:
+            values["cms_playlist_id"] = cms_playlist_id
+        if len(values) == 1:
+            return False
+
         result = await self.session.execute(
             update(Operator).where(Operator.phone == phone).values(**values)
         )

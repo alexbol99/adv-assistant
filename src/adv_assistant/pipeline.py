@@ -220,6 +220,7 @@ class InboundTaskProcessor:
                         draft_repo=draft_repo,
                         published_repo=published_repo,
                         audit_repo=audit_repo,
+                        operator=operator,
                         current_draft=current_draft,
                         language=operator.language,
                     )
@@ -771,6 +772,7 @@ class InboundTaskProcessor:
         draft_repo: AdDraftRepository,
         published_repo: PublishedAdRepository,
         audit_repo: AuditEventRepository,
+        operator: Operator,
         current_draft: AdDraft,
         language: str,
     ) -> tuple[AdDraft, str]:
@@ -778,6 +780,18 @@ class InboundTaskProcessor:
             if language.lower() == "he":
                 return current_draft, "אין כרגע תמונת תצוגה מוכנה לפרסום."
             return current_draft, "There is no generated preview image ready for publishing."
+
+        if operator.cms_campaign_id is None or operator.cms_playlist_id is None:
+            await audit_repo.log(
+                actor="system",
+                action="publish_blocked_operator_not_connected",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                },
+            )
+            return current_draft, _cms_not_connected_reply()
 
         if not self._cms_publisher.enabled:
             if language.lower() == "he":
@@ -803,6 +817,8 @@ class InboundTaskProcessor:
             publish_result = await self._cms_publisher.publish_generated_image(
                 image_url=current_draft.rendered_image_url,
                 title=title,
+                campaign_id=operator.cms_campaign_id,
+                playlist_id=operator.cms_playlist_id,
             )
             cms_id = str(publish_result.advertisement_id)
             existing = await published_repo.get_by_cms_id(cms_id)
@@ -829,6 +845,8 @@ class InboundTaskProcessor:
                     "file_id": publish_result.file_id,
                     "advertisement_id": publish_result.advertisement_id,
                     "slot_id": publish_result.slot_id,
+                    "campaign_id": operator.cms_campaign_id,
+                    "playlist_id": operator.cms_playlist_id,
                 },
             )
             logger.info(
@@ -1298,6 +1316,10 @@ def _publish_buttons_prompt(language: str) -> str:
     if language.lower() == "he":
         return "לפרסם את המודעה הזו ל-CMS?"
     return "Publish this ad to CMS?"
+
+
+def _cms_not_connected_reply() -> str:
+    return "אתה לא מחובר למערכת כרגע, פנה לתמיכה כדי לייצר את החיבור"
 
 
 def _generation_failed_reply(language: str) -> str:

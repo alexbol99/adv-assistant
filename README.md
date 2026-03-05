@@ -49,6 +49,11 @@
 - Runtime modes:
   - `TASKS_MODE=inline` for local development (task payload is processed in-process)
   - `TASKS_MODE=cloud` for Cloud Tasks enqueue
+- Admin mapping UI auth:
+  - `ADMIN_BASIC_USERNAME`
+  - `ADMIN_BASIC_PASSWORD`
+  - if these are missing, `/admin` and admin API endpoints return `503 Admin authentication is not configured`
+  - local dev tip: run via `make run` so `.env` is loaded into process environment
 - Cloud mode requires:
   - `GCP_PROJECT_ID`, `TASKS_REGION`, `TASKS_QUEUE`
   - `TASKS_HANDLER_URL`

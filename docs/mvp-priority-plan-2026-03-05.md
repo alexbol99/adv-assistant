@@ -12,6 +12,12 @@ This document captures the agreed MVP execution order, acceptance rules, and tes
 5. `store_type` is free text.
 6. MVP includes a basic admin interface (Basic Auth + minimal web form) to connect operator -> CMS mapping.
 
+## Current Status (March 5, 2026)
+
+- Stage 1 implementation is complete in code and tests.
+- Stage 2 is the next active sprint focus.
+- Stage 3 remains release validation once Stage 2 is merged.
+
 ## Stage 1 — Multi-Operator CMS Routing + Basic Admin
 
 ### Deliverables
