@@ -13,6 +13,7 @@ from adv_assistant.db.session import create_engine, create_session_factory, sess
 from adv_assistant.llm_gateway import (
     BUTTON_CONFIRM_DELETE_ALL,
     ExtractedAdFields,
+    ExtractedBrandingFields,
     Intent,
     IntentClassification,
     LLMGatewayError,
@@ -237,6 +238,23 @@ def test_extracted_fields_price_defaults_currency_to_ils() -> None:
 def test_extracted_fields_reject_invalid_currency_code() -> None:
     with pytest.raises(ValidationError):
         ExtractedAdFields(price="19.9", currency="12$")
+
+
+def test_extracted_branding_fields_normalize_system_memory_inputs() -> None:
+    fields = ExtractedBrandingFields(
+        store_type="  סופרמרקט שכונתי  ",
+        creative_guidance="  מינימליסטי   ונקי  ",
+        preferred_language=" עברית ",
+    )
+    update_fields = fields.to_update_kwargs()
+    assert update_fields["store_type"] == "סופרמרקט שכונתי"
+    assert update_fields["creative_guidance"] == "מינימליסטי ונקי"
+    assert update_fields["language"] == "he"
+
+
+def test_extracted_branding_fields_reject_invalid_language_hint() -> None:
+    with pytest.raises(ValidationError):
+        ExtractedBrandingFields(preferred_language="not-a-language")
 
 
 async def test_openai_gateway_retries_on_schema_mismatch(monkeypatch: Any) -> None:

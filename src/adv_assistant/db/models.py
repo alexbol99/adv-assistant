@@ -40,6 +40,8 @@ class Operator(TimestampMixin, Base):
     business_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     brand_colors: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    store_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    creative_guidance: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     drafts: Mapped[list["AdDraft"]] = relationship(
         back_populates="operator",

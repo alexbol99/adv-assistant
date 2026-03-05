@@ -15,7 +15,7 @@ This document captures the agreed MVP execution order, acceptance rules, and tes
 ## Current Status (March 5, 2026)
 
 - Stage 1 implementation is complete in code and tests.
-- Stage 2 is the next active sprint focus.
+- Stage 2 core implementation (system memory modeling/extraction/generation wiring) is complete in code and tests.
 - Stage 3 remains release validation once Stage 2 is merged.
 
 ## Stage 1 — Multi-Operator CMS Routing + Basic Admin

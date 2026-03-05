@@ -203,6 +203,7 @@ class InboundTaskProcessor:
             reply_text: str | None = None
             generated_image_url: str | None = None
             publish_buttons_prompt: str | None = None
+            session_language_override: str | None = None
 
             if button_payload_id:
                 history.append(
@@ -542,10 +543,22 @@ class InboundTaskProcessor:
                                             reply_text = _generation_completed_reply(
                                                 operator.language,
                                             )
+                                            followups: list[str] = []
                                             if current_draft.price is None:
-                                                reply_text = (
-                                                    f"{reply_text}\n\n"
-                                                    f"{_missing_price_followup(operator.language)}"
+                                                followups.append(
+                                                    _missing_price_followup(operator.language)
+                                                )
+                                            system_memory_followup = (
+                                                _missing_system_memory_followup(
+                                                    operator=operator,
+                                                    language=operator.language,
+                                                )
+                                            )
+                                            if system_memory_followup is not None:
+                                                followups.append(system_memory_followup)
+                                            if followups:
+                                                reply_text = f"{reply_text}\n\n" + "\n".join(
+                                                    followups
                                                 )
                                             publish_buttons_prompt = _publish_buttons_prompt(
                                                 operator.language
@@ -640,6 +653,13 @@ class InboundTaskProcessor:
                                 await operator_repo.update_branding(
                                     payload.operator_phone, **update_kwargs
                                 )
+                                if "language" in update_kwargs:
+                                    session_language_override = str(update_kwargs["language"])
+                                    operator.language = session_language_override
+                                if "store_type" in update_kwargs:
+                                    operator.store_type = update_kwargs["store_type"]
+                                if "creative_guidance" in update_kwargs:
+                                    operator.creative_guidance = update_kwargs["creative_guidance"]
                                 await audit_repo.log(
                                     actor="system",
                                     action="operator_branding_updated",
@@ -717,7 +737,11 @@ class InboundTaskProcessor:
 
             await session_repo.create_or_update(
                 operator_phone=payload.operator_phone,
-                language=operator.language if session_created else None,
+                language=(
+                    session_language_override
+                    if session_language_override is not None
+                    else (operator.language if session_created else None)
+                ),
                 history=history,
                 current_draft_id=current_draft.id,
                 pending_upload_type=pending_upload_type,
@@ -1236,6 +1260,8 @@ def _to_generation_draft_input(
         business_name=operator.business_name,
         logo_url=operator.logo_url,
         brand_colors=operator.brand_colors,
+        store_type=operator.store_type,
+        creative_guidance=operator.creative_guidance,
     )
 
 
@@ -1300,6 +1326,38 @@ def _missing_price_followup(language: str) -> str:
     )
 
 
+def _missing_system_memory_followup(*, operator: Operator, language: str) -> str | None:
+    missing_store_type = not _normalize_brand_value(operator.store_type)
+    missing_guidance = not _normalize_brand_value(operator.creative_guidance)
+    if not missing_store_type and not missing_guidance:
+        return None
+
+    if language.lower() == "he":
+        parts: list[str] = []
+        if missing_store_type:
+            parts.append(
+                "רק שתדע שאם תספר לי מה סוג העסק אוכל להתאים את המודעה לצרכים שלך בצורה יותר טובה."
+            )
+        if missing_guidance:
+            parts.append(
+                "אם יש לך הנחיות כלליות לסגנון המודעות (צבעים, אווירה, טון), כתוב לי ואשמור להמשך."
+            )
+        return " ".join(parts)
+
+    parts = []
+    if missing_store_type:
+        parts.append(
+            "If you tell me your store type, I can tailor the ad better to your business."
+        )
+    if missing_guidance:
+        parts.append(
+            "If you have general creative preferences "
+            "(colors, tone, visual style), send them and "
+            "I will keep them for next ads."
+        )
+    return " ".join(parts)
+
+
 def _missing_product_name_reply(language: str) -> str:
     if language.lower() == "he":
         return "כדי לייצר מודעה אני צריך לפחות שם מוצר. כתוב לי את שם המוצר ונמשיך."
@@ -1340,10 +1398,13 @@ def _branding_updated_reply(language: str) -> str:
 
 def _branding_not_detected_reply(language: str) -> str:
     if language.lower() == "he":
-        return "לא הצלחתי לזהות פרטי מיתוג בהודעה שלך. נסה לשלוח את שם העסק והצבעים שלך."
+        return (
+            "לא הצלחתי לזהות פרטי מיתוג או העדפות כלליות בהודעה שלך. "
+            "נסה לשלוח שם עסק, צבעים, סוג חנות או הנחיות כלליות."
+        )
     return (
-        "I could not detect branding details in your message. "
-        "Try sending your business name and brand colors."
+        "I could not detect branding or general preference details in your message. "
+        "Try sending your business name, brand colors, store type, or creative guidance."
     )
 
 

@@ -277,6 +277,8 @@ async def _validate_schema_compatibility(
             "meta_user_id",
             "cms_campaign_id",
             "cms_playlist_id",
+            "store_type",
+            "creative_guidance",
         },
         "conversation_session": {"pending_upload_type"},
         "ad_draft": {"product_brand"},
