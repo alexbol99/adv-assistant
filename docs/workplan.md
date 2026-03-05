@@ -15,6 +15,71 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 
 ---
 
+## MVP Priority Reset (as of March 5, 2026)
+
+This section defines the immediate delivery order for the first MVP.
+Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
+
+### Stage 1 — Multi-Operator CMS Routing (Highest Priority)
+
+**Goal:** each authorized operator publishes to their own CMS campaign/playlist mapping.
+
+**Scope**
+- Add per-operator CMS mapping fields (`cms_campaign_id`, `cms_playlist_id`) and optional `meta_user_id`.
+- Add a minimal admin API + web form to register/update operator CMS mapping.
+- Keep publish-only scope for MVP (no list/delete-all implementation in this stage).
+- If operator mapping is missing, block publish with the fixed user message:
+  - "אתה לא מחובר למערכת כרגע, פנה לתמיכה כדי לייצר את החיבור"
+
+**Test obligations**
+- Migration up/down tests for operator CMS mapping fields.
+- Repository tests for create/update/read mapping.
+- Admin auth tests (basic username/password): unauthorized requests must fail closed.
+- Integration test: two operators publish to two different campaign/playlist targets.
+- Negative test: publish blocked when mapping is missing + audit event written.
+
+**Exit gate**
+- Two-number E2E publish test passes with distinct CMS targets.
+- Missing-mapping publish flow returns the exact blocked message.
+
+### Stage 2 — Creative Flow Optimization (System Memory + Draft Memory)
+
+**Goal:** improve generation quality while preserving clear data boundaries.
+
+**Scope**
+- System memory (persists across ads): `store_type` (free text), preferred language, global creative guidance, logo.
+- Draft memory (ad-specific only): product name, optional product brand, price/currency, product photo.
+- Keep current generation rule: product name is required; price remains optional for first generation.
+- After first generation, send short nudges to collect more context (for example store type).
+
+**Test obligations**
+- System memory persists across new drafts.
+- Draft product fields do not leak between ads.
+- Logo image routing remains separate from product photo routing.
+- Generation input integration test verifies merged system + draft context.
+- Regression tests for create/regenerate/publish paths.
+
+**Exit gate**
+- End-to-end flow proves: first generation with product name only, then follow-up prompts for quality improvements.
+
+### Stage 3 — MVP QA and Release
+
+**Goal:** validate publish-ready MVP behavior.
+
+**Scope**
+- Full regression run (`pytest`, `ruff`).
+- Manual WhatsApp E2E validation for:
+  - connected operator publish,
+  - unconnected operator publish block,
+  - logo upload,
+  - product image upload,
+  - new ad without product-field inheritance.
+
+**Exit gate**
+- Regression suite green and manual checklist completed in staging.
+
+---
+
 ## Phase 0 — Program Controls and Bootstrap
 
 **Goal:** Establish delivery controls, tooling, and cloud baseline.
@@ -300,21 +365,23 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 
 ---
 
-## Current Repository Status (as of March 2, 2026)
+## Current Repository Status (as of March 5, 2026)
 
 Based on the current codebase and automated test coverage:
 
 - **Implemented and test-covered:** Phase 0 through Phase 7.
 - **Gate A / Gate B evidence:** present in the current test suite (`tests/test_ingress_pipeline.py`, `tests/test_tasks_auth.py`, `tests/test_phase4_llm_boundary.py`, `tests/test_phase5_enrichment.py`, `tests/test_phase6_media.py`, `tests/test_phase7_generation.py`).
+- **Phase 8 status:** publish flow is implemented and tested; `list_ads` / `delete_all` side effects are still pending.
 - **Pending operational/compliance work:** Phase 5 compliance checklist sign-off remains open (`docs/phase5-compliance-checklist.md` is not yet completed).
-- **Not yet implemented:** Phase 8 CMS integration, Phase 9 Admin control plane, Phase 10 hardening, and Phase 11 launch verification.
-- **Current behavior note:** publish/delete confirmation buttons are resolved deterministically, but final CMS side effects are still deferred to Phase 8.
+- **Not yet implemented:** Phase 9 Admin control plane (full scope), Phase 10 hardening, and Phase 11 launch verification.
+- **MVP execution order:** prioritize per-operator CMS mapping + basic admin first, then memory-driven creative optimization.
 
 ---
 
 ## Immediate Next Actions
 
-1. Implement Phase 8 `CMSClient` (`publish_ad`, `list_ads`, `delete_all_ads`) and wire deterministic button confirmations to real CMS operations.
-2. Add Phase 8 contract tests against a local mock CMS and document timeout/retry semantics for publish/list/delete-all.
-3. Start Phase 9 Admin API/Auth foundation (operator CRUD + config + audit endpoints), then complete Admin UI flows.
-4. Complete and sign off the Phase 5 compliance checklist before enabling enrichment in staging/production.
+1. Implement Stage 1 MVP scope: per-operator CMS mapping and minimal admin API/UI with basic auth.
+2. Wire publish routing strictly to operator CMS mapping and block publishing when mapping is missing with the approved message.
+3. Implement Stage 2 MVP scope: system memory vs draft memory separation and post-generation quality follow-ups.
+4. Complete Stage 3 MVP QA: full regression and manual WhatsApp staging checklist.
+5. Keep Phase 5 compliance sign-off as required before production enablement of enrichment sources.
