@@ -55,6 +55,23 @@ async def test_crud_repositories(db_session: AsyncSession) -> None:
     assert refreshed_operator.logo_url == "https://example.com/logo.png"
     assert refreshed_operator.brand_colors == ["#FF0000", "#00FF00"]
 
+    updated_mapping = await operator_repo.update_cms_mapping(
+        operator.phone,
+        meta_user_id="meta-user-1",
+        cms_campaign_id=157,
+        cms_playlist_id=139,
+    )
+    assert updated_mapping is True
+    refreshed_operator = await operator_repo.get_by_phone(operator.phone)
+    assert refreshed_operator is not None
+    assert refreshed_operator.meta_user_id == "meta-user-1"
+    assert refreshed_operator.cms_campaign_id == 157
+    assert refreshed_operator.cms_playlist_id == 139
+
+    by_meta = await operator_repo.get_by_meta_user_id("meta-user-1")
+    assert by_meta is not None
+    assert by_meta.phone == operator.phone
+
     active_operators = await operator_repo.list_active()
     assert len(active_operators) == 1
 

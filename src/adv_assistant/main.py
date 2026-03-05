@@ -1,12 +1,16 @@
 import logging
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from pydantic import BaseModel, Field
 from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.ad_generation import (
@@ -17,6 +21,7 @@ from adv_assistant.ad_generation import (
 from adv_assistant.cms_cityscreen import CityScreenCMSPublisher, CMSPublisher, NoopCMSPublisher
 from adv_assistant.config import Settings
 from adv_assistant.db.base import utcnow
+from adv_assistant.db.models import Operator
 from adv_assistant.db.repositories import (
     AuditEventRepository,
     OperatorRepository,
@@ -31,6 +36,7 @@ from adv_assistant.enrichment import (
 from adv_assistant.ingress import (
     extract_inbound_messages,
     is_within_replay_window,
+    normalize_phone_number,
     verify_x_hub_signature,
 )
 from adv_assistant.llm_gateway import (
@@ -66,6 +72,24 @@ from adv_assistant.whatsapp import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ADMIN_AUTH_CHALLENGE = {"WWW-Authenticate": "Basic"}
+
+
+class OperatorCMSConnectRequest(BaseModel):
+    phone: str | None = Field(default=None, max_length=32)
+    meta_user_id: str | None = Field(default=None, max_length=128)
+    cms_campaign_id: int = Field(gt=0)
+    cms_playlist_id: int = Field(gt=0)
+    active: bool = True
+
+
+class OperatorCMSMappingResponse(BaseModel):
+    phone: str
+    meta_user_id: str | None
+    cms_campaign_id: int | None
+    cms_playlist_id: int | None
+    active: bool
 
 
 def _build_task_authorizer(settings: Settings) -> TaskRequestAuthorizer:
@@ -246,7 +270,14 @@ async def _validate_schema_compatibility(
     settings: Settings,
 ) -> None:
     required_columns_by_table: dict[str, set[str]] = {
-        "operator": {"business_name", "logo_url", "brand_colors"},
+        "operator": {
+            "business_name",
+            "logo_url",
+            "brand_colors",
+            "meta_user_id",
+            "cms_campaign_id",
+            "cms_playlist_id",
+        },
         "conversation_session": {"pending_upload_type"},
         "ad_draft": {"product_brand"},
     }
@@ -500,6 +531,253 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     HubMode = Annotated[str, Query(alias="hub.mode")]
     HubToken = Annotated[str, Query(alias="hub.verify_token")]
     HubChallenge = Annotated[str, Query(alias="hub.challenge")]
+    basic_auth = HTTPBasic(auto_error=False)
+
+    def _normalize_optional_text(value: str | None) -> str | None:
+        if value is None:
+            return None
+        stripped = value.strip()
+        return stripped or None
+
+    def _normalize_optional_phone(value: str | None) -> str | None:
+        normalized = _normalize_optional_text(value)
+        if normalized is None:
+            return None
+        return normalize_phone_number(normalized)
+
+    async def _require_admin(
+        credentials: Annotated[HTTPBasicCredentials | None, Depends(basic_auth)],
+    ) -> None:
+        expected_username = current_settings.admin_basic_username
+        expected_password = current_settings.admin_basic_password
+        if not expected_username or not expected_password:
+            raise HTTPException(status_code=503, detail="Admin authentication is not configured")
+        if credentials is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Missing admin credentials",
+                headers=_ADMIN_AUTH_CHALLENGE,
+            )
+        username_ok = secrets.compare_digest(credentials.username, expected_username)
+        password_ok = secrets.compare_digest(credentials.password, expected_password)
+        if not (username_ok and password_ok):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid admin credentials",
+                headers=_ADMIN_AUTH_CHALLENGE,
+            )
+
+    AdminAuthDep = Annotated[None, Depends(_require_admin)]
+
+    def _to_operator_mapping_response(operator: Operator) -> OperatorCMSMappingResponse:
+        return OperatorCMSMappingResponse(
+            phone=operator.phone,
+            meta_user_id=operator.meta_user_id,
+            cms_campaign_id=operator.cms_campaign_id,
+            cms_playlist_id=operator.cms_playlist_id,
+            active=operator.active,
+        )
+
+    async def _upsert_operator_cms_mapping(
+        *,
+        session: AsyncSession,
+        phone: str | None,
+        meta_user_id: str | None,
+        cms_campaign_id: int,
+        cms_playlist_id: int,
+        active: bool,
+    ):
+        normalized_phone = _normalize_optional_phone(phone)
+        normalized_meta_user_id = _normalize_optional_text(meta_user_id)
+
+        if normalized_phone is None and normalized_meta_user_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Either phone or meta_user_id is required",
+            )
+
+        operator_repo = OperatorRepository(session)
+        audit_repo = AuditEventRepository(session)
+
+        operator = None
+        if normalized_phone is not None:
+            operator = await operator_repo.get_by_phone(normalized_phone)
+        if operator is None and normalized_meta_user_id is not None:
+            operator = await operator_repo.get_by_meta_user_id(normalized_meta_user_id)
+
+        if operator is None:
+            if normalized_phone is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Operator not found for the provided meta_user_id",
+                )
+            operator = await operator_repo.create(
+                phone=normalized_phone,
+                meta_user_id=normalized_meta_user_id,
+                active=active,
+                cms_campaign_id=cms_campaign_id,
+                cms_playlist_id=cms_playlist_id,
+            )
+            await audit_repo.log(
+                actor="admin",
+                action="admin_operator_created_with_cms_mapping",
+                operator_phone=operator.phone,
+                metadata={
+                    "cms_campaign_id": cms_campaign_id,
+                    "cms_playlist_id": cms_playlist_id,
+                    "meta_user_id": normalized_meta_user_id,
+                },
+            )
+            return operator
+
+        if normalized_phone is not None and operator.phone != normalized_phone:
+            raise HTTPException(
+                status_code=409,
+                detail="Provided phone does not match the located operator",
+            )
+
+        target_meta_user_id = (
+            normalized_meta_user_id
+            if normalized_meta_user_id is not None
+            else operator.meta_user_id
+        )
+        await operator_repo.update_cms_mapping(
+            operator.phone,
+            meta_user_id=target_meta_user_id,
+            cms_campaign_id=cms_campaign_id,
+            cms_playlist_id=cms_playlist_id,
+        )
+        if operator.active != active:
+            await operator_repo.set_active(operator.phone, active)
+
+        updated_operator = await operator_repo.get_by_phone(operator.phone)
+        if updated_operator is None:
+            raise HTTPException(status_code=500, detail="Operator update failed")
+
+        await audit_repo.log(
+            actor="admin",
+            action="admin_operator_cms_mapping_updated",
+            operator_phone=updated_operator.phone,
+            metadata={
+                "cms_campaign_id": updated_operator.cms_campaign_id,
+                "cms_playlist_id": updated_operator.cms_playlist_id,
+                "meta_user_id": updated_operator.meta_user_id,
+                "active": updated_operator.active,
+            },
+        )
+        return updated_operator
+
+    @app.get("/admin", response_class=HTMLResponse)
+    async def admin_home(_: AdminAuthDep) -> HTMLResponse:
+        return HTMLResponse(
+            content="""
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Adv Assistant Admin</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 2rem; max-width: 760px; }
+      fieldset { margin-bottom: 1rem; padding: 1rem; }
+      label { display: block; margin-top: 0.6rem; }
+      input[type=text], input[type=number] { width: 100%; padding: 0.4rem; }
+      button { margin-top: 1rem; padding: 0.5rem 1rem; }
+      .note { color: #444; font-size: 0.95rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Operator CMS Mapping</h1>
+    <p class="note">Provide phone or an existing Meta user ID, plus campaign/playlist IDs.</p>
+    <form id="mapping-form">
+      <fieldset>
+        <label>Phone</label>
+        <input id="phone" type="text" name="phone" placeholder="+9725..." />
+
+        <label>Meta User ID (optional)</label>
+        <input id="meta_user_id" type="text" name="meta_user_id" placeholder="meta-user-id" />
+
+        <label>CMS Campaign ID</label>
+        <input id="cms_campaign_id" type="number" name="cms_campaign_id" min="1" required />
+
+        <label>CMS Playlist ID</label>
+        <input id="cms_playlist_id" type="number" name="cms_playlist_id" min="1" required />
+
+        <label><input id="active" type="checkbox" name="active" checked /> Active</label>
+
+        <button type="submit">Save Mapping</button>
+      </fieldset>
+    </form>
+    <pre id="result"></pre>
+    <script>
+      const form = document.getElementById('mapping-form');
+      const result = document.getElementById('result');
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const payload = {
+          phone: document.getElementById('phone').value || null,
+          meta_user_id: document.getElementById('meta_user_id').value || null,
+          cms_campaign_id: Number(document.getElementById('cms_campaign_id').value),
+          cms_playlist_id: Number(document.getElementById('cms_playlist_id').value),
+          active: document.getElementById('active').checked,
+        };
+        const response = await fetch('/admin/operators/connect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const body = await response.text();
+        result.textContent = `${response.status} ${response.statusText}\\n${body}`;
+      });
+    </script>
+  </body>
+</html>
+""".strip()
+        )
+
+    @app.post("/admin/operators/connect", response_model=OperatorCMSMappingResponse)
+    async def admin_connect_operator_json(
+        body: OperatorCMSConnectRequest,
+        session: DbSessionDep,
+        _: AdminAuthDep,
+    ) -> OperatorCMSMappingResponse:
+        try:
+            operator = await _upsert_operator_cms_mapping(
+                session=session,
+                phone=body.phone,
+                meta_user_id=body.meta_user_id,
+                cms_campaign_id=body.cms_campaign_id,
+                cms_playlist_id=body.cms_playlist_id,
+                active=body.active,
+            )
+        except IntegrityError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="meta_user_id already assigned to another operator",
+            ) from exc
+        return _to_operator_mapping_response(operator)
+
+    @app.get("/admin/operators/by-phone/{phone}", response_model=OperatorCMSMappingResponse)
+    async def admin_get_operator_by_phone(
+        phone: str,
+        session: DbSessionDep,
+        _: AdminAuthDep,
+    ) -> OperatorCMSMappingResponse:
+        normalized_phone = normalize_phone_number(phone)
+        operator = await OperatorRepository(session).get_by_phone(normalized_phone)
+        if operator is None:
+            raise HTTPException(status_code=404, detail="Operator not found")
+        return _to_operator_mapping_response(operator)
+
+    @app.get("/admin/operators/by-meta/{meta_user_id}", response_model=OperatorCMSMappingResponse)
+    async def admin_get_operator_by_meta(
+        meta_user_id: str,
+        session: DbSessionDep,
+        _: AdminAuthDep,
+    ) -> OperatorCMSMappingResponse:
+        operator = await OperatorRepository(session).get_by_meta_user_id(meta_user_id)
+        if operator is None:
+            raise HTTPException(status_code=404, detail="Operator not found")
+        return _to_operator_mapping_response(operator)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

@@ -72,6 +72,8 @@ class Settings:
     tasks_service_account_email: str | None = None
     tasks_oidc_audience: str | None = None
     tasks_allowed_service_account_email: str | None = None
+    admin_basic_username: str | None = None
+    admin_basic_password: str | None = None
 
     openai_api_key: str | None = None
     openai_base_url: str | None = None
@@ -152,6 +154,8 @@ class Settings:
             tasks_service_account_email=os.getenv("TASKS_SERVICE_ACCOUNT_EMAIL"),
             tasks_oidc_audience=os.getenv("TASKS_OIDC_AUDIENCE"),
             tasks_allowed_service_account_email=os.getenv("TASKS_ALLOWED_SERVICE_ACCOUNT_EMAIL"),
+            admin_basic_username=_optional_env("ADMIN_BASIC_USERNAME"),
+            admin_basic_password=_optional_env("ADMIN_BASIC_PASSWORD"),
             openai_api_key=os.getenv("OPENAI_API_KEY"),
             openai_base_url=_optional_env("OPENAI_BASE_URL"),
             llm_classification_model=os.getenv("LLM_CLASSIFICATION_MODEL", "gpt-4o-mini"),

@@ -30,6 +30,8 @@ class CMSPublisher(Protocol):
         *,
         image_url: str,
         title: str,
+        campaign_id: int | None = None,
+        playlist_id: int | None = None,
     ) -> CMSPublishResult: ...
 
     async def close(self) -> None: ...
@@ -45,6 +47,8 @@ class NoopCMSPublisher:
         *,
         image_url: str,
         title: str,
+        campaign_id: int | None = None,
+        playlist_id: int | None = None,
     ) -> CMSPublishResult:
         raise CMSPublishError("CMS publishing is not configured")
 
@@ -85,11 +89,15 @@ class CityScreenCMSPublisher:
         *,
         image_url: str,
         title: str,
+        campaign_id: int | None = None,
+        playlist_id: int | None = None,
     ) -> CMSPublishResult:
+        resolved_campaign_id = campaign_id if campaign_id is not None else self._campaign_id
+        resolved_playlist_id = playlist_id if playlist_id is not None else self._playlist_id
         self._debug(
             "publish start campaign_id=%s playlist_id=%s image_url=%s",
-            self._campaign_id,
-            self._playlist_id,
+            resolved_campaign_id,
+            resolved_playlist_id,
             image_url,
         )
         image_bytes, content_type = await self._download_image(image_url=image_url)
@@ -137,10 +145,14 @@ class CityScreenCMSPublisher:
             width=width,
             height=height,
             title=title,
+            campaign_id=resolved_campaign_id,
         )
         self._debug("advertisement created advertisement_id=%s", advertisement_id)
 
-        slot_id = await self._append_advertisement_to_playlist(advertisement_id=advertisement_id)
+        slot_id = await self._append_advertisement_to_playlist(
+            advertisement_id=advertisement_id,
+            playlist_id=resolved_playlist_id,
+        )
         self._debug("playlist append done slot_id=%s", slot_id)
         return CMSPublishResult(
             file_id=file_id,
@@ -199,8 +211,9 @@ class CityScreenCMSPublisher:
         width: int,
         height: int,
         title: str,
+        campaign_id: int,
     ) -> int:
-        url = f"{self._base_url}/api/v1.4/advertiser/campaigns/{self._campaign_id}/advertisements"
+        url = f"{self._base_url}/api/v1.4/advertiser/campaigns/{campaign_id}/advertisements"
         payload = {
             "title": title[:120],
             "type": "picture",
@@ -220,8 +233,13 @@ class CityScreenCMSPublisher:
             raise CMSPublishError("create advertisement returned invalid payload")
         return _as_int(body.get("id"), field="advertisement.id")
 
-    async def _append_advertisement_to_playlist(self, *, advertisement_id: int) -> int | None:
-        playlist = await self._load_playlist()
+    async def _append_advertisement_to_playlist(
+        self,
+        *,
+        advertisement_id: int,
+        playlist_id: int,
+    ) -> int | None:
+        playlist = await self._load_playlist(playlist_id=playlist_id)
         playlist_name = playlist.get("name")
         if not isinstance(playlist_name, str) or not playlist_name.strip():
             raise CMSPublishError("playlist response did not include valid name")
@@ -251,7 +269,7 @@ class CityScreenCMSPublisher:
             }
         )
         update_payload = {"name": playlist_name, "slots": slots_payload}
-        update_url = f"{self._base_url}/api/v1.4/playlists/{self._playlist_id}"
+        update_url = f"{self._base_url}/api/v1.4/playlists/{playlist_id}"
         update_response = await self._client.post(
             update_url,
             headers=self._headers,
@@ -273,8 +291,8 @@ class CityScreenCMSPublisher:
                 return _as_optional_int(slot.get("id"))
         return None
 
-    async def _load_playlist(self) -> dict[str, Any]:
-        url = f"{self._base_url}/api/v1.4/playlists/{self._playlist_id}"
+    async def _load_playlist(self, *, playlist_id: int) -> dict[str, Any]:
+        url = f"{self._base_url}/api/v1.4/playlists/{playlist_id}"
         response = await self._client.get(url, headers=self._headers)
         _raise_for_status(response, "load playlist")
         payload = _safe_json(response, "load playlist")
