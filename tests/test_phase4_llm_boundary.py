@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.db.base import Base
@@ -213,6 +214,29 @@ def test_sanitize_user_text_strips_html_and_control_chars() -> None:
 def test_extracted_price_is_decimal_and_quantized() -> None:
     fields = ExtractedAdFields(price=19.995)
     assert fields.price == Decimal("20.00")
+
+
+def test_extracted_fields_normalize_dirty_inputs() -> None:
+    fields = ExtractedAdFields(
+        product_brand="  מותג   פרטי  ",
+        price="₪ 1,234.5",
+        currency=" ils ",
+    )
+    assert fields.product_brand == "מותג פרטי"
+    assert fields.price == Decimal("1234.50")
+    assert fields.currency == "ILS"
+
+
+def test_extracted_fields_price_defaults_currency_to_ils() -> None:
+    fields = ExtractedAdFields(price="19.9")
+    update_fields = fields.to_draft_update_fields()
+    assert update_fields["price"] == Decimal("19.90")
+    assert update_fields["currency"] == "ILS"
+
+
+def test_extracted_fields_reject_invalid_currency_code() -> None:
+    with pytest.raises(ValidationError):
+        ExtractedAdFields(price="19.9", currency="12$")
 
 
 async def test_openai_gateway_retries_on_schema_mismatch(monkeypatch: Any) -> None:

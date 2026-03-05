@@ -27,6 +27,18 @@ BUTTON_CANCEL_DELETE_ALL = "cancel_delete_all"
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_PRICE_CLEAN_RE = re.compile(r"[^0-9,.\-]+")
+_CURRENCY_ALIASES = {
+    "ILS": "ILS",
+    "NIS": "ILS",
+    "₪": "ILS",
+    'ש"ח': "ILS",
+    "שח": "ILS",
+    "USD": "USD",
+    "$": "USD",
+    "EUR": "EUR",
+    "€": "EUR",
+}
 
 
 class Intent(StrEnum):
@@ -55,11 +67,13 @@ class ExtractedAdFields(BaseModel):
     ean: str | None = Field(default=None, min_length=8, max_length=14)
     photo_url: str | None = None
 
-    @field_validator("price")
+    @field_validator("price", mode="before")
     @classmethod
     def _validate_price(cls, value: Any) -> Decimal | None:
         if value is None:
             return None
+        if isinstance(value, str):
+            value = _normalize_price_text(value)
         try:
             decimal_value = Decimal(str(value))
         except (InvalidOperation, ValueError, TypeError) as exc:
@@ -71,15 +85,34 @@ class ExtractedAdFields(BaseModel):
             raise ValueError("price exceeds max supported value")
         return decimal_value
 
-    @field_validator("currency")
+    @field_validator("product_brand", mode="before")
     @classmethod
-    def _validate_currency(cls, value: str | None) -> str | None:
+    def _normalize_product_brand(cls, value: Any) -> str | None:
+        return _normalize_optional_text(value)
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def _validate_currency(cls, value: Any) -> str | None:
         if value is None:
             return None
-        upper_value = value.upper()
-        if not upper_value.isalpha():
+        normalized = _normalize_currency_text(value)
+        if normalized is None:
+            return None
+        if normalized in _CURRENCY_ALIASES:
+            return _CURRENCY_ALIASES[normalized]
+        compact = normalized.strip(".,:;!?")
+        if compact in _CURRENCY_ALIASES:
+            return _CURRENCY_ALIASES[compact]
+        if len(compact) == 3 and compact.isalpha():
+            return compact
+        compact_letters = "".join(ch for ch in compact if ch.isalpha())
+        if compact_letters in _CURRENCY_ALIASES:
+            return _CURRENCY_ALIASES[compact_letters]
+        if len(compact_letters) == 3:
+            return compact_letters
+        if not compact_letters:
             raise ValueError("currency must use alphabetic ISO code")
-        return upper_value
+        raise ValueError("currency must be a valid ISO code")
 
     @field_validator("ean")
     @classmethod
@@ -91,7 +124,10 @@ class ExtractedAdFields(BaseModel):
         return value
 
     def to_draft_update_fields(self) -> dict[str, Any]:
-        return self.model_dump(exclude_none=True)
+        fields = self.model_dump(exclude_none=True)
+        if "price" in fields and "currency" not in fields:
+            fields["currency"] = "ILS"
+        return fields
 
 
 class ExtractedBrandingFields(BaseModel):
@@ -140,6 +176,60 @@ def sanitize_user_text(text: str, *, max_chars: int) -> str:
     without_controls = _CONTROL_CHAR_RE.sub("", without_html)
     normalized = " ".join(without_controls.split()).strip()
     return normalized[:max_chars]
+
+
+def _normalize_optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    normalized = " ".join(value.split()).strip()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _normalize_currency_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    normalized = value.strip().upper()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _normalize_price_text(value: str) -> str:
+    cleaned = _PRICE_CLEAN_RE.sub("", value.strip().replace(" ", ""))
+    if not cleaned:
+        raise ValueError("price must be a valid number")
+
+    sign = ""
+    if cleaned.startswith("-"):
+        sign = "-"
+        cleaned = cleaned[1:]
+    cleaned = cleaned.replace("-", "")
+    if not cleaned:
+        raise ValueError("price must be a valid number")
+
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "")
+            cleaned = cleaned.replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        cleaned = cleaned.replace(",", ".")
+
+    if cleaned.count(".") > 1:
+        integer_part, decimal_part = cleaned.rsplit(".", 1)
+        cleaned = f"{integer_part.replace('.', '')}.{decimal_part}"
+
+    normalized = f"{sign}{cleaned}"
+    if normalized in {"", "-", ".", "-.", ","}:
+        raise ValueError("price must be a valid number")
+    return normalized
 
 
 def extract_button_payload_id(raw_message: dict[str, Any]) -> str | None:

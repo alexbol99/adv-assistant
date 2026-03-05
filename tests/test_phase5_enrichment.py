@@ -601,3 +601,17 @@ async def test_product_brand_conflict_keeps_operator_brand_and_adds_followup(
         assert draft is not None
         assert draft.product_brand == "מותג פרטי"
         assert draft.enriched_brand == "תנובה"
+
+        conflict_events = (
+            await session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.operator_phone == phone,
+                    AuditEvent.action == "product_brand_conflict_detected",
+                )
+            )
+        ).scalars()
+        conflict_list = list(conflict_events)
+        assert len(conflict_list) == 1
+        event = conflict_list[0]
+        assert event.metadata_json["product_brand"] == "מותג פרטי"
+        assert event.metadata_json["enriched_brand"] == "תנובה"
