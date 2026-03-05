@@ -18,13 +18,15 @@ from adv_assistant.ad_generation import (
     GenerationSubmission,
     NanoBananaAdGenerationService,
     NanoBananaJobStatus,
+    build_generation_prompt,
     derive_aspect_ratio,
 )
 from adv_assistant.db.base import Base
 from adv_assistant.db.enums import AdDraftStatus
-from adv_assistant.db.models import AdDraft
+from adv_assistant.db.models import AdDraft, AuditEvent
 from adv_assistant.db.repositories import OperatorRepository
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
+from adv_assistant.enrichment import EnrichedProduct
 from adv_assistant.llm_gateway import (
     ExtractedAdFields,
     Intent,
@@ -92,6 +94,37 @@ class FakeGatewayNoPrice(FakeGateway):
             currency="ILS",
             promo_text="Fresh and tasty",
         )
+
+
+class FakeGatewayBrandConflict(FakeGateway):
+    async def extract_ad_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> ExtractedAdFields:
+        return ExtractedAdFields(
+            product_name="White Cheese",
+            product_brand="Private Label",
+            price=Decimal("14.90"),
+            currency="ILS",
+            ean="7290001234567",
+        )
+
+
+class StaticEnrichmentService:
+    def __init__(self, enriched: EnrichedProduct | None) -> None:
+        self._enriched = enriched
+
+    async def decode_ean_from_image(self, image_bytes: bytes) -> str | None:
+        return None
+
+    async def enrich_by_ean(self, *, ean: str, language: str) -> EnrichedProduct | None:
+        return self._enriched
+
+    async def close(self) -> None:
+        return None
 
 
 class FakeGenerationService:
@@ -181,6 +214,37 @@ async def _seed_operator(
 
 def test_derive_aspect_ratio_for_1920x1080() -> None:
     assert derive_aspect_ratio(width=1920, height=1080) == "16:9"
+
+
+def test_build_generation_prompt_marks_primary_elements_prominent() -> None:
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="גבינה לבנה",
+        price=Decimal("14.90"),
+        currency="ILS",
+        promo_text=None,
+        ean=None,
+        photo_url=None,
+        enriched_brand="תנובה",
+        enriched_category=None,
+        enriched_description=None,
+        preview_reference_url=None,
+        rendered_image_url=None,
+        product_brand="מותג פרטי",
+    )
+    prompt = build_generation_prompt(
+        draft=draft,
+        mode=GenerationMode.FRESH,
+        instruction_text="make it clean",
+    )
+
+    assert "=== PRIMARY (must be large and prominent in the ad) ===" in prompt
+    assert "Product Name: גבינה לבנה." in prompt
+    assert "Brand: מותג פרטי." in prompt
+    assert "Price: 14.90 ILS." in prompt
+    assert "operator-provided brand as the final displayed brand" in prompt
 
 
 async def test_nano_banana_service_submits_expected_payload() -> None:
@@ -682,6 +746,69 @@ async def test_pipeline_submits_generation_job_and_sets_preview_ready(
         assert draft.status == AdDraftStatus.PREVIEW_READY
         assert draft.generation_job_id == "job-123"
         assert draft.rendered_image_url == "https://storage.googleapis.com/media/preview-1.png"
+
+
+async def test_pipeline_brand_conflict_uses_operator_brand_and_logs_audit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000704"
+    await _seed_operator(session_factory, phone)
+    fake_gateway = FakeGatewayBrandConflict()
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-brand-conflict.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=fake_gateway,
+        enrichment_service=StaticEnrichmentService(
+            EnrichedProduct(
+                product_name="White Cheese",
+                brand="Tnuva",
+                source="open_food_facts",
+            )
+        ),
+        ad_generation_service=fake_generation,
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-brand-conflict",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "create ad for white cheese 14.90"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.deterministic_action == "generation_completed"
+    assert result.reply_text is not None
+    assert "you wrote" in result.reply_text.lower()
+    assert fake_generation.calls == 1
+    assert fake_generation.last_draft is not None
+    assert fake_generation.last_draft.product_brand == "Private Label"
+    assert fake_generation.last_draft.enriched_brand == "Tnuva"
+
+    async with session_scope(session_factory) as session:
+        draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert draft is not None
+        assert draft.product_brand == "Private Label"
+        assert draft.enriched_brand == "Tnuva"
+
+        conflict_events = (
+            await session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.operator_phone == phone,
+                    AuditEvent.action == "product_brand_conflict_detected",
+                )
+            )
+        ).scalars()
+        assert len(list(conflict_events)) == 1
 
 
 async def test_pipeline_generates_preview_without_price_and_requests_followup(
