@@ -16,7 +16,7 @@ from adv_assistant.ad_generation import (
 from adv_assistant.cms_cityscreen import CMSPublisher, CMSPublishError, NoopCMSPublisher
 from adv_assistant.db.base import utcnow
 from adv_assistant.db.enums import AdDraftStatus
-from adv_assistant.db.models import AdDraft
+from adv_assistant.db.models import AdDraft, Operator
 from adv_assistant.db.repositories import (
     AdDraftRepository,
     AuditEventRepository,
@@ -51,8 +51,11 @@ from adv_assistant.media_ingest import (
     OperatorPhotoIngestor,
 )
 from adv_assistant.tasks_queue import InboundTaskPayload
+from adv_assistant.whatsapp import NoopWhatsAppClient, WhatsAppClient
 
 logger = logging.getLogger(__name__)
+
+_PENDING_UPLOAD_LOGO = "logo"
 
 
 @dataclass(slots=True)
@@ -113,6 +116,7 @@ class InboundTaskProcessor:
         render_height: int = 1080,
         operator_photo_ingestor: OperatorPhotoIngestor | None = None,
         cms_publisher: CMSPublisher | None = None,
+        whatsapp_client: WhatsAppClient | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._llm_gateway = llm_gateway or NoopLLMGateway()
@@ -122,6 +126,7 @@ class InboundTaskProcessor:
         self._render_height = render_height
         self._operator_photo_ingestor = operator_photo_ingestor or NoopOperatorPhotoIngestor()
         self._cms_publisher = cms_publisher or NoopCMSPublisher()
+        self._whatsapp_client = whatsapp_client or NoopWhatsAppClient()
 
     async def process(self, payload: InboundTaskPayload) -> ProcessInboundResult:
         async with session_scope(self._session_factory) as session:
@@ -155,9 +160,11 @@ class InboundTaskProcessor:
 
             history: list[dict[str, str]] = []
             current_draft_id: uuid.UUID | None = None
+            pending_upload_type: str | None = None
             if session_obj is not None:
                 history = list(session_obj.history)
                 current_draft_id = session_obj.current_draft_id
+                pending_upload_type = session_obj.pending_upload_type
 
             draft_created = False
             if current_draft_id is not None:
@@ -178,6 +185,7 @@ class InboundTaskProcessor:
                 created_draft = await draft_repo.create(
                     operator_phone=payload.operator_phone,
                     status=AdDraftStatus.DRAFT,
+                    currency=operator.currency,
                 )
                 current_draft_id = created_draft.id
                 draft_created = True
@@ -232,16 +240,29 @@ class InboundTaskProcessor:
                         "wamid": payload.wamid,
                     }
                 )
-                deterministic_action = "operator_photo_ingest"
-                intent_value = deterministic_action
-                current_draft, reply_text = await self._process_operator_photo_message(
-                    payload=payload,
-                    draft_repo=draft_repo,
-                    audit_repo=audit_repo,
-                    current_draft=current_draft,
-                    language=operator.language,
-                    media_id=incoming_image_media_id,
-                )
+                if pending_upload_type == _PENDING_UPLOAD_LOGO:
+                    deterministic_action = "operator_logo_upload"
+                    intent_value = deterministic_action
+                    reply_text = await self._process_logo_upload(
+                        payload=payload,
+                        operator_repo=operator_repo,
+                        audit_repo=audit_repo,
+                        language=operator.language,
+                        media_id=incoming_image_media_id,
+                    )
+                else:
+                    deterministic_action = "operator_photo_ingest"
+                    intent_value = deterministic_action
+                    current_draft, reply_text = await self._process_operator_photo_message(
+                        payload=payload,
+                        draft_repo=draft_repo,
+                        audit_repo=audit_repo,
+                        current_draft=current_draft,
+                        language=operator.language,
+                        media_id=incoming_image_media_id,
+                    )
+                # Upload intent is one-shot; consume it after the first image.
+                pending_upload_type = None
             elif incoming_text is not None:
                 sanitized_text = sanitize_user_text(incoming_text, max_chars=2000)
                 history.append(
@@ -262,12 +283,55 @@ class InboundTaskProcessor:
 
                     extracted_fields = None
                     enrichment_notice: str | None = None
+                    brand_conflict_followup: str | None = None
                     detected_ean = extract_ean_from_text(sanitized_text)
                     if classification.intent in {
                         Intent.CREATE_AD,
                         Intent.REGENERATE_WITH_REFERENCE,
                         Intent.REGENERATE_FROM_SCRATCH,
                     }:
+                        if classification.intent == Intent.CREATE_AD:
+                            # For a new ad request, create a fresh draft so
+                            # previous ad edits cannot leak into this flow.
+                            if not draft_created:
+                                previous_draft_id = current_draft.id
+                                created_draft = await draft_repo.create(
+                                    operator_phone=payload.operator_phone,
+                                    status=AdDraftStatus.DRAFT,
+                                    currency=operator.currency,
+                                )
+                                current_draft = created_draft
+                                draft_created = True
+                                await audit_repo.log(
+                                    actor="system",
+                                    action="draft_created_for_new_ad",
+                                    operator_phone=payload.operator_phone,
+                                    metadata={
+                                        "wamid": payload.wamid,
+                                        "previous_draft_id": str(previous_draft_id),
+                                        "new_draft_id": str(current_draft.id),
+                                    },
+                                )
+                            else:
+                                # Brand-new session already has an empty draft.
+                                refreshed = await draft_repo.reset_product_fields(
+                                    draft_id=current_draft.id,
+                                    operator_phone=payload.operator_phone,
+                                    expected_version=current_draft.version,
+                                    currency=operator.currency,
+                                )
+                                if refreshed is not None:
+                                    current_draft = refreshed
+                                await audit_repo.log(
+                                    actor="system",
+                                    action="draft_reused_for_new_ad",
+                                    operator_phone=payload.operator_phone,
+                                    metadata={
+                                        "wamid": payload.wamid,
+                                        "draft_id": str(current_draft.id),
+                                    },
+                                )
+
                         extracted_fields = await self._llm_gateway.extract_ad_fields(
                             message_text=sanitized_text,
                             language=operator.language,
@@ -275,6 +339,11 @@ class InboundTaskProcessor:
                         )
                         llm_used = self._llm_gateway.uses_external_llm or llm_used
                         update_fields = extracted_fields.to_draft_update_fields()
+                        if (
+                            "currency" not in update_fields
+                            and current_draft.currency != operator.currency
+                        ):
+                            update_fields["currency"] = operator.currency
                         if update_fields:
                             updated_draft = await draft_repo.update_for_operator_with_version(
                                 draft_id=current_draft.id,
@@ -303,6 +372,22 @@ class InboundTaskProcessor:
                             detected_ean=detected_ean,
                             allow_existing_draft_ean=True,
                         )
+                        brand_conflict_followup = _build_brand_conflict_followup(
+                            draft=current_draft,
+                            language=operator.language,
+                        )
+                        if brand_conflict_followup is not None:
+                            await audit_repo.log(
+                                actor="system",
+                                action="product_brand_conflict_detected",
+                                operator_phone=payload.operator_phone,
+                                metadata={
+                                    "wamid": payload.wamid,
+                                    "draft_id": str(current_draft.id),
+                                    "product_brand": current_draft.product_brand,
+                                    "enriched_brand": current_draft.enriched_brand,
+                                },
+                            )
                     elif classification.intent == Intent.UNKNOWN and detected_ean is not None:
                         current_draft, enrichment_notice = await self._enrich_current_draft(
                             payload=payload,
@@ -333,12 +418,15 @@ class InboundTaskProcessor:
                     ):
                         mode = _generation_mode_for_intent(classification.intent)
                         if _is_ready_for_generation(current_draft):
+                            await self._send_generation_in_progress(
+                                to_phone=payload.operator_phone,
+                                language=operator.language,
+                            )
                             try:
                                 submission = await self._ad_generation_service.submit_for_draft(
                                     draft=_to_generation_draft_input(
                                         draft=current_draft,
-                                        operator_phone=payload.operator_phone,
-                                        language=operator.language,
+                                        operator=operator,
                                     ),
                                     mode=mode,
                                     instruction_text=sanitized_text,
@@ -388,6 +476,11 @@ class InboundTaskProcessor:
                                         submission.job_id,
                                         submission.mode.value,
                                     )
+                                    # Commit now so the DB lock is released
+                                    # while we wait for the generation service.
+                                    # expire_on_commit=False keeps loaded
+                                    # objects usable after commit.
+                                    await session.commit()
                                     poll_result = (
                                         await self._ad_generation_service.wait_for_completion(
                                             job_id=submission.job_id
@@ -448,6 +541,11 @@ class InboundTaskProcessor:
                                             reply_text = _generation_completed_reply(
                                                 operator.language,
                                             )
+                                            if current_draft.price is None:
+                                                reply_text = (
+                                                    f"{reply_text}\n\n"
+                                                    f"{_missing_price_followup(operator.language)}"
+                                                )
                                             publish_buttons_prompt = _publish_buttons_prompt(
                                                 operator.language
                                             )
@@ -524,7 +622,39 @@ class InboundTaskProcessor:
                                 )
 
                     if reply_text is None:
-                        if classification.intent == Intent.PUBLISH_AD:
+                        if classification.intent in {
+                            Intent.CREATE_AD,
+                            Intent.REGENERATE_WITH_REFERENCE,
+                            Intent.REGENERATE_FROM_SCRATCH,
+                        } and not _is_ready_for_generation(current_draft):
+                            reply_text = _missing_product_name_reply(operator.language)
+                        elif classification.intent == Intent.SET_BRANDING:
+                            branding = await self._llm_gateway.extract_branding_fields(
+                                message_text=sanitized_text,
+                                language=operator.language,
+                            )
+                            llm_used = self._llm_gateway.uses_external_llm or llm_used
+                            update_kwargs = branding.to_update_kwargs()
+                            if update_kwargs:
+                                await operator_repo.update_branding(
+                                    payload.operator_phone, **update_kwargs
+                                )
+                                await audit_repo.log(
+                                    actor="system",
+                                    action="operator_branding_updated",
+                                    operator_phone=payload.operator_phone,
+                                    metadata={
+                                        "wamid": payload.wamid,
+                                        "updated_fields": sorted(update_kwargs.keys()),
+                                    },
+                                )
+                                reply_text = _branding_updated_reply(operator.language)
+                            else:
+                                reply_text = _branding_not_detected_reply(operator.language)
+                        elif classification.intent == Intent.SET_LOGO:
+                            pending_upload_type = _PENDING_UPLOAD_LOGO
+                            reply_text = _logo_upload_prompt(operator.language)
+                        elif classification.intent == Intent.PUBLISH_AD:
                             reply_text = _publish_confirmation_prompt(operator.language)
                             publish_buttons_prompt = _publish_buttons_prompt(operator.language)
                         elif classification.intent == Intent.DELETE_ALL:
@@ -545,6 +675,11 @@ class InboundTaskProcessor:
                             reply_text = f"{reply_text}\n\n{enrichment_notice}"
                         else:
                             reply_text = enrichment_notice
+                    if brand_conflict_followup:
+                        if reply_text:
+                            reply_text = f"{reply_text}\n\n{brand_conflict_followup}"
+                        else:
+                            reply_text = brand_conflict_followup
                 except LLMSchemaError:
                     reply_text = (
                         "I could not safely parse your request. "
@@ -584,6 +719,7 @@ class InboundTaskProcessor:
                 language=operator.language if session_created else None,
                 history=history,
                 current_draft_id=current_draft.id,
+                pending_upload_type=pending_upload_type,
                 last_active_at=now,
             )
 
@@ -599,7 +735,7 @@ class InboundTaskProcessor:
                     actor="system",
                     action="operator_draft_created",
                     operator_phone=payload.operator_phone,
-                    metadata={"wamid": payload.wamid, "draft_id": str(current_draft_id)},
+                    metadata={"wamid": payload.wamid, "draft_id": str(current_draft.id)},
                 )
 
             await audit_repo.log(
@@ -836,6 +972,55 @@ class InboundTaskProcessor:
             reply_text = f"{reply_text}\n\n{enrichment_notice}"
         return current_draft, reply_text
 
+    async def _process_logo_upload(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        operator_repo: OperatorRepository,
+        audit_repo: AuditEventRepository,
+        language: str,
+        media_id: str,
+    ) -> str:
+        """Ingest the photo and store it as the operator's logo."""
+        try:
+            ingested_photo = await self._operator_photo_ingestor.ingest_whatsapp_image(
+                media_id=media_id
+            )
+        except MediaIngestError as exc:
+            await audit_repo.log(
+                actor="system",
+                action="operator_logo_upload_failed",
+                operator_phone=payload.operator_phone,
+                metadata={"wamid": payload.wamid, "media_id": media_id, "error": str(exc)},
+            )
+            return _logo_upload_failed_reply(language)
+
+        await operator_repo.update_branding(
+            payload.operator_phone, logo_url=ingested_photo.public_url
+        )
+        await audit_repo.log(
+            actor="system",
+            action="operator_logo_updated",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "logo_url": ingested_photo.public_url,
+            },
+        )
+        return _logo_saved_reply(language)
+
+    async def _send_generation_in_progress(self, *, to_phone: str, language: str) -> None:
+        """Send 'your ad is being created' notice before generation starts."""
+        message = _generation_in_progress_message(language)
+        try:
+            await self._whatsapp_client.send_text(to_phone=to_phone, message=message)
+        except Exception:
+            logger.warning(
+                "Failed to send generation-in-progress message (operator_phone=%s)",
+                to_phone,
+                exc_info=True,
+            )
+
     async def _enrich_current_draft(
         self,
         *,
@@ -1006,19 +1191,18 @@ def _generation_mode_for_intent(intent: Intent) -> GenerationMode:
 
 
 def _is_ready_for_generation(draft: AdDraft) -> bool:
-    return draft.product_name is not None and draft.price is not None
+    return draft.product_name is not None
 
 
 def _to_generation_draft_input(
     *,
     draft: AdDraft,
-    operator_phone: str,
-    language: str,
+    operator: Operator,
 ) -> GenerationDraftInput:
     return GenerationDraftInput(
         draft_id=draft.id,
-        operator_phone=operator_phone,
-        language=language,
+        operator_phone=operator.phone,
+        language=operator.language,
         product_name=draft.product_name,
         price=draft.price,
         currency=draft.currency,
@@ -1030,13 +1214,78 @@ def _to_generation_draft_input(
         enriched_description=draft.enriched_description,
         preview_reference_url=draft.preview_reference_url,
         rendered_image_url=draft.rendered_image_url,
+        product_brand=draft.product_brand,
+        business_name=operator.business_name,
+        logo_url=operator.logo_url,
+        brand_colors=operator.brand_colors,
     )
+
+
+def _build_brand_conflict_followup(*, draft: AdDraft, language: str) -> str | None:
+    if not _has_brand_conflict(draft):
+        return None
+    operator_brand = draft.product_brand or ""
+    catalog_brand = draft.enriched_brand or ""
+    if language.lower() == "he":
+        return (
+            "יצרתי מודעה ראשונית לפי המותג שכתבת. "
+            f'רשמתי מותג מוצר: "{operator_brand}" '
+            f'בעוד שבמאגר נמצא: "{catalog_brand}". '
+            "אם צריך, תכתוב לי איזה מותג לשמור להמשך."
+        )
+    return (
+        "I generated the first ad using the brand you provided. "
+        f'You wrote "{operator_brand}", while barcode enrichment found "{catalog_brand}". '
+        "If needed, tell me which brand to keep going forward."
+    )
+
+
+def _has_brand_conflict(draft: AdDraft) -> bool:
+    operator_brand = _normalize_brand_value(draft.product_brand)
+    enriched_brand = _normalize_brand_value(draft.enriched_brand)
+    if operator_brand is None or enriched_brand is None:
+        return False
+    return operator_brand != enriched_brand
+
+
+def _normalize_brand_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(value.split()).strip().casefold()
+    if not normalized:
+        return None
+    return normalized
+
+
+def _generation_in_progress_message(language: str) -> str:
+    if language.lower() == "he":
+        return "המודעה שלך בתהליך יצירה, אנא המתן..."
+    if language.lower() == "ar":
+        return "إعلانك قيد الإنشاء، يرجى الانتظار..."
+    if language.lower() == "ru":
+        return "Ваше объявление создаётся, пожалуйста подождите..."
+    return "Your ad is being created, please wait..."
 
 
 def _generation_completed_reply(language: str) -> str:
     if language.lower() == "he":
         return "התצוגה המקדימה מוכנה."
     return "Your ad preview is ready."
+
+
+def _missing_price_followup(language: str) -> str:
+    if language.lower() == "he":
+        return "לא זוהה מחיר. אם חשוב לך שהמחיר יבלוט, שלח לי את המחיר המדויק ואעדכן מודעה."
+    return (
+        "I did not detect a price. If you want the price to stand out, "
+        "send the exact price and I will update the ad."
+    )
+
+
+def _missing_product_name_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "כדי לייצר מודעה אני צריך לפחות שם מוצר. כתוב לי את שם המוצר ונמשיך."
+    return "To generate an ad I need at least a product name. Please send the product name."
 
 
 def _publish_confirmation_prompt(language: str) -> str:
@@ -1055,6 +1304,51 @@ def _generation_failed_reply(language: str) -> str:
     if language.lower() == "he":
         return "יש כרגע תקלה זמנית ביצירת המודעה. נסה שוב בעוד רגע."
     return "Temporary generation service issue. Please try again in a moment."
+
+
+def _branding_updated_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "פרטי המיתוג עודכנו בהצלחה."
+    if language.lower() == "ar":
+        return "تم تحديث معلومات العلامة التجارية بنجاح."
+    if language.lower() == "ru":
+        return "Данные бренда успешно обновлены."
+    return "Branding details updated successfully."
+
+
+def _branding_not_detected_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "לא הצלחתי לזהות פרטי מיתוג בהודעה שלך. נסה לשלוח את שם העסק והצבעים שלך."
+    return (
+        "I could not detect branding details in your message. "
+        "Try sending your business name and brand colors."
+    )
+
+
+def _logo_upload_prompt(language: str) -> str:
+    if language.lower() == "he":
+        return "שלח לי את הלוגו של העסק שלך כתמונה."
+    if language.lower() == "ar":
+        return "أرسل لي شعار عملك كصورة."
+    if language.lower() == "ru":
+        return "Отправьте мне логотип вашего бизнеса как изображение."
+    return "Send me your business logo as an image."
+
+
+def _logo_saved_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "הלוגו נשמר בהצלחה ✓"
+    if language.lower() == "ar":
+        return "تم حفظ الشعار بنجاح ✓"
+    if language.lower() == "ru":
+        return "Логотип успешно сохранён ✓"
+    return "Logo saved successfully ✓"
+
+
+def _logo_upload_failed_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "לא הצלחתי לעבד את התמונה. נסה לשלוח שוב."
+    return "I could not process your image. Please try sending it again."
 
 
 def _build_photo_ingest_reply(

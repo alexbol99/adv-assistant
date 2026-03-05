@@ -32,6 +32,9 @@ class Operator(TimestampMixin, Base):
     language: Mapped[str] = mapped_column(String(2), nullable=False, default=Language.HE.value)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="ILS")
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    business_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    brand_colors: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 
     drafts: Mapped[list["AdDraft"]] = relationship(
         back_populates="operator",
@@ -54,6 +57,7 @@ class AdDraft(TimestampMixin, Base):
         index=True,
     )
     product_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    product_brand: Mapped[str | None] = mapped_column(String(120), nullable=True)
     price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="ILS")
     promo_text: Mapped[str | None] = mapped_column(String(240), nullable=True)
@@ -105,6 +109,7 @@ class ConversationSession(TimestampMixin, Base):
         ForeignKey("ad_draft.id", ondelete="SET NULL"),
         nullable=True,
     )
+    pending_upload_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
     last_active_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

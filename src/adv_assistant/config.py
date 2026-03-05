@@ -11,6 +11,13 @@ def _int_env(name: str, default: int) -> int:
     return int(raw_value)
 
 
+def _float_env(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    return float(raw_value)
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -83,6 +90,8 @@ class Settings:
     gemini_model: str = "gemini-3.1-flash-image-preview"
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_timeout_seconds: int = 30
+    gemini_max_submit_attempts: int = 4
+    gemini_retry_base_seconds: float = 1.0
 
     nana_banana_api_key: str | None = None
     nana_banana_api_url: str | None = None
@@ -163,6 +172,8 @@ class Settings:
                 "https://generativelanguage.googleapis.com/v1beta",
             ),
             gemini_timeout_seconds=_int_env("GEMINI_TIMEOUT_SECONDS", 30),
+            gemini_max_submit_attempts=_int_env("GEMINI_MAX_SUBMIT_ATTEMPTS", 4),
+            gemini_retry_base_seconds=_float_env("GEMINI_RETRY_BASE_SECONDS", 1.0),
             nana_banana_api_key=_optional_env("NANA_BANANA_API_KEY"),
             nana_banana_api_url=_optional_env("NANA_BANANA_API_URL"),
             nana_banana_base_url=_optional_env("NANA_BANANA_BASE_URL"),

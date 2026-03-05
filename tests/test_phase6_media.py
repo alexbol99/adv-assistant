@@ -6,10 +6,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.db.base import Base
-from adv_assistant.db.models import AdDraft, AuditEvent, ConversationSession
+from adv_assistant.db.models import AdDraft, AuditEvent, ConversationSession, Operator
 from adv_assistant.db.repositories import OperatorRepository
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
 from adv_assistant.enrichment import EnrichedProduct
+from adv_assistant.llm_gateway import (
+    ExtractedAdFields,
+    Intent,
+    IntentClassification,
+    ReplyGeneration,
+)
 from adv_assistant.media_ingest import (
     DownloadedMedia,
     IngestedOperatorPhoto,
@@ -153,6 +159,52 @@ class StaticEnrichmentService:
 
     async def close(self) -> None:
         return None
+
+
+class StaticLogoIntentGateway:
+    uses_external_llm = False
+
+    def __init__(self) -> None:
+        self.classify_calls = 0
+
+    async def classify_intent(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> IntentClassification:
+        self.classify_calls += 1
+        if self.classify_calls == 1:
+            return IntentClassification(intent=Intent.SET_LOGO)
+        return IntentClassification(intent=Intent.UNKNOWN)
+
+    async def extract_ad_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> ExtractedAdFields:
+        return ExtractedAdFields()
+
+    async def extract_branding_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+    ):
+        raise RuntimeError("not used in this test")
+
+    async def generate_reply(
+        self,
+        *,
+        intent: Intent,
+        message_text: str,
+        language: str,
+        extracted_fields: ExtractedAdFields | None,
+    ) -> ReplyGeneration:
+        return ReplyGeneration(reply_text="fallback")
 
 
 @pytest.fixture()
@@ -319,3 +371,62 @@ async def test_pipeline_image_ingest_failure_is_user_visible(
     assert result.status == "processed"
     assert result.reply_text is not None
     assert "could not process your photo" in result.reply_text.lower()
+
+
+async def test_pipeline_set_logo_routes_next_image_to_operator_logo(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000603"
+    await _seed_operator(session_factory, phone)
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=StaticLogoIntentGateway(),
+        operator_photo_ingestor=StaticPhotoIngestor(
+            IngestedOperatorPhoto(
+                public_url="https://storage.googleapis.com/test-media/operator-logos/l1.jpg",
+                object_name="operator-logos/l1.jpg",
+                content_type="image/jpeg",
+                content=b"jpeg-bytes",
+            )
+        ),
+        enrichment_service=StaticEnrichmentService(decoded_ean=None, enriched=None),
+    )
+
+    logo_prompt = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase6-logo-1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "I want to set my logo"}},
+        )
+    )
+    assert logo_prompt.status == "processed"
+    assert logo_prompt.reply_text is not None
+    assert "logo" in logo_prompt.reply_text.lower() or "לוגו" in logo_prompt.reply_text
+
+    upload_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase6-logo-2",
+            operator_phone=phone,
+            raw_message={"type": "image", "image": {"id": "meta-logo-media-1"}},
+        )
+    )
+    assert upload_result.status == "processed"
+    assert upload_result.deterministic_action == "operator_logo_upload"
+
+    async with session_scope(session_factory) as session:
+        operator = (
+            await session.execute(select(Operator).where(Operator.phone == phone))
+        ).scalar_one()
+        assert (
+            operator.logo_url == "https://storage.googleapis.com/test-media/operator-logos/l1.jpg"
+        )
+
+        session_obj = (
+            await session.execute(
+                select(ConversationSession).where(ConversationSession.operator_phone == phone)
+            )
+        ).scalar_one()
+        assert session_obj.pending_upload_type is None
+        draft = await session.get(AdDraft, session_obj.current_draft_id)
+        assert draft is not None
+        assert draft.photo_url is None

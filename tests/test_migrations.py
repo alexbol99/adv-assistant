@@ -34,3 +34,12 @@ def test_alembic_upgrade_creates_phase1_tables(tmp_path: Path, monkeypatch) -> N
 
     ad_draft_columns = {column["name"] for column in inspector.get_columns("ad_draft")}
     assert "enrichment_source" in ad_draft_columns
+    assert "product_brand" in ad_draft_columns
+
+    operator_columns = {column["name"] for column in inspector.get_columns("operator")}
+    assert {"business_name", "logo_url", "brand_colors"}.issubset(operator_columns)
+
+    conversation_columns = {
+        column["name"] for column in inspector.get_columns("conversation_session")
+    }
+    assert "pending_upload_type" in conversation_columns

@@ -42,6 +42,19 @@ async def test_crud_repositories(db_session: AsyncSession) -> None:
     assert fetched_operator is not None
     assert fetched_operator.active is True
 
+    updated_branding = await operator_repo.update_branding(
+        operator.phone,
+        business_name="Super Market",
+        logo_url="https://example.com/logo.png",
+        brand_colors=["#FF0000", "#00FF00"],
+    )
+    assert updated_branding is True
+    refreshed_operator = await operator_repo.get_by_phone(operator.phone)
+    assert refreshed_operator is not None
+    assert refreshed_operator.business_name == "Super Market"
+    assert refreshed_operator.logo_url == "https://example.com/logo.png"
+    assert refreshed_operator.brand_colors == ["#FF0000", "#00FF00"]
+
     active_operators = await operator_repo.list_active()
     assert len(active_operators) == 1
 
@@ -147,17 +160,21 @@ async def test_session_repository_can_clear_nullable_fields(db_session: AsyncSes
         operator_phone=operator.phone,
         history=[{"role": "user", "text": "hello"}],
         current_draft_id=draft.id,
+        pending_upload_type="logo",
         expires_at=initial_expiry,
     )
     assert created.current_draft_id == draft.id
+    assert created.pending_upload_type == "logo"
     assert created.expires_at == initial_expiry
 
     cleared = await session_repo.create_or_update(
         operator_phone=operator.phone,
         current_draft_id=None,
+        pending_upload_type=None,
         expires_at=None,
     )
     assert cleared.current_draft_id is None
+    assert cleared.pending_upload_type is None
     assert cleared.expires_at is None
 
 
