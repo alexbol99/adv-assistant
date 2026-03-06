@@ -59,6 +59,17 @@ _LANGUAGE_ALIASES = {
 }
 
 
+def _supports_explicit_zero_temperature(exc: Exception) -> bool:
+    message = str(exc).lower()
+    if "temperature" not in message:
+        return True
+    if "does not support 0" in message:
+        return False
+    if "only the default" in message and "temperature" in message:
+        return False
+    return True
+
+
 class Intent(StrEnum):
     CREATE_AD = "create_ad"
     REGENERATE_WITH_REFERENCE = "regenerate_with_reference"
@@ -566,19 +577,29 @@ class OpenAILLMGateway:
         system_prompt: str,
         user_prompt: str,
     ) -> str:
+        request_kwargs: dict[str, Any] = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "timeout": self._timeout_seconds,
+        }
         try:
             response = await self._client.chat.completions.create(
-                model=model_name,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
                 temperature=0,
-                response_format={"type": "json_object"},
-                timeout=self._timeout_seconds,
+                **request_kwargs,
             )
         except Exception as exc:
-            raise LLMGatewayError(f"OpenAI request failed: {exc}") from exc
+            if _supports_explicit_zero_temperature(exc):
+                raise LLMGatewayError(f"OpenAI request failed: {exc}") from exc
+            try:
+                response = await self._client.chat.completions.create(
+                    **request_kwargs,
+                )
+            except Exception as retry_exc:
+                raise LLMGatewayError(f"OpenAI request failed: {retry_exc}") from retry_exc
 
         content = response.choices[0].message.content if response.choices else None
         if not content:

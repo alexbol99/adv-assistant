@@ -117,6 +117,7 @@ class ConversationSession(TimestampMixin, Base):
         nullable=True,
     )
     pending_upload_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    pending_followup_question: Mapped[str | None] = mapped_column(String(32), nullable=True)
     last_active_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

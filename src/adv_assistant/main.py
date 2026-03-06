@@ -86,10 +86,20 @@ class OperatorCMSConnectRequest(BaseModel):
 
 class OperatorCMSMappingResponse(BaseModel):
     phone: str
+    display_name: str | None
+    language: str
+    currency: str
     meta_user_id: str | None
     cms_campaign_id: int | None
     cms_playlist_id: int | None
+    business_name: str | None
+    logo_url: str | None
+    brand_colors: list[str] | None
+    store_type: str | None
+    creative_guidance: str | None
     active: bool
+    created_at: datetime
+    updated_at: datetime
 
 
 def _build_task_authorizer(settings: Settings) -> TaskRequestAuthorizer:
@@ -280,7 +290,7 @@ async def _validate_schema_compatibility(
             "store_type",
             "creative_guidance",
         },
-        "conversation_session": {"pending_upload_type"},
+        "conversation_session": {"pending_upload_type", "pending_followup_question"},
         "ad_draft": {"product_brand"},
     }
     if settings.enrichment_enabled:
@@ -574,10 +584,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def _to_operator_mapping_response(operator: Operator) -> OperatorCMSMappingResponse:
         return OperatorCMSMappingResponse(
             phone=operator.phone,
+            display_name=operator.display_name,
+            language=operator.language,
+            currency=operator.currency,
             meta_user_id=operator.meta_user_id,
             cms_campaign_id=operator.cms_campaign_id,
             cms_playlist_id=operator.cms_playlist_id,
+            business_name=operator.business_name,
+            logo_url=operator.logo_url,
+            brand_colors=operator.brand_colors,
+            store_type=operator.store_type,
+            creative_guidance=operator.creative_guidance,
             active=operator.active,
+            created_at=operator.created_at,
+            updated_at=operator.updated_at,
         )
 
     async def _upsert_operator_cms_mapping(
@@ -709,10 +729,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         <button type="submit">Save Mapping</button>
       </fieldset>
     </form>
+    <fieldset>
+      <legend>Operator Profile Lookup</legend>
+      <label>Lookup by Phone</label>
+      <input id="lookup_phone" type="text" placeholder="+9725..." />
+      <button id="lookup-by-phone" type="button">Get By Phone</button>
+
+      <label>Lookup by Meta User ID</label>
+      <input id="lookup_meta_user_id" type="text" placeholder="meta-user-id" />
+      <button id="lookup-by-meta" type="button">Get By Meta User ID</button>
+    </fieldset>
     <pre id="result"></pre>
     <script>
       const form = document.getElementById('mapping-form');
       const result = document.getElementById('result');
+      const lookupByPhoneButton = document.getElementById('lookup-by-phone');
+      const lookupByMetaButton = document.getElementById('lookup-by-meta');
+
+      const writeResult = async (response) => {
+        const body = await response.text();
+        result.textContent = `${response.status} ${response.statusText}\\n${body}`;
+      };
+
       form.addEventListener('submit', async (event) => {
         event.preventDefault();
         const payload = {
@@ -727,8 +765,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(payload),
         });
-        const body = await response.text();
-        result.textContent = `${response.status} ${response.statusText}\\n${body}`;
+        await writeResult(response);
+      });
+
+      lookupByPhoneButton.addEventListener('click', async () => {
+        const phone = document.getElementById('lookup_phone').value.trim();
+        if (!phone) {
+          result.textContent = 'Please provide a phone value.';
+          return;
+        }
+        const response = await fetch(`/admin/operators/by-phone/${encodeURIComponent(phone)}`);
+        await writeResult(response);
+      });
+
+      lookupByMetaButton.addEventListener('click', async () => {
+        const metaUserId = document.getElementById('lookup_meta_user_id').value.trim();
+        if (!metaUserId) {
+          result.textContent = 'Please provide a meta user ID value.';
+          return;
+        }
+        const response = await fetch(`/admin/operators/by-meta/${encodeURIComponent(metaUserId)}`);
+        await writeResult(response);
       });
     </script>
   </body>

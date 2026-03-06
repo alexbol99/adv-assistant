@@ -111,3 +111,28 @@ This document captures the agreed MVP execution order, acceptance rules, and tes
 - `delete_all` side-effect implementation
 - full admin control plane scope (beyond mapping UI/API)
 - Phase 10 hardening and Phase 11 launch gates
+
+## Next Sprint Additions (March 6, 2026)
+
+### 1) Publish CTA consistency hardening
+- Ensure publish buttons are always sent right after any successful ad preview response.
+- Keep this guarantee across follow-up states (missing data questions, regenerate confirmation, regenerate-declined path).
+
+#### Test checklist
+1. Create ad -> preview reply includes publish buttons.
+2. Create ad with pending follow-up -> same preview reply still includes publish buttons.
+3. Regenerate confirmation answered with "no" -> decline reply includes publish buttons.
+4. Regression: manual WhatsApp E2E verifies button visibility for both Hebrew and English operators.
+
+### 2) Admin UX for operator data visibility
+- Add a structured operator profile presentation in admin (table/card layout, not raw JSON-only), focused on fast support diagnostics.
+- Keep existing API responses, and improve presentation layer for:
+  - identity and routing (`phone`, `meta_user_id`, campaign/playlist)
+  - branding/system-memory fields
+  - status and timestamps
+
+#### Test checklist
+1. `/admin` renders structured operator data view after lookup.
+2. View displays empty/null fields clearly without breaking layout.
+3. Lookup by phone and by meta user ID both populate the same structured view.
+4. Basic auth protection remains unchanged.

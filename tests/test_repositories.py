@@ -184,20 +184,24 @@ async def test_session_repository_can_clear_nullable_fields(db_session: AsyncSes
         history=[{"role": "user", "text": "hello"}],
         current_draft_id=draft.id,
         pending_upload_type="logo",
+        pending_followup_question="price",
         expires_at=initial_expiry,
     )
     assert created.current_draft_id == draft.id
     assert created.pending_upload_type == "logo"
+    assert created.pending_followup_question == "price"
     assert created.expires_at == initial_expiry
 
     cleared = await session_repo.create_or_update(
         operator_phone=operator.phone,
         current_draft_id=None,
         pending_upload_type=None,
+        pending_followup_question=None,
         expires_at=None,
     )
     assert cleared.current_draft_id is None
     assert cleared.pending_upload_type is None
+    assert cleared.pending_followup_question is None
     assert cleared.expires_at is None
 
 

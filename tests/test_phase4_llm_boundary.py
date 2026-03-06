@@ -279,3 +279,47 @@ async def test_openai_gateway_retries_on_schema_mismatch(monkeypatch: Any) -> No
     result = await gateway.classify_intent(message_text="help", language="he", history=[])
     assert result.intent == Intent.HELP
     assert calls["n"] == 2
+
+
+async def test_openai_gateway_retries_without_temperature_when_model_rejects_it(
+    monkeypatch: Any,
+) -> None:
+    gateway = OpenAILLMGateway(
+        api_key="test-key",
+        classification_model="gpt-5-mini",
+        extraction_model="gpt-5-mini",
+        reply_model="gpt-5-mini",
+        max_retries=0,
+        timeout_seconds=5,
+        max_input_chars=2000,
+    )
+    calls: list[dict[str, Any]] = []
+
+    class _FakeMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class _FakeChoice:
+        def __init__(self, content: str) -> None:
+            self.message = _FakeMessage(content)
+
+    class _FakeResponse:
+        def __init__(self, content: str) -> None:
+            self.choices = [_FakeChoice(content)]
+
+    async def fake_create(**kwargs: Any) -> _FakeResponse:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RuntimeError(
+                "Unsupported value: 'temperature' does not support 0 with this model. "
+                "Only the default (1) value is supported."
+            )
+        return _FakeResponse('{"intent":"help"}')
+
+    monkeypatch.setattr(gateway._client.chat.completions, "create", fake_create)
+    result = await gateway.classify_intent(message_text="help", language="he", history=[])
+
+    assert result.intent == Intent.HELP
+    assert len(calls) == 2
+    assert calls[0]["temperature"] == 0
+    assert "temperature" not in calls[1]

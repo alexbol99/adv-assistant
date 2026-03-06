@@ -78,6 +78,17 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 **Exit gate**
 - Regression suite green and manual checklist completed in staging.
 
+### Next Sprint Backlog Additions (March 6, 2026)
+
+**Requested carry-over items**
+- Publish CTA must always be present immediately after any successful preview generation response.
+- Admin operator lookup should present user data in a structured view (table/card) for faster support usage.
+
+**Validation targets**
+1. Automated tests confirm publish buttons are present for preview success + follow-up paths.
+2. Manual WhatsApp E2E confirms button visibility in real conversation flow.
+3. Admin UI lookup renders a structured operator profile view from both phone and meta-user lookups.
+
 ---
 
 ## Phase 0 — Program Controls and Bootstrap

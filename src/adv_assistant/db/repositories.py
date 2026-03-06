@@ -159,6 +159,7 @@ class ConversationSessionRepository:
         history: list[dict[str, Any]] | None = None,
         current_draft_id: uuid.UUID | None | object = _UNSET,
         pending_upload_type: str | None | object = _UNSET,
+        pending_followup_question: str | None | object = _UNSET,
         last_active_at: datetime | None = None,
         expires_at: datetime | None | object = _UNSET,
     ) -> ConversationSession:
@@ -171,6 +172,9 @@ class ConversationSessionRepository:
                 current_draft_id=(None if current_draft_id is _UNSET else current_draft_id),
                 pending_upload_type=(
                     None if pending_upload_type is _UNSET else pending_upload_type
+                ),
+                pending_followup_question=(
+                    None if pending_followup_question is _UNSET else pending_followup_question
                 ),
                 last_active_at=last_active_at or utcnow(),
                 expires_at=None if expires_at is _UNSET else expires_at,
@@ -185,6 +189,8 @@ class ConversationSessionRepository:
                 session_obj.current_draft_id = current_draft_id
             if pending_upload_type is not _UNSET:
                 session_obj.pending_upload_type = pending_upload_type
+            if pending_followup_question is not _UNSET:
+                session_obj.pending_followup_question = pending_followup_question
             if last_active_at is not None:
                 session_obj.last_active_at = last_active_at
             if expires_at is not _UNSET:
