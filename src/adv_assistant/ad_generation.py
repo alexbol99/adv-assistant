@@ -58,6 +58,8 @@ class GenerationDraftInput:
     business_name: str | None = None
     logo_url: str | None = None
     brand_colors: list[str] | None = None
+    store_type: str | None = None
+    creative_guidance: str | None = None
 
 
 @dataclass(slots=True)
@@ -256,7 +258,29 @@ class GeminiFlashImageAdGenerationService:
         if not isinstance(response_payload, dict):
             raise AdGenerationError("Gemini response has unexpected format")
 
-        image_bytes, mime_type = _extract_gemini_inline_image(response_payload)
+        try:
+            image_bytes, mime_type = _extract_gemini_inline_image(response_payload)
+        except AdGenerationError as exc:
+            # Some Gemini responses can return fileData/file_data URI outputs
+            # instead of inline image bytes.
+            file_uri, file_mime = _extract_gemini_file_image_uri(response_payload)
+            if file_uri is None:
+                raise exc
+            downloaded_bytes, downloaded_mime = await self._download_reference_image(file_uri)
+            image_bytes = downloaded_bytes
+            if downloaded_mime.startswith("image/"):
+                mime_type = downloaded_mime
+            elif file_mime is not None and file_mime.startswith("image/"):
+                mime_type = file_mime
+            else:
+                mime_type = "image/png"
+
+        if not image_bytes:
+            raise AdGenerationError("Gemini response returned an empty image payload")
+
+        if not mime_type.startswith("image/"):
+            raise AdGenerationError(f"Gemini response returned non-image mime type: {mime_type}")
+
         try:
             uploaded = await self._media_store.upload_bytes(
                 content=image_bytes,
@@ -788,12 +812,20 @@ def build_generation_prompt(
     sections.append(f"Price: {_price_to_text(draft.price, draft.currency)}.")
 
     # --- BUSINESS BRANDING ---
-    has_branding = draft.business_name or draft.logo_url or draft.brand_colors
+    has_branding = (
+        draft.business_name
+        or draft.logo_url
+        or draft.brand_colors
+        or draft.store_type
+        or draft.creative_guidance
+    )
     if has_branding:
         sections.append("")
         sections.append("=== BUSINESS BRANDING ===")
         if draft.business_name:
             sections.append(f"Business Name: {draft.business_name}.")
+        if draft.store_type:
+            sections.append(f"Store Type: {draft.store_type}.")
         if draft.brand_colors:
             colors_text = ", ".join(draft.brand_colors)
             sections.append(
@@ -801,6 +833,8 @@ def build_generation_prompt(
             )
         if draft.logo_url:
             sections.append(f"Business Logo URL: {draft.logo_url}.")
+        if draft.creative_guidance:
+            sections.append(f"Creative Guidance: {draft.creative_guidance}.")
 
     # --- SUPPORTING DETAILS ---
     supporting: list[str] = []
@@ -974,7 +1008,107 @@ def _extract_gemini_inline_image(payload: dict[str, Any]) -> tuple[bytes, str]:
                     "Gemini response included invalid base64 image data"
                 ) from exc
 
-    raise AdGenerationError("Gemini response did not include an image output")
+    diagnostics = _summarize_gemini_non_image_response(payload)
+    raise AdGenerationError(f"Gemini response did not include an image output. {diagnostics}")
+
+
+def _extract_gemini_file_image_uri(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    candidates = payload.get("candidates")
+    if not isinstance(candidates, list):
+        return None, None
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        content = candidate.get("content")
+        if not isinstance(content, dict):
+            continue
+        parts = content.get("parts")
+        if not isinstance(parts, list):
+            continue
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            file_data = part.get("fileData")
+            if not isinstance(file_data, dict):
+                file_data = part.get("file_data")
+            if not isinstance(file_data, dict):
+                continue
+
+            file_uri = file_data.get("fileUri") or file_data.get("file_uri")
+            if not isinstance(file_uri, str) or not file_uri.strip():
+                continue
+
+            mime_type_raw = file_data.get("mimeType") or file_data.get("mime_type")
+            mime_type = (
+                mime_type_raw.strip().lower()
+                if isinstance(mime_type_raw, str) and mime_type_raw.strip()
+                else None
+            )
+            return file_uri.strip(), mime_type
+
+    return None, None
+
+
+def _summarize_gemini_non_image_response(payload: dict[str, Any], *, max_len: int = 240) -> str:
+    diagnostics: list[str] = []
+
+    prompt_feedback = payload.get("promptFeedback")
+    if isinstance(prompt_feedback, dict):
+        block_reason = prompt_feedback.get("blockReason")
+        if isinstance(block_reason, str) and block_reason.strip():
+            diagnostics.append(f"block_reason={block_reason.strip()}")
+        block_message = prompt_feedback.get("blockReasonMessage")
+        if isinstance(block_message, str) and block_message.strip():
+            diagnostics.append(f"block_message={_clip_text(block_message, max_len=max_len)}")
+
+    candidates = payload.get("candidates")
+    if isinstance(candidates, list):
+        finish_reasons: list[str] = []
+        text_parts: list[str] = []
+        has_file_data = False
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            finish_reason = candidate.get("finishReason")
+            if isinstance(finish_reason, str) and finish_reason.strip():
+                finish_reasons.append(finish_reason.strip())
+
+            content = candidate.get("content")
+            if not isinstance(content, dict):
+                continue
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                has_file_data_part = isinstance(part.get("fileData"), dict) or isinstance(
+                    part.get("file_data"), dict
+                )
+                if has_file_data_part:
+                    has_file_data = True
+                text = part.get("text")
+                if isinstance(text, str) and text.strip():
+                    text_parts.append(text.strip())
+
+        if finish_reasons:
+            diagnostics.append(f"finish_reason={','.join(finish_reasons)}")
+        if has_file_data:
+            diagnostics.append("file_data_present=true")
+        if text_parts:
+            diagnostics.append(f"text={_clip_text(text_parts[0], max_len=max_len)}")
+
+    if diagnostics:
+        return "; ".join(diagnostics)
+    return "no additional diagnostics in Gemini payload"
+
+
+def _clip_text(value: str, *, max_len: int) -> str:
+    compact = " ".join(value.split()).strip()
+    if len(compact) <= max_len:
+        return compact
+    return f"{compact[:max_len]}..."
 
 
 def _image_suffix_for_mime_type(mime_type: str) -> str:

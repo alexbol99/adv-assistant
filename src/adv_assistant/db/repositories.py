@@ -39,6 +39,8 @@ class OperatorRepository:
         business_name: str | None = None,
         logo_url: str | None = None,
         brand_colors: list[str] | None = None,
+        store_type: str | None = None,
+        creative_guidance: str | None = None,
     ) -> Operator:
         operator = Operator(
             phone=phone,
@@ -52,6 +54,8 @@ class OperatorRepository:
             business_name=business_name,
             logo_url=logo_url,
             brand_colors=brand_colors,
+            store_type=store_type,
+            creative_guidance=creative_guidance,
         )
         self.session.add(operator)
         await self.session.flush()
@@ -87,6 +91,9 @@ class OperatorRepository:
         business_name: str | None | object = _UNSET,
         logo_url: str | None | object = _UNSET,
         brand_colors: list[str] | None | object = _UNSET,
+        language: str | None | object = _UNSET,
+        store_type: str | None | object = _UNSET,
+        creative_guidance: str | None | object = _UNSET,
     ) -> bool:
         values: dict[str, Any] = {"updated_at": utcnow()}
         if business_name is not _UNSET:
@@ -95,6 +102,12 @@ class OperatorRepository:
             values["logo_url"] = logo_url
         if brand_colors is not _UNSET:
             values["brand_colors"] = brand_colors
+        if language is not _UNSET:
+            values["language"] = language
+        if store_type is not _UNSET:
+            values["store_type"] = store_type
+        if creative_guidance is not _UNSET:
+            values["creative_guidance"] = creative_guidance
         if len(values) == 1:
             return False
         result = await self.session.execute(
@@ -146,6 +159,7 @@ class ConversationSessionRepository:
         history: list[dict[str, Any]] | None = None,
         current_draft_id: uuid.UUID | None | object = _UNSET,
         pending_upload_type: str | None | object = _UNSET,
+        pending_followup_question: str | None | object = _UNSET,
         last_active_at: datetime | None = None,
         expires_at: datetime | None | object = _UNSET,
     ) -> ConversationSession:
@@ -158,6 +172,9 @@ class ConversationSessionRepository:
                 current_draft_id=(None if current_draft_id is _UNSET else current_draft_id),
                 pending_upload_type=(
                     None if pending_upload_type is _UNSET else pending_upload_type
+                ),
+                pending_followup_question=(
+                    None if pending_followup_question is _UNSET else pending_followup_question
                 ),
                 last_active_at=last_active_at or utcnow(),
                 expires_at=None if expires_at is _UNSET else expires_at,
@@ -172,6 +189,8 @@ class ConversationSessionRepository:
                 session_obj.current_draft_id = current_draft_id
             if pending_upload_type is not _UNSET:
                 session_obj.pending_upload_type = pending_upload_type
+            if pending_followup_question is not _UNSET:
+                session_obj.pending_followup_question = pending_followup_question
             if last_active_at is not None:
                 session_obj.last_active_at = last_active_at
             if expires_at is not _UNSET:

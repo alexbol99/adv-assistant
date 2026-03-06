@@ -10,6 +10,7 @@
 | [Architecture & Technical Specification](docs/architecture-and-technical-spec.md) | System components, data flow diagrams, conceptual data model, intents/commands, CMS integration interface, reliability, and prompt-injection guardrails. |
 | [Technology Decisions](docs/technology-decisions.md) | Concrete technology decisions: Python stack, GCP Cloud Run + Cloud Tasks deployment, Cloud SQL PostgreSQL, GCS media storage, Nano Banana ad generation, and product enrichment approach for Israeli grocery. |
 | [Workplan](docs/workplan.md) | Step-by-step implementation phases (0–11) for building the application. |
+| [MVP Priority Plan](docs/mvp-priority-plan-2026-03-05.md) | Current MVP stage order, locked decisions, and acceptance tests. |
 | [Phase 5 Compliance Checklist](docs/phase5-compliance-checklist.md) | Pre-production legal/compliance checklist for enrichment sources and data handling. |
 
 ## Quick Summary

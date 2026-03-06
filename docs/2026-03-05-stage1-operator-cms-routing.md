@@ -59,6 +59,12 @@ In `OperatorRepository`:
 ### Behavior
 - Supports lookup by phone and/or existing Meta user ID.
 - Can create operator when phone is provided and operator does not exist.
+- Lookup responses now include operator profile context used in generation:
+  - `display_name`, `language`, `currency`
+  - `business_name`, `logo_url`, `brand_colors`
+  - `store_type`, `creative_guidance`
+  - `created_at`, `updated_at`
+- Admin page now includes a dedicated "Operator Profile Lookup" panel (phone/meta lookup buttons + JSON output).
 - Emits admin audit events:
   - `admin_operator_created_with_cms_mapping`
   - `admin_operator_cms_mapping_updated`

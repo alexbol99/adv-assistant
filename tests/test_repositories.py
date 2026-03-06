@@ -47,6 +47,9 @@ async def test_crud_repositories(db_session: AsyncSession) -> None:
         business_name="Super Market",
         logo_url="https://example.com/logo.png",
         brand_colors=["#FF0000", "#00FF00"],
+        store_type="grocery",
+        creative_guidance="Clean layout with large readable price",
+        language="en",
     )
     assert updated_branding is True
     refreshed_operator = await operator_repo.get_by_phone(operator.phone)
@@ -54,6 +57,9 @@ async def test_crud_repositories(db_session: AsyncSession) -> None:
     assert refreshed_operator.business_name == "Super Market"
     assert refreshed_operator.logo_url == "https://example.com/logo.png"
     assert refreshed_operator.brand_colors == ["#FF0000", "#00FF00"]
+    assert refreshed_operator.store_type == "grocery"
+    assert refreshed_operator.creative_guidance == "Clean layout with large readable price"
+    assert refreshed_operator.language == "en"
 
     updated_mapping = await operator_repo.update_cms_mapping(
         operator.phone,
@@ -178,20 +184,24 @@ async def test_session_repository_can_clear_nullable_fields(db_session: AsyncSes
         history=[{"role": "user", "text": "hello"}],
         current_draft_id=draft.id,
         pending_upload_type="logo",
+        pending_followup_question="price",
         expires_at=initial_expiry,
     )
     assert created.current_draft_id == draft.id
     assert created.pending_upload_type == "logo"
+    assert created.pending_followup_question == "price"
     assert created.expires_at == initial_expiry
 
     cleared = await session_repo.create_or_update(
         operator_phone=operator.phone,
         current_draft_id=None,
         pending_upload_type=None,
+        pending_followup_question=None,
         expires_at=None,
     )
     assert cleared.current_draft_id is None
     assert cleared.pending_upload_type is None
+    assert cleared.pending_followup_question is None
     assert cleared.expires_at is None
 
 

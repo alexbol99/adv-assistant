@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.ad_generation import (
+    AdGenerationError,
     GeminiFlashImageAdGenerationService,
     GenerationDraftInput,
     GenerationMode,
@@ -535,6 +536,146 @@ async def test_gemini_service_retries_timeout_then_succeeds() -> None:
     assert observed_calls["count"] == 2
     assert result.status == NanoBananaJobStatus.COMPLETED
     assert result.output_image_url == "https://storage.example/generated/preview.png"
+    await client.aclose()
+
+
+async def test_gemini_service_downloads_file_data_output_when_inline_missing() -> None:
+    observed: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "generativelanguage.googleapis.com":
+            observed["generate_path"] = request.url.path
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "fileData": {
+                                            "mimeType": "image/png",
+                                            "fileUri": "https://files.example/generated.png",
+                                        }
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                },
+            )
+        if request.url.host == "files.example":
+            observed["file_path"] = request.url.path
+            return httpx.Response(
+                status_code=200,
+                content=b"png-from-file-uri",
+                headers={"content-type": "image/png"},
+            )
+        return httpx.Response(status_code=404)
+
+    media_store = FakeMediaStore()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = GeminiFlashImageAdGenerationService(
+        api_key="gemini-test-key",
+        media_store=media_store,
+        client=client,
+    )
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="קוטג",
+        price=Decimal("19.90"),
+        currency="ILS",
+        promo_text="מבצע",
+        ean=None,
+        photo_url=None,
+        enriched_brand=None,
+        enriched_category=None,
+        enriched_description=None,
+        preview_reference_url=None,
+        rendered_image_url=None,
+    )
+
+    submission = await service.submit_for_draft(
+        draft=draft,
+        mode=GenerationMode.FRESH,
+        instruction_text="generate ad image",
+        wamid="wamid-gemini-file-data-1",
+        width=1920,
+        height=1080,
+    )
+    result = await service.wait_for_completion(job_id=submission.job_id)
+
+    assert (
+        observed["generate_path"] == "/v1beta/models/gemini-3.1-flash-image-preview:generateContent"
+    )
+    assert observed["file_path"] == "/generated.png"
+    assert media_store.upload_calls[0][0] == b"png-from-file-uri"
+    assert media_store.upload_calls[0][1] == "image/png"
+    assert media_store.upload_calls[0][2] == ".png"
+    assert result.status == NanoBananaJobStatus.COMPLETED
+    await client.aclose()
+
+
+async def test_gemini_service_non_image_response_includes_diagnostics() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            json={
+                "promptFeedback": {
+                    "blockReason": "SAFETY",
+                    "blockReasonMessage": "Blocked by policy checks",
+                },
+                "candidates": [
+                    {
+                        "finishReason": "SAFETY",
+                        "content": {
+                            "parts": [{"text": "I can only return text for this request."}]
+                        },
+                    }
+                ],
+            },
+        )
+
+    media_store = FakeMediaStore()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = GeminiFlashImageAdGenerationService(
+        api_key="gemini-test-key",
+        media_store=media_store,
+        client=client,
+    )
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="קוטג",
+        price=Decimal("19.90"),
+        currency="ILS",
+        promo_text="מבצע",
+        ean=None,
+        photo_url=None,
+        enriched_brand=None,
+        enriched_category=None,
+        enriched_description=None,
+        preview_reference_url=None,
+        rendered_image_url=None,
+    )
+
+    with pytest.raises(AdGenerationError) as exc_info:
+        await service.submit_for_draft(
+            draft=draft,
+            mode=GenerationMode.FRESH,
+            instruction_text="generate ad image",
+            wamid="wamid-gemini-no-image",
+            width=1920,
+            height=1080,
+        )
+
+    error_text = str(exc_info.value)
+    assert "did not include an image output" in error_text
+    assert "block_reason=SAFETY" in error_text
+    assert "finish_reason=SAFETY" in error_text
     await client.aclose()
 
 

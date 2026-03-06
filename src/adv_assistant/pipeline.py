@@ -38,6 +38,7 @@ from adv_assistant.llm_gateway import (
     BUTTON_CONFIRM_DELETE_ALL,
     BUTTON_CONFIRM_PUBLISH,
     Intent,
+    IntentClassification,
     LLMGateway,
     LLMGatewayError,
     LLMSchemaError,
@@ -56,6 +57,26 @@ from adv_assistant.whatsapp import NoopWhatsAppClient, WhatsAppClient
 logger = logging.getLogger(__name__)
 
 _PENDING_UPLOAD_LOGO = "logo"
+_PENDING_FOLLOWUP_PRICE = "price"
+_PENDING_FOLLOWUP_STORE_TYPE = "store_type"
+_PENDING_FOLLOWUP_CREATIVE_GUIDANCE = "creative_guidance"
+_PENDING_FOLLOWUP_REGENERATE_CONFIRMATION = "regenerate_confirmation"
+_PENDING_FOLLOWUP_KEYS = {
+    _PENDING_FOLLOWUP_PRICE,
+    _PENDING_FOLLOWUP_STORE_TYPE,
+    _PENDING_FOLLOWUP_CREATIVE_GUIDANCE,
+}
+_FOLLOWUP_INTERRUPT_INTENTS = {
+    Intent.CREATE_AD,
+    Intent.REGENERATE_WITH_REFERENCE,
+    Intent.REGENERATE_FROM_SCRATCH,
+    Intent.PUBLISH_AD,
+    Intent.SET_LOGO,
+    Intent.SET_BRANDING,
+    Intent.DELETE_ALL,
+    Intent.LIST_ADS,
+    Intent.HELP,
+}
 
 
 @dataclass(slots=True)
@@ -161,10 +182,12 @@ class InboundTaskProcessor:
             history: list[dict[str, str]] = []
             current_draft_id: uuid.UUID | None = None
             pending_upload_type: str | None = None
+            pending_followup_question: str | None = None
             if session_obj is not None:
                 history = list(session_obj.history)
                 current_draft_id = session_obj.current_draft_id
                 pending_upload_type = session_obj.pending_upload_type
+                pending_followup_question = session_obj.pending_followup_question
 
             draft_created = False
             if current_draft_id is not None:
@@ -203,6 +226,8 @@ class InboundTaskProcessor:
             reply_text: str | None = None
             generated_image_url: str | None = None
             publish_buttons_prompt: str | None = None
+            session_language_override: str | None = None
+            followup_regen_requested = False
 
             if button_payload_id:
                 history.append(
@@ -274,12 +299,102 @@ class InboundTaskProcessor:
                     }
                 )
                 try:
-                    classification = await self._llm_gateway.classify_intent(
-                        message_text=sanitized_text,
-                        language=operator.language,
-                        history=history,
-                    )
-                    llm_used = self._llm_gateway.uses_external_llm or llm_used
+                    classification: IntentClassification | None = None
+                    clear_fields = _parse_operator_clear_request(sanitized_text)
+                    if clear_fields:
+                        clear_updates = {field_name: None for field_name in clear_fields}
+                        await operator_repo.update_branding(
+                            payload.operator_phone,
+                            **clear_updates,
+                        )
+                        for field_name in clear_fields:
+                            setattr(operator, field_name, None)
+                        pending_followup_question = None
+                        deterministic_action = "clear_branding_fields"
+                        intent_value = deterministic_action
+                        await audit_repo.log(
+                            actor="system",
+                            action="operator_branding_cleared",
+                            operator_phone=payload.operator_phone,
+                            metadata={
+                                "wamid": payload.wamid,
+                                "cleared_fields": clear_fields,
+                            },
+                        )
+                        reply_text = _branding_cleared_reply(
+                            language=operator.language,
+                            cleared_fields=clear_fields,
+                        )
+                        classification = IntentClassification(intent=Intent.SET_BRANDING)
+
+                    forced_intent: Intent | None = None
+                    regenerate_confirmation_unresolved = False
+                    if pending_followup_question == _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION:
+                        yes_no = _parse_yes_no_answer(
+                            message_text=sanitized_text,
+                            language=operator.language,
+                        )
+                        if yes_no is False:
+                            pending_followup_question = None
+                            reply_text = _regenerate_again_declined_reply(operator.language)
+                            if current_draft.rendered_image_url is not None:
+                                publish_buttons_prompt = _publish_buttons_prompt(operator.language)
+                        elif yes_no is None:
+                            regenerate_confirmation_unresolved = True
+                        else:
+                            followup_regen_requested = True
+                            pending_followup_question = None
+                            forced_intent = Intent.REGENERATE_WITH_REFERENCE
+
+                    if reply_text is None and pending_followup_question in _PENDING_FOLLOWUP_KEYS:
+                        classification = await self._llm_gateway.classify_intent(
+                            message_text=sanitized_text,
+                            language=operator.language,
+                            history=history,
+                        )
+                        llm_used = self._llm_gateway.uses_external_llm or llm_used
+                        if _should_interrupt_pending_followup(classification.intent):
+                            pending_followup_question = None
+                        else:
+                            (
+                                current_draft,
+                                pending_followup_question,
+                                reply_text,
+                                llm_used_in_followup,
+                            ) = await self._handle_pending_followup_answer(
+                                payload=payload,
+                                draft_repo=draft_repo,
+                                operator_repo=operator_repo,
+                                audit_repo=audit_repo,
+                                current_draft=current_draft,
+                                operator=operator,
+                                history=history,
+                                pending_followup_question=pending_followup_question,
+                                message_text=sanitized_text,
+                            )
+                            llm_used = llm_used or llm_used_in_followup
+
+                    if forced_intent is not None:
+                        classification = IntentClassification(intent=forced_intent)
+                    elif classification is None and reply_text is None:
+                        classification = await self._llm_gateway.classify_intent(
+                            message_text=sanitized_text,
+                            language=operator.language,
+                            history=history,
+                        )
+                        llm_used = self._llm_gateway.uses_external_llm or llm_used
+                    elif classification is None:
+                        classification = IntentClassification(intent=Intent.UNKNOWN)
+
+                    if (
+                        pending_followup_question == _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION
+                        and forced_intent is None
+                    ):
+                        if _should_interrupt_pending_followup(classification.intent):
+                            pending_followup_question = None
+                        elif regenerate_confirmation_unresolved and reply_text is None:
+                            reply_text = _regenerate_again_prompt(operator.language)
+
                     intent_value = classification.intent.value
 
                     extracted_fields = None
@@ -364,6 +479,41 @@ class InboundTaskProcessor:
                                 )
                             else:
                                 current_draft = updated_draft
+                        if followup_regen_requested:
+                            branding = await self._llm_gateway.extract_branding_fields(
+                                message_text=sanitized_text,
+                                language=operator.language,
+                            )
+                            llm_used = self._llm_gateway.uses_external_llm or llm_used
+                            branding_update_fields = branding.to_update_kwargs()
+                            if branding_update_fields:
+                                await operator_repo.update_branding(
+                                    payload.operator_phone,
+                                    **branding_update_fields,
+                                )
+                                if "language" in branding_update_fields:
+                                    operator.language = str(branding_update_fields["language"])
+                                    session_language_override = operator.language
+                                if "store_type" in branding_update_fields:
+                                    operator.store_type = branding_update_fields["store_type"]
+                                if "creative_guidance" in branding_update_fields:
+                                    operator.creative_guidance = branding_update_fields[
+                                        "creative_guidance"
+                                    ]
+                                if "business_name" in branding_update_fields:
+                                    operator.business_name = branding_update_fields["business_name"]
+                                if "brand_colors" in branding_update_fields:
+                                    operator.brand_colors = branding_update_fields["brand_colors"]
+                                await audit_repo.log(
+                                    actor="system",
+                                    action="operator_branding_updated",
+                                    operator_phone=payload.operator_phone,
+                                    metadata={
+                                        "wamid": payload.wamid,
+                                        "updated_fields": sorted(branding_update_fields.keys()),
+                                        "source": "followup_regenerate_confirmation",
+                                    },
+                                )
                         current_draft, enrichment_notice = await self._enrich_current_draft(
                             payload=payload,
                             draft_repo=draft_repo,
@@ -542,10 +692,24 @@ class InboundTaskProcessor:
                                             reply_text = _generation_completed_reply(
                                                 operator.language,
                                             )
-                                            if current_draft.price is None:
+                                            next_followup = _next_followup_question(
+                                                draft=current_draft,
+                                                operator=operator,
+                                            )
+                                            if next_followup is not None:
+                                                pending_followup_question = next_followup
+                                                followup_prompt = _followup_question_prompt(
+                                                    next_followup,
+                                                    operator.language,
+                                                )
+                                                reply_text = f"{reply_text}\n\n{followup_prompt}"
+                                            elif not followup_regen_requested:
+                                                pending_followup_question = (
+                                                    _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION
+                                                )
                                                 reply_text = (
                                                     f"{reply_text}\n\n"
-                                                    f"{_missing_price_followup(operator.language)}"
+                                                    f"{_regenerate_again_prompt(operator.language)}"
                                                 )
                                             publish_buttons_prompt = _publish_buttons_prompt(
                                                 operator.language
@@ -640,6 +804,13 @@ class InboundTaskProcessor:
                                 await operator_repo.update_branding(
                                     payload.operator_phone, **update_kwargs
                                 )
+                                if "language" in update_kwargs:
+                                    session_language_override = str(update_kwargs["language"])
+                                    operator.language = session_language_override
+                                if "store_type" in update_kwargs:
+                                    operator.store_type = update_kwargs["store_type"]
+                                if "creative_guidance" in update_kwargs:
+                                    operator.creative_guidance = update_kwargs["creative_guidance"]
                                 await audit_repo.log(
                                     actor="system",
                                     action="operator_branding_updated",
@@ -717,10 +888,15 @@ class InboundTaskProcessor:
 
             await session_repo.create_or_update(
                 operator_phone=payload.operator_phone,
-                language=operator.language if session_created else None,
+                language=(
+                    session_language_override
+                    if session_language_override is not None
+                    else (operator.language if session_created else None)
+                ),
                 history=history,
                 current_draft_id=current_draft.id,
                 pending_upload_type=pending_upload_type,
+                pending_followup_question=pending_followup_question,
                 last_active_at=now,
             )
 
@@ -1039,6 +1215,124 @@ class InboundTaskProcessor:
                 exc_info=True,
             )
 
+    async def _handle_pending_followup_answer(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        operator_repo: OperatorRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        operator: Operator,
+        history: list[dict[str, str]],
+        pending_followup_question: str,
+        message_text: str,
+    ) -> tuple[AdDraft, str | None, str, bool]:
+        llm_used = False
+
+        if pending_followup_question == _PENDING_FOLLOWUP_PRICE:
+            extracted_fields = await self._llm_gateway.extract_ad_fields(
+                message_text=message_text,
+                language=operator.language,
+                history=history,
+            )
+            llm_used = self._llm_gateway.uses_external_llm
+            update_fields = extracted_fields.to_draft_update_fields()
+            if "price" not in update_fields:
+                return (
+                    current_draft,
+                    pending_followup_question,
+                    _followup_reprompt(pending_followup_question, operator.language),
+                    llm_used,
+                )
+
+            price_update_fields: dict[str, Any] = {"price": update_fields["price"]}
+            if "currency" in update_fields:
+                price_update_fields["currency"] = update_fields["currency"]
+            updated_draft = await draft_repo.update_for_operator_with_version(
+                draft_id=current_draft.id,
+                operator_phone=payload.operator_phone,
+                expected_version=current_draft.version,
+                **price_update_fields,
+            )
+            if updated_draft is None:
+                await audit_repo.log(
+                    actor="system",
+                    action="draft_stale_write_detected",
+                    operator_phone=payload.operator_phone,
+                    metadata={"wamid": payload.wamid},
+                )
+                return (
+                    current_draft,
+                    pending_followup_question,
+                    "This draft was already changed. Please refresh and try again.",
+                    llm_used,
+                )
+            current_draft = updated_draft
+            await audit_repo.log(
+                actor="system",
+                action="followup_price_captured",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "price": str(current_draft.price),
+                    "currency": current_draft.currency,
+                },
+            )
+        elif pending_followup_question == _PENDING_FOLLOWUP_STORE_TYPE:
+            store_type = _truncate(message_text, 120)
+            if store_type is None:
+                return (
+                    current_draft,
+                    pending_followup_question,
+                    _followup_reprompt(pending_followup_question, operator.language),
+                    llm_used,
+                )
+            await operator_repo.update_branding(payload.operator_phone, store_type=store_type)
+            operator.store_type = store_type
+            await audit_repo.log(
+                actor="system",
+                action="followup_store_type_captured",
+                operator_phone=payload.operator_phone,
+                metadata={"wamid": payload.wamid, "store_type": store_type},
+            )
+        elif pending_followup_question == _PENDING_FOLLOWUP_CREATIVE_GUIDANCE:
+            creative_guidance = _truncate(message_text, 500)
+            if creative_guidance is None:
+                return (
+                    current_draft,
+                    pending_followup_question,
+                    _followup_reprompt(pending_followup_question, operator.language),
+                    llm_used,
+                )
+            await operator_repo.update_branding(
+                payload.operator_phone,
+                creative_guidance=creative_guidance,
+            )
+            operator.creative_guidance = creative_guidance
+            await audit_repo.log(
+                actor="system",
+                action="followup_creative_guidance_captured",
+                operator_phone=payload.operator_phone,
+                metadata={"wamid": payload.wamid},
+            )
+
+        next_followup = _next_followup_question(draft=current_draft, operator=operator)
+        if next_followup is not None:
+            return (
+                current_draft,
+                next_followup,
+                _followup_question_prompt(next_followup, operator.language),
+                llm_used,
+            )
+        return (
+            current_draft,
+            _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION,
+            _regenerate_again_prompt(operator.language),
+            llm_used,
+        )
+
     async def _enrich_current_draft(
         self,
         *,
@@ -1236,6 +1530,8 @@ def _to_generation_draft_input(
         business_name=operator.business_name,
         logo_url=operator.logo_url,
         brand_colors=operator.brand_colors,
+        store_type=operator.store_type,
+        creative_guidance=operator.creative_guidance,
     )
 
 
@@ -1291,13 +1587,171 @@ def _generation_completed_reply(language: str) -> str:
     return "Your ad preview is ready."
 
 
-def _missing_price_followup(language: str) -> str:
+def _next_followup_question(*, draft: AdDraft, operator: Operator) -> str | None:
+    if draft.price is None:
+        return _PENDING_FOLLOWUP_PRICE
+    if _normalize_brand_value(operator.store_type) is None:
+        return _PENDING_FOLLOWUP_STORE_TYPE
+    if _normalize_brand_value(operator.creative_guidance) is None:
+        return _PENDING_FOLLOWUP_CREATIVE_GUIDANCE
+    return None
+
+
+def _should_interrupt_pending_followup(intent: Intent) -> bool:
+    return intent in _FOLLOWUP_INTERRUPT_INTENTS
+
+
+def _followup_question_prompt(question_key: str, language: str) -> str:
+    if question_key == _PENDING_FOLLOWUP_PRICE:
+        if language.lower() == "he":
+            return "מה המחיר המדויק שתרצה להציג במודעה?"
+        return "What exact price should I display in the ad?"
+    if question_key == _PENDING_FOLLOWUP_STORE_TYPE:
+        if language.lower() == "he":
+            return "מה סוג העסק שלך? (למשל סופרמרקט, בגדים, תבלינים)"
+        return "What is your store type? (for example grocery, clothing, spices)"
+    if question_key == _PENDING_FOLLOWUP_CREATIVE_GUIDANCE:
+        if language.lower() == "he":
+            return "יש לך הנחיות כלליות לסגנון המודעות? (צבעים, טון, אווירה)"
+        return "Do you have general creative guidance? (colors, tone, style)"
+    if question_key == _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION:
+        return _regenerate_again_prompt(language)
+    return "Please provide the requested information."
+
+
+def _followup_reprompt(question_key: str, language: str) -> str:
+    if question_key == _PENDING_FOLLOWUP_PRICE:
+        if language.lower() == "he":
+            return "לא הצלחתי לזהות מחיר. מה המחיר המדויק?"
+        return "I could not detect a price. What is the exact price?"
     if language.lower() == "he":
-        return "לא זוהה מחיר. אם חשוב לך שהמחיר יבלוט, שלח לי את המחיר המדויק ואעדכן מודעה."
+        return "לא הצלחתי לזהות תשובה ברורה. " + _followup_question_prompt(question_key, language)
+    return "I could not detect a clear answer. " + _followup_question_prompt(question_key, language)
+
+
+def _regenerate_again_prompt(language: str) -> str:
+    if language.lower() == "he":
+        return "כל השאלות הושלמו. רוצה שאפעיל עכשיו יצירת מודעה נוספת? (כן/לא)"
     return (
-        "I did not detect a price. If you want the price to stand out, "
-        "send the exact price and I will update the ad."
+        "All follow-up questions are complete. Do you want me to generate another ad now? (yes/no)"
     )
+
+
+def _regenerate_again_declined_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "מעולה. כשתרצה ליצור מודעה נוספת פשוט תכתוב לי."
+    return "Great. When you want another ad, just tell me."
+
+
+def _parse_yes_no_answer(*, message_text: str, language: str) -> bool | None:
+    normalized = _normalize_brand_value(message_text)
+    if normalized is None:
+        return None
+
+    yes_values = {
+        "yes",
+        "y",
+        "כן",
+        "בטח",
+        "יאללה",
+        "sure",
+        "ok",
+        "okay",
+    }
+    no_values = {
+        "no",
+        "n",
+        "לא",
+        "לא תודה",
+        "not now",
+        "cancel",
+    }
+
+    if normalized in yes_values:
+        return True
+    if normalized in no_values:
+        return False
+
+    if language.lower() == "he":
+        if normalized.startswith("כן"):
+            return True
+        if normalized.startswith("לא"):
+            return False
+    else:
+        if normalized.startswith("yes"):
+            return True
+        if normalized.startswith("no"):
+            return False
+    return None
+
+
+def _parse_operator_clear_request(message_text: str) -> list[str]:
+    normalized = _normalize_brand_value(message_text)
+    if normalized is None:
+        return []
+
+    clear_keywords = {
+        "מחק",
+        "תמחק",
+        "למחוק",
+        "נקה",
+        "תנקה",
+        "clear",
+        "remove",
+        "delete",
+        "reset",
+    }
+    if not any(keyword in normalized for keyword in clear_keywords):
+        return []
+
+    matched: set[str] = set()
+    if any(token in normalized for token in {"מיתוג", "branding"}):
+        matched.update(
+            {"business_name", "logo_url", "brand_colors", "store_type", "creative_guidance"}
+        )
+    if any(token in normalized for token in {"לוגו", "logo"}):
+        matched.add("logo_url")
+    if any(token in normalized for token in {"שם העסק", "business name", "business"}):
+        matched.add("business_name")
+    if any(token in normalized for token in {"צבע", "צבעים", "colors", "brand colors"}):
+        matched.add("brand_colors")
+    if any(token in normalized for token in {"סוג העסק", "סוג חנות", "store type"}):
+        matched.add("store_type")
+    if any(
+        token in normalized
+        for token in {
+            "הנחיה",
+            "הנחיות",
+            "guidance",
+            "style",
+            "סגנון",
+        }
+    ):
+        matched.add("creative_guidance")
+    return sorted(matched)
+
+
+def _branding_cleared_reply(*, language: str, cleared_fields: list[str]) -> str:
+    if language.lower() == "he":
+        labels = {
+            "business_name": "שם עסק",
+            "logo_url": "לוגו",
+            "brand_colors": "צבעי מותג",
+            "store_type": "סוג עסק",
+            "creative_guidance": "הנחיות כלליות",
+        }
+        names = ", ".join(labels.get(field, field) for field in cleared_fields)
+        return f"ניקיתי את השדות הבאים: {names}."
+
+    labels = {
+        "business_name": "business name",
+        "logo_url": "logo",
+        "brand_colors": "brand colors",
+        "store_type": "store type",
+        "creative_guidance": "creative guidance",
+    }
+    names = ", ".join(labels.get(field, field) for field in cleared_fields)
+    return f"Cleared the following fields: {names}."
 
 
 def _missing_product_name_reply(language: str) -> str:
@@ -1340,10 +1794,13 @@ def _branding_updated_reply(language: str) -> str:
 
 def _branding_not_detected_reply(language: str) -> str:
     if language.lower() == "he":
-        return "לא הצלחתי לזהות פרטי מיתוג בהודעה שלך. נסה לשלוח את שם העסק והצבעים שלך."
+        return (
+            "לא הצלחתי לזהות פרטי מיתוג או העדפות כלליות בהודעה שלך. "
+            "נסה לשלוח שם עסק, צבעים, סוג חנות או הנחיות כלליות."
+        )
     return (
-        "I could not detect branding details in your message. "
-        "Try sending your business name and brand colors."
+        "I could not detect branding or general preference details in your message. "
+        "Try sending your business name, brand colors, store type, or creative guidance."
     )
 
 

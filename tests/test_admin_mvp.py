@@ -44,9 +44,9 @@ async def admin_client(admin_app) -> AsyncIterator[AsyncClient]:
         yield client
 
 
-async def _seed_operator(app, *, phone: str) -> None:
+async def _seed_operator(app, *, phone: str, **fields) -> None:
     async with session_scope(app.state.session_factory) as session:
-        await OperatorRepository(session).create(phone=phone, active=True)
+        await OperatorRepository(session).create(phone=phone, active=True, **fields)
 
 
 async def test_admin_endpoints_require_basic_auth(admin_client: AsyncClient) -> None:
@@ -159,3 +159,38 @@ async def test_admin_home_renders_form(admin_client: AsyncClient) -> None:
     assert response.status_code == 200
     assert "Operator CMS Mapping" in response.text
     assert "/admin/operators/connect" in response.text
+    assert "Operator Profile Lookup" in response.text
+
+
+async def test_admin_lookup_returns_operator_system_memory_fields(
+    admin_app,
+    admin_client: AsyncClient,
+) -> None:
+    await _seed_operator(
+        admin_app,
+        phone="+972500000903",
+        language="en",
+        currency="USD",
+        business_name="My Grocery",
+        logo_url="https://example.com/logo.png",
+        brand_colors=["#112233", "#AABBCC"],
+        store_type="grocery",
+        creative_guidance="Clean layout with clear pricing",
+    )
+    headers = _basic_auth_header("admin", "secret")
+
+    response = await admin_client.get(
+        "/admin/operators/by-phone/+972500000903",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["phone"] == "+972500000903"
+    assert payload["language"] == "en"
+    assert payload["currency"] == "USD"
+    assert payload["business_name"] == "My Grocery"
+    assert payload["logo_url"] == "https://example.com/logo.png"
+    assert payload["brand_colors"] == ["#112233", "#AABBCC"]
+    assert payload["store_type"] == "grocery"
+    assert payload["creative_guidance"] == "Clean layout with clear pricing"
