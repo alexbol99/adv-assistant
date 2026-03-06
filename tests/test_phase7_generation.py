@@ -608,8 +608,7 @@ async def test_gemini_service_downloads_file_data_output_when_inline_missing() -
     result = await service.wait_for_completion(job_id=submission.job_id)
 
     assert (
-        observed["generate_path"]
-        == "/v1beta/models/gemini-3.1-flash-image-preview:generateContent"
+        observed["generate_path"] == "/v1beta/models/gemini-3.1-flash-image-preview:generateContent"
     )
     assert observed["file_path"] == "/generated.png"
     assert media_store.upload_calls[0][0] == b"png-from-file-uri"

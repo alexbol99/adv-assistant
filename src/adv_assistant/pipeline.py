@@ -338,9 +338,7 @@ class InboundTaskProcessor:
                             pending_followup_question = None
                             reply_text = _regenerate_again_declined_reply(operator.language)
                             if current_draft.rendered_image_url is not None:
-                                publish_buttons_prompt = _publish_buttons_prompt(
-                                    operator.language
-                                )
+                                publish_buttons_prompt = _publish_buttons_prompt(operator.language)
                         elif yes_no is None:
                             regenerate_confirmation_unresolved = True
                         else:
@@ -348,10 +346,7 @@ class InboundTaskProcessor:
                             pending_followup_question = None
                             forced_intent = Intent.REGENERATE_WITH_REFERENCE
 
-                    if (
-                        reply_text is None
-                        and pending_followup_question in _PENDING_FOLLOWUP_KEYS
-                    ):
+                    if reply_text is None and pending_followup_question in _PENDING_FOLLOWUP_KEYS:
                         classification = await self._llm_gateway.classify_intent(
                             message_text=sanitized_text,
                             language=operator.language,
@@ -515,9 +510,7 @@ class InboundTaskProcessor:
                                     operator_phone=payload.operator_phone,
                                     metadata={
                                         "wamid": payload.wamid,
-                                        "updated_fields": sorted(
-                                            branding_update_fields.keys()
-                                        ),
+                                        "updated_fields": sorted(branding_update_fields.keys()),
                                         "source": "followup_regenerate_confirmation",
                                     },
                                 )
@@ -709,10 +702,7 @@ class InboundTaskProcessor:
                                                     next_followup,
                                                     operator.language,
                                                 )
-                                                reply_text = (
-                                                    f"{reply_text}\n\n"
-                                                    f"{followup_prompt}"
-                                                )
+                                                reply_text = f"{reply_text}\n\n{followup_prompt}"
                                             elif not followup_regen_requested:
                                                 pending_followup_question = (
                                                     _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION
@@ -1636,18 +1626,14 @@ def _followup_reprompt(question_key: str, language: str) -> str:
         return "I could not detect a price. What is the exact price?"
     if language.lower() == "he":
         return "לא הצלחתי לזהות תשובה ברורה. " + _followup_question_prompt(question_key, language)
-    return (
-        "I could not detect a clear answer. "
-        + _followup_question_prompt(question_key, language)
-    )
+    return "I could not detect a clear answer. " + _followup_question_prompt(question_key, language)
 
 
 def _regenerate_again_prompt(language: str) -> str:
     if language.lower() == "he":
         return "כל השאלות הושלמו. רוצה שאפעיל עכשיו יצירת מודעה נוספת? (כן/לא)"
     return (
-        "All follow-up questions are complete. "
-        "Do you want me to generate another ad now? (yes/no)"
+        "All follow-up questions are complete. Do you want me to generate another ad now? (yes/no)"
     )
 
 
