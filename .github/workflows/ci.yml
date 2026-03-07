@@ -129,7 +129,7 @@ jobs:
   deploy-staging:
     runs-on: ubuntu-latest
     needs: publish-image
-    if: github.ref == 'refs/heads/main' && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.STAGING_GCP_REGION != '' && vars.STAGING_CLOUD_RUN_SERVICE != ''
+    if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.STAGING_GCP_REGION != '' && vars.STAGING_CLOUD_RUN_SERVICE != ''
     steps:
       - uses: actions/checkout@v4
 
@@ -157,6 +157,7 @@ jobs:
           fi
 
           gcloud run deploy "$STAGING_CLOUD_RUN_SERVICE" \
+            --quiet \
             --project "$STAGING_GCP_PROJECT_ID" \
             --region "$STAGING_GCP_REGION" \
             --image "$IMAGE_REF" \
@@ -193,6 +194,7 @@ jobs:
           fi
 
           gcloud run deploy "$PROD_CLOUD_RUN_SERVICE" \
+            --quiet \
             --project "$PROD_GCP_PROJECT_ID" \
             --region "$PROD_GCP_REGION" \
             --image "$IMAGE_REF" \

@@ -148,6 +148,7 @@ Required repository variables for `main` image publish:
 - `PROD_GCP_PROJECT_ID`
 
 Required repository variables for staging deploy:
+- `STAGING_DEPLOY_ENABLED=true` (set to `false` to skip staging deploy while infra is not ready)
 - `STAGING_GCP_REGION`
 - `STAGING_CLOUD_RUN_SERVICE`
 - optional: `STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true`
