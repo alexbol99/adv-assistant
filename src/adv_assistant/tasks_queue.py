@@ -18,6 +18,11 @@ class TaskEnqueuer(Protocol):
     async def enqueue_inbound(self, payload: InboundTaskPayload) -> None: ...
 
 
+class DisabledTaskEnqueuer:
+    async def enqueue_inbound(self, payload: InboundTaskPayload) -> None:
+        raise RuntimeError("Task enqueuer is disabled for this service role")
+
+
 class InlineTaskEnqueuer:
     def __init__(
         self,
