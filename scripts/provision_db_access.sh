@@ -11,9 +11,10 @@ set -euo pipefail
 #
 # Required:
 #   CLOUD_SQL_INSTANCE
+#   GCP_PROJECT_ID
 #
 # Optional (defaults shown):
-#   GCP_PROJECT_ID=ads-assistant-488908
+#   PROVISION_TARGETS=staging,production
 #   DB_STAGING=adv_assistant_staging
 #   DB_PROD=adv_assistant_prod
 #   APP_USER_STAGING=adv_assistant_app_staging
@@ -27,8 +28,10 @@ set -euo pipefail
 #   POSTGRES_ADMIN_PASS=<optional plaintext override>
 #   SQL_PROXY_PORT=9543
 
-GCP_PROJECT_ID="${GCP_PROJECT_ID:-ads-assistant-488908}"
+GCP_PROJECT_ID="${GCP_PROJECT_ID:-}"
 CLOUD_SQL_INSTANCE="${CLOUD_SQL_INSTANCE:-}"
+PROVISION_TARGETS_RAW="${PROVISION_TARGETS:-staging,production}"
+PROVISION_TARGETS="$(echo "$PROVISION_TARGETS_RAW" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
 
 DB_STAGING="${DB_STAGING:-adv_assistant_staging}"
 DB_PROD="${DB_PROD:-adv_assistant_prod}"
@@ -51,10 +54,42 @@ POSTGRES_ADMIN_PASS="${POSTGRES_ADMIN_PASS:-}"
 SQL_PROXY_PORT="${SQL_PROXY_PORT:-9543}"
 CONNECTION_NAME=""
 SQL_PROXY_PID=""
+PROVISION_STAGING="false"
+PROVISION_PROD="false"
 
 if [[ -z "$CLOUD_SQL_INSTANCE" ]]; then
   echo "CLOUD_SQL_INSTANCE is required."
-  echo "Example: CLOUD_SQL_INSTANCE=adv-assistant-pg scripts/provision_db_access.sh"
+  echo "Example: GCP_PROJECT_ID=adv-assistant-staging-488908 CLOUD_SQL_INSTANCE=adv-assistant-staging-pg scripts/provision_db_access.sh"
+  exit 1
+fi
+
+if [[ -z "$GCP_PROJECT_ID" ]]; then
+  echo "GCP_PROJECT_ID is required."
+  echo "Example: GCP_PROJECT_ID=adv-assistant-staging-488908 CLOUD_SQL_INSTANCE=adv-assistant-staging-pg scripts/provision_db_access.sh"
+  exit 1
+fi
+
+IFS=',' read -r -a TARGET_ITEMS <<< "$PROVISION_TARGETS"
+for target in "${TARGET_ITEMS[@]}"; do
+  case "$target" in
+    staging)
+      PROVISION_STAGING="true"
+      ;;
+    production|prod)
+      PROVISION_PROD="true"
+      ;;
+    "")
+      ;;
+    *)
+      echo "Invalid PROVISION_TARGETS value: '$target'"
+      echo "Allowed values: staging, production"
+      exit 1
+      ;;
+  esac
+done
+
+if [[ "$PROVISION_STAGING" != "true" && "$PROVISION_PROD" != "true" ]]; then
+  echo "PROVISION_TARGETS must include at least one target: staging or production."
   exit 1
 fi
 
@@ -94,6 +129,7 @@ validate_sql_identifier "$MIGRATOR_USER_PROD" "MIGRATOR_USER_PROD"
 
 echo "Using GCP project: $GCP_PROJECT_ID"
 echo "Using Cloud SQL instance: $CLOUD_SQL_INSTANCE"
+echo "Provision targets: $PROVISION_TARGETS"
 
 gcloud services enable sqladmin.googleapis.com secretmanager.googleapis.com \
   --project "$GCP_PROJECT_ID" >/dev/null
@@ -284,8 +320,9 @@ SQL
 print_manual_grants() {
   echo
   echo "Manual SQL grant/hardening commands:"
-  echo "Staging grants:"
-  cat <<EOF
+  if [[ "$PROVISION_STAGING" == "true" ]]; then
+    echo "Staging grants:"
+    cat <<EOF
 gcloud sql connect "$CLOUD_SQL_INSTANCE" --project "$GCP_PROJECT_ID" --user=postgres --database="$DB_STAGING" <<'SQL'
 REVOKE cloudsqlsuperuser FROM $APP_USER_STAGING;
 REVOKE cloudsqlsuperuser FROM $MIGRATOR_USER_STAGING;
@@ -316,10 +353,12 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO $MIGRATOR_USER_STAGING;
 SQL
 EOF
+  fi
 
-  echo
-  echo "Production grants:"
-  cat <<EOF
+  if [[ "$PROVISION_PROD" == "true" ]]; then
+    echo
+    echo "Production grants:"
+    cat <<EOF
 gcloud sql connect "$CLOUD_SQL_INSTANCE" --project "$GCP_PROJECT_ID" --user=postgres --database="$DB_PROD" <<'SQL'
 REVOKE cloudsqlsuperuser FROM $APP_USER_PROD;
 REVOKE cloudsqlsuperuser FROM $MIGRATOR_USER_PROD;
@@ -350,20 +389,31 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public
   GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO $MIGRATOR_USER_PROD;
 SQL
 EOF
+  fi
 }
 
-create_database_if_missing "$DB_STAGING"
-create_database_if_missing "$DB_PROD"
+if [[ "$PROVISION_STAGING" == "true" ]]; then
+  create_database_if_missing "$DB_STAGING"
+fi
+
+if [[ "$PROVISION_PROD" == "true" ]]; then
+  create_database_if_missing "$DB_PROD"
+fi
 
 APP_PASS_STAGING=""
 APP_PASS_PROD=""
 MIGRATOR_PASS_STAGING=""
 MIGRATOR_PASS_PROD=""
 
-ensure_user_and_secret "$APP_USER_STAGING" "$APP_PASS_SECRET_STAGING" APP_PASS_STAGING
-ensure_user_and_secret "$APP_USER_PROD" "$APP_PASS_SECRET_PROD" APP_PASS_PROD
-ensure_user_and_secret "$MIGRATOR_USER_STAGING" "$MIGRATOR_PASS_SECRET_STAGING" MIGRATOR_PASS_STAGING
-ensure_user_and_secret "$MIGRATOR_USER_PROD" "$MIGRATOR_PASS_SECRET_PROD" MIGRATOR_PASS_PROD
+if [[ "$PROVISION_STAGING" == "true" ]]; then
+  ensure_user_and_secret "$APP_USER_STAGING" "$APP_PASS_SECRET_STAGING" APP_PASS_STAGING
+  ensure_user_and_secret "$MIGRATOR_USER_STAGING" "$MIGRATOR_PASS_SECRET_STAGING" MIGRATOR_PASS_STAGING
+fi
+
+if [[ "$PROVISION_PROD" == "true" ]]; then
+  ensure_user_and_secret "$APP_USER_PROD" "$APP_PASS_SECRET_PROD" APP_PASS_PROD
+  ensure_user_and_secret "$MIGRATOR_USER_PROD" "$MIGRATOR_PASS_SECRET_PROD" MIGRATOR_PASS_PROD
+fi
 
 CONNECTION_NAME="$(gcloud sql instances describe "$CLOUD_SQL_INSTANCE" \
   --project "$GCP_PROJECT_ID" \
@@ -380,9 +430,13 @@ if [[ "$APPLY_SQL_GRANTS" == "true" ]]; then
       print_manual_grants
     else
       echo "Applying SQL grants and least-privilege hardening..."
-      apply_db_grants "$DB_STAGING" "$APP_USER_STAGING" "$MIGRATOR_USER_STAGING"
-      apply_db_grants "$DB_PROD" "$APP_USER_PROD" "$MIGRATOR_USER_PROD"
-      echo "Applied SQL grants and hardening for staging + production."
+      if [[ "$PROVISION_STAGING" == "true" ]]; then
+        apply_db_grants "$DB_STAGING" "$APP_USER_STAGING" "$MIGRATOR_USER_STAGING"
+      fi
+      if [[ "$PROVISION_PROD" == "true" ]]; then
+        apply_db_grants "$DB_PROD" "$APP_USER_PROD" "$MIGRATOR_USER_PROD"
+      fi
+      echo "Applied SQL grants and hardening for selected targets."
     fi
   else
     echo "Skipping automatic SQL grants: postgres admin password unavailable."
@@ -402,5 +456,13 @@ echo
 echo "Cloud SQL connection name: $CONNECTION_NAME"
 echo
 echo "Cloud Run env var examples (password from Secret Manager):"
-echo "  DATABASE_URL=postgresql+asyncpg://<app-user>:<password>@/$DB_STAGING?host=/cloudsql/$CONNECTION_NAME"
-echo "  ALEMBIC_DATABASE_URL=postgresql+psycopg://<migrator-user>:<password>@/$DB_STAGING?host=/cloudsql/$CONNECTION_NAME"
+if [[ "$PROVISION_STAGING" == "true" ]]; then
+  echo "  [staging]"
+  echo "  DATABASE_URL=postgresql+asyncpg://<app-user>:<password>@/$DB_STAGING?host=/cloudsql/$CONNECTION_NAME"
+  echo "  ALEMBIC_DATABASE_URL=postgresql+psycopg://<migrator-user>:<password>@/$DB_STAGING?host=/cloudsql/$CONNECTION_NAME"
+fi
+if [[ "$PROVISION_PROD" == "true" ]]; then
+  echo "  [production]"
+  echo "  DATABASE_URL=postgresql+asyncpg://<app-user>:<password>@/$DB_PROD?host=/cloudsql/$CONNECTION_NAME"
+  echo "  ALEMBIC_DATABASE_URL=postgresql+psycopg://<migrator-user>:<password>@/$DB_PROD?host=/cloudsql/$CONNECTION_NAME"
+fi

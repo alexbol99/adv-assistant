@@ -12,6 +12,7 @@
 | [Workplan](docs/workplan.md) | Step-by-step implementation phases (0–11) for building the application. |
 | [MVP Priority Plan](docs/mvp-priority-plan-2026-03-05.md) | Current MVP stage order, locked decisions, and acceptance tests. |
 | [Phase 5 Compliance Checklist](docs/phase5-compliance-checklist.md) | Pre-production legal/compliance checklist for enrichment sources and data handling. |
+| [DB Migration Discipline](docs/database-migration-discipline.md) | Expand/contract migration policy and rollout sequence for safe staged deployments. |
 
 ## Quick Summary
 
@@ -138,7 +139,9 @@ The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 - on `main`, one Docker image build is pushed to Artifact Registry in both staging and prod projects
 - on release tags (`v*`), one Docker image build is pushed to Artifact Registry in both staging and prod projects
 - image digest is resolved and saved as CI artifact (`image-digests`)
+- optional staging migration job from `main` runs Alembic with a dedicated migrator DB user before deploy
 - optional staging deploy from `main` uses immutable image digest (`--image ...@sha256:...`) and deploys worker first, then webhook
+- optional production migration job from release tag (`v*`) runs Alembic with a dedicated migrator DB user before deploy
 - optional production deploy from release tag (`v*`) uses immutable image digest (`--image ...@sha256:...`) and deploys worker first, then webhook
 
 Required repository variables for `main` image publish:
@@ -157,6 +160,12 @@ Required repository variables for staging deploy:
 - `STAGING_TASKS_SERVICE_ACCOUNT_EMAIL`
 - optional: `STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true` (applies to webhook service only)
 
+Required repository variables for staging migration job:
+- `STAGING_CLOUD_SQL_CONNECTION_NAME` (format: `project:region:instance`)
+- `STAGING_DB_NAME`
+- `STAGING_DB_MIGRATOR_USER`
+- `STAGING_DB_MIGRATOR_PASS_SECRET` (Secret Manager secret name in staging project)
+
 Required repository variables for production deploy:
 - `PROD_GCP_REGION`
 - `PROD_CLOUD_RUN_WORKER_SERVICE`
@@ -165,6 +174,12 @@ Required repository variables for production deploy:
 - `PROD_TASKS_QUEUE`
 - `PROD_TASKS_SERVICE_ACCOUNT_EMAIL`
 - optional: `PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true` (applies to webhook service only)
+
+Required repository variables for production migration job:
+- `PROD_CLOUD_SQL_CONNECTION_NAME` (format: `project:region:instance`)
+- `PROD_DB_NAME`
+- `PROD_DB_MIGRATOR_USER`
+- `PROD_DB_MIGRATOR_PASS_SECRET` (Secret Manager secret name in production project)
 
 Required repository secret:
 - `GCP_SA_KEY`
@@ -184,15 +199,21 @@ Use `scripts/provision_db_access.sh` to provision:
 - Secret Manager password entries
 - SQL grants and least-privilege hardening (automatic when admin DB password is available)
 
-Example:
-- `CLOUD_SQL_INSTANCE=adv-assistant-pg scripts/provision_db_access.sh`
+Example (staging-only target in staging project/instance):
+- `GCP_PROJECT_ID=adv-assistant-staging-488908 CLOUD_SQL_INSTANCE=adv-assistant-staging-pg PROVISION_TARGETS=staging scripts/provision_db_access.sh`
+
+Example (production-only target in production project/instance):
+- `GCP_PROJECT_ID=adv-assistant-prod-488908 CLOUD_SQL_INSTANCE=adv-assistant-prod-pg PROVISION_TARGETS=production scripts/provision_db_access.sh`
 
 Recommended first run (bootstraps postgres admin password into Secret Manager and applies grants automatically):
-- `BOOTSTRAP_POSTGRES_ADMIN_PASSWORD=true CLOUD_SQL_INSTANCE=adv-assistant-pg scripts/provision_db_access.sh`
+- `BOOTSTRAP_POSTGRES_ADMIN_PASSWORD=true GCP_PROJECT_ID=adv-assistant-staging-488908 CLOUD_SQL_INSTANCE=adv-assistant-staging-pg PROVISION_TARGETS=staging scripts/provision_db_access.sh`
 
 Defaults:
-- `GCP_PROJECT_ID=ads-assistant-488908`
+- `PROVISION_TARGETS=staging,production` (set explicitly to `staging` or `production` for isolated projects/instances)
 - existing user passwords are not rotated unless `ROTATE_EXISTING_PASSWORDS=true`
 - automatic SQL grant application is enabled (`APPLY_SQL_GRANTS=true`)
 
 If automatic grant application is unavailable (missing `psql`, `cloud-sql-proxy`, or admin password), the script prints manual SQL commands.
+
+Run migrations explicitly (same approach as CI migration jobs):
+- `GCP_PROJECT_ID=adv-assistant-staging-488908 CLOUD_SQL_CONNECTION_NAME=adv-assistant-staging-488908:me-west1:adv-assistant-staging-pg DB_NAME=adv_assistant_staging DB_MIGRATOR_USER=adv_assistant_migrator_staging DB_MIGRATOR_PASS_SECRET=DB_MIGRATOR_PASS_STAGING scripts/run_cloudsql_migration.sh`
