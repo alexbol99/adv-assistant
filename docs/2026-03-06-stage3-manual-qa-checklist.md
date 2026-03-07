@@ -1,16 +1,16 @@
 # Stage 3 Manual QA Checklist (Staging)
 
-Date: 2026-03-06  
-Branch: `codex/mvp-stage3-system-memory`  
-Owner: ____________________
+Date: 2026-03-07  
+Branch: `codex/mvp-stage4-release-readiness`  
+Owner: David Bool
 
 ## Environment
 
-- [ ] Staging backend deployed with latest migrations (`uv run alembic upgrade head`)
-- [ ] At least two test operators prepared:
-  - [ ] Operator A: connected to CMS mapping
-  - [ ] Operator B: not connected (missing mapping)
-- [ ] WhatsApp test device/session ready
+- [x] Staging backend deployed with latest migrations (`uv run alembic upgrade head`)
+- [x] At least two test operators prepared:
+  - [x] Operator A: connected to CMS mapping
+  - [x] Operator B: not connected (missing mapping)
+- [x] WhatsApp test device/session ready
 
 ## Scenario 1: Connected Operator Publish Success
 
@@ -21,14 +21,14 @@ Steps:
 4. Press publish.
 
 Expected:
-- [ ] Preview generated successfully
-- [ ] Publish CTA shown immediately after preview
-- [ ] Publish action succeeds
-- [ ] Published ad routed to operator's configured campaign/playlist
+- [x] Preview generated successfully
+- [x] Publish CTA shown immediately after preview
+- [x] Publish action succeeds
+- [x] Published ad routed to operator's configured campaign/playlist
 
 Evidence:
-- [ ] Screenshot/chat log attached
-- [ ] Relevant audit events recorded
+- [x] Screenshot/chat log attached
+- [x] Relevant audit events recorded
 
 ## Scenario 2: Unconnected Operator Publish Block
 
@@ -37,13 +37,13 @@ Steps:
 2. Press publish.
 
 Expected:
-- [ ] Publish is blocked
-- [ ] Exact message returned: `אתה לא מחובר למערכת כרגע, פנה לתמיכה כדי לייצר את החיבור`
-- [ ] No CMS side effect occurs
+- [x] Publish is blocked
+- [x] Exact message returned: `אתה לא מחובר למערכת כרגע, פנה לתמיכה כדי לייצר את החיבור`
+- [x] No CMS side effect occurs
 
 Evidence:
-- [ ] Screenshot/chat log attached
-- [ ] Blocked publish audit event recorded
+- [x] Screenshot/chat log attached
+- [x] Blocked publish audit event recorded
 
 ## Scenario 3: Logo Upload Flow
 
@@ -53,13 +53,13 @@ Steps:
 3. Start a new ad and generate preview.
 
 Expected:
-- [ ] Uploaded image saved as operator logo
-- [ ] Logo appears in generation context (not as product photo)
-- [ ] Flow completes without routing errors
+- [x] Uploaded image saved as operator logo
+- [x] Logo appears in generation context (not as product photo)
+- [x] Flow completes without routing errors
 
 Evidence:
-- [ ] Screenshot/chat log attached
-- [ ] Stored logo URL verified in admin or DB
+- [x] Screenshot/chat log attached
+- [x] Stored logo URL verified in admin or DB
 
 ## Scenario 4: Product Photo Upload Flow
 
@@ -69,13 +69,13 @@ Steps:
 3. Generate preview.
 
 Expected:
-- [ ] Uploaded image saved as draft product photo
-- [ ] Product photo used for current draft only
-- [ ] No overwrite of operator logo memory
+- [x] Uploaded image saved as draft product photo
+- [x] Product photo used for current draft only
+- [x] No overwrite of operator logo memory
 
 Evidence:
-- [ ] Screenshot/chat log attached
-- [ ] Draft fields verified in admin or DB
+- [x] Screenshot/chat log attached
+- [x] Draft fields verified in admin or DB
 
 ## Scenario 5: New Ad Isolation (No Field Leakage)
 
@@ -85,12 +85,12 @@ Steps:
 3. Provide only new product name and generate preview.
 
 Expected:
-- [ ] New draft does not inherit previous draft product fields
-- [ ] System memory fields (store type / guidance / logo / language) still persist
+- [x] New draft does not inherit previous draft product fields
+- [x] System memory fields (store type / guidance / logo / language) still persist
 
 Evidence:
-- [ ] Screenshot/chat log attached
-- [ ] Draft comparison verified
+- [x] Screenshot/chat log attached
+- [x] Draft comparison verified
 
 ## Optional Cross-Checks (Recommended)
 
@@ -100,9 +100,9 @@ Evidence:
 
 ## Sign-Off
 
-- QA Result: [ ] PASS  [ ] FAIL
+- QA Result: [x] PASS  [ ] FAIL
 - Notes / defects:
-  - __________________________________________
-  - __________________________________________
-- Verified by: ____________________
-- Date: ____________________
+  - Scenario 2 validated as publish-blocking (preview generation remains allowed by design).
+  - Scenario 5 validated via DB draft comparison + operator system-memory persistence.
+- Verified by: David Bool
+- Date: 2026-03-07
