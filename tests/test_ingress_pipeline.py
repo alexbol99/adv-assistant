@@ -250,6 +250,36 @@ async def test_webhook_role_disables_task_endpoint(tmp_path: Path) -> None:
         await app.router.shutdown()
 
 
+async def test_webhook_role_disables_task_endpoint_before_body_validation(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "webhook-role-invalid-body.db"
+    settings = Settings(
+        app_name="adv-assistant-webhook-test",
+        database_url=f"sqlite+aiosqlite:///{db_path}",
+        app_service_role="webhook",
+        tasks_mode="inline",
+    )
+    app = create_app(settings)
+    async with app.state.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await app.router.startup()
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/tasks/process-message",
+                content="{invalid-json",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer test",
+                },
+            )
+        assert response.status_code == 404
+    finally:
+        await app.router.shutdown()
+
+
 async def test_webhook_rejects_invalid_signature(phase2_client: AsyncClient) -> None:
     payload = _build_webhook_payload(
         from_phone="972526508861",

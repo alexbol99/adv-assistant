@@ -152,12 +152,18 @@ Required repository variables for staging deploy:
 - `STAGING_GCP_REGION`
 - `STAGING_CLOUD_RUN_WORKER_SERVICE`
 - `STAGING_CLOUD_RUN_WEBHOOK_SERVICE`
+- `STAGING_TASKS_REGION`
+- `STAGING_TASKS_QUEUE`
+- `STAGING_TASKS_SERVICE_ACCOUNT_EMAIL`
 - optional: `STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true` (applies to webhook service only)
 
 Required repository variables for production deploy:
 - `PROD_GCP_REGION`
 - `PROD_CLOUD_RUN_WORKER_SERVICE`
 - `PROD_CLOUD_RUN_WEBHOOK_SERVICE`
+- `PROD_TASKS_REGION`
+- `PROD_TASKS_QUEUE`
+- `PROD_TASKS_SERVICE_ACCOUNT_EMAIL`
 - optional: `PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true` (applies to webhook service only)
 
 Required repository secret:
