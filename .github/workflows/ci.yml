@@ -186,6 +186,7 @@ jobs:
           STAGING_TASKS_REGION: ${{ vars.STAGING_TASKS_REGION }}
           STAGING_TASKS_QUEUE: ${{ vars.STAGING_TASKS_QUEUE }}
           STAGING_TASKS_SERVICE_ACCOUNT_EMAIL: ${{ vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL }}
+          STAGING_CLOUD_SQL_CONNECTION_NAME: ${{ vars.STAGING_CLOUD_SQL_CONNECTION_NAME }}
           STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED: ${{ vars.STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED }}
           STAGING_SECRET_DATABASE_URL: ${{ vars.STAGING_SECRET_DATABASE_URL }}
           STAGING_SECRET_VERIFY_TOKEN: ${{ vars.STAGING_SECRET_VERIFY_TOKEN }}
@@ -247,6 +248,7 @@ jobs:
 
           WORKER_SECRET_BINDINGS="$(build_secret_bindings worker)"
           WEBHOOK_SECRET_BINDINGS="$(build_secret_bindings webhook)"
+          CLOUDSQL_FLAG="--add-cloudsql-instances=$STAGING_CLOUD_SQL_CONNECTION_NAME"
 
           WORKER_BASE_URL="$(gcloud run services describe "$STAGING_CLOUD_RUN_WORKER_SERVICE" \
             --project "$STAGING_GCP_PROJECT_ID" \
@@ -259,6 +261,7 @@ jobs:
               --project "$STAGING_GCP_PROJECT_ID" \
               --region "$STAGING_GCP_REGION" \
               --image "$IMAGE_REF" \
+              "$CLOUDSQL_FLAG" \
               --no-allow-unauthenticated \
               --update-env-vars "APP_SERVICE_ROLE=worker,TASKS_MODE=cloud"
             )
@@ -280,6 +283,7 @@ jobs:
             --project "$STAGING_GCP_PROJECT_ID" \
             --region "$STAGING_GCP_REGION" \
             --image "$IMAGE_REF" \
+            "$CLOUDSQL_FLAG" \
             --no-allow-unauthenticated \
             --update-env-vars "APP_SERVICE_ROLE=worker,TASKS_MODE=cloud,TASKS_HANDLER_URL=$TASKS_HANDLER_URL,TASKS_OIDC_AUDIENCE=$TASKS_HANDLER_URL,TASKS_ALLOWED_SERVICE_ACCOUNT_EMAIL=$STAGING_TASKS_SERVICE_ACCOUNT_EMAIL"
           )
@@ -298,6 +302,7 @@ jobs:
             --project "$STAGING_GCP_PROJECT_ID" \
             --region "$STAGING_GCP_REGION" \
             --image "$IMAGE_REF" \
+            "$CLOUDSQL_FLAG" \
             --update-env-vars "APP_SERVICE_ROLE=webhook,TASKS_MODE=cloud,GCP_PROJECT_ID=$STAGING_GCP_PROJECT_ID,TASKS_REGION=$STAGING_TASKS_REGION,TASKS_QUEUE=$STAGING_TASKS_QUEUE,TASKS_SERVICE_ACCOUNT_EMAIL=$STAGING_TASKS_SERVICE_ACCOUNT_EMAIL,TASKS_HANDLER_URL=$TASKS_HANDLER_URL,TASKS_OIDC_AUDIENCE=$TASKS_HANDLER_URL" \
           )
           if [ -n "$WEBHOOK_SECRET_BINDINGS" ]; then
@@ -368,6 +373,7 @@ jobs:
           PROD_TASKS_REGION: ${{ vars.PROD_TASKS_REGION }}
           PROD_TASKS_QUEUE: ${{ vars.PROD_TASKS_QUEUE }}
           PROD_TASKS_SERVICE_ACCOUNT_EMAIL: ${{ vars.PROD_TASKS_SERVICE_ACCOUNT_EMAIL }}
+          PROD_CLOUD_SQL_CONNECTION_NAME: ${{ vars.PROD_CLOUD_SQL_CONNECTION_NAME }}
           PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED: ${{ vars.PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED }}
           PROD_SECRET_DATABASE_URL: ${{ vars.PROD_SECRET_DATABASE_URL }}
           PROD_SECRET_VERIFY_TOKEN: ${{ vars.PROD_SECRET_VERIFY_TOKEN }}
@@ -429,6 +435,7 @@ jobs:
 
           WORKER_SECRET_BINDINGS="$(build_secret_bindings worker)"
           WEBHOOK_SECRET_BINDINGS="$(build_secret_bindings webhook)"
+          CLOUDSQL_FLAG="--add-cloudsql-instances=$PROD_CLOUD_SQL_CONNECTION_NAME"
 
           WORKER_BASE_URL="$(gcloud run services describe "$PROD_CLOUD_RUN_WORKER_SERVICE" \
             --project "$PROD_GCP_PROJECT_ID" \
@@ -441,6 +448,7 @@ jobs:
               --project "$PROD_GCP_PROJECT_ID" \
               --region "$PROD_GCP_REGION" \
               --image "$IMAGE_REF" \
+              "$CLOUDSQL_FLAG" \
               --no-allow-unauthenticated \
               --update-env-vars "APP_SERVICE_ROLE=worker,TASKS_MODE=cloud"
             )
@@ -462,6 +470,7 @@ jobs:
             --project "$PROD_GCP_PROJECT_ID" \
             --region "$PROD_GCP_REGION" \
             --image "$IMAGE_REF" \
+            "$CLOUDSQL_FLAG" \
             --no-allow-unauthenticated \
             --update-env-vars "APP_SERVICE_ROLE=worker,TASKS_MODE=cloud,TASKS_HANDLER_URL=$TASKS_HANDLER_URL,TASKS_OIDC_AUDIENCE=$TASKS_HANDLER_URL,TASKS_ALLOWED_SERVICE_ACCOUNT_EMAIL=$PROD_TASKS_SERVICE_ACCOUNT_EMAIL"
           )
@@ -480,6 +489,7 @@ jobs:
             --project "$PROD_GCP_PROJECT_ID" \
             --region "$PROD_GCP_REGION" \
             --image "$IMAGE_REF" \
+            "$CLOUDSQL_FLAG" \
             --update-env-vars "APP_SERVICE_ROLE=webhook,TASKS_MODE=cloud,GCP_PROJECT_ID=$PROD_GCP_PROJECT_ID,TASKS_REGION=$PROD_TASKS_REGION,TASKS_QUEUE=$PROD_TASKS_QUEUE,TASKS_SERVICE_ACCOUNT_EMAIL=$PROD_TASKS_SERVICE_ACCOUNT_EMAIL,TASKS_HANDLER_URL=$TASKS_HANDLER_URL,TASKS_OIDC_AUDIENCE=$TASKS_HANDLER_URL" \
           )
           if [ -n "$WEBHOOK_SECRET_BINDINGS" ]; then
