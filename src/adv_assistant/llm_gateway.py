@@ -1,11 +1,26 @@
 import json
+import logging
 import re
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
+from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any, Protocol
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, ValidationError, field_validator
+
+logger = logging.getLogger(__name__)
+
+TraceSink = Callable[[str, str | None, dict[str, Any]], Awaitable[None]]
+
+
+@dataclass(slots=True)
+class _TraceContext:
+    operator_phone: str
+    wamid: str | None
+    trace_sink: TraceSink | None
 
 SUPPORTED_INTENTS = (
     "create_ad",
@@ -361,6 +376,18 @@ class NoopLLMGateway:
     def uses_external_llm(self) -> bool:
         return False
 
+    def set_trace_context(
+        self,
+        *,
+        operator_phone: str,
+        wamid: str | None,
+        trace_sink: TraceSink | None,
+    ) -> None:
+        return None
+
+    def clear_trace_context(self) -> None:
+        return None
+
     async def classify_intent(
         self,
         *,
@@ -414,6 +441,8 @@ class OpenAILLMGateway:
         max_retries: int,
         timeout_seconds: int,
         max_input_chars: int,
+        trace_enabled: bool = False,
+        trace_max_chars: int = 4000,
         base_url: str | None = None,
     ) -> None:
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -423,10 +452,34 @@ class OpenAILLMGateway:
         self._max_retries = max(0, max_retries)
         self._timeout_seconds = timeout_seconds
         self._max_input_chars = max_input_chars
+        self._trace_enabled = trace_enabled
+        self._trace_max_chars = max(200, trace_max_chars)
+        self._trace_context: ContextVar[_TraceContext | None] = ContextVar(
+            "openai_trace_context",
+            default=None,
+        )
 
     @property
     def uses_external_llm(self) -> bool:
         return True
+
+    def set_trace_context(
+        self,
+        *,
+        operator_phone: str,
+        wamid: str | None,
+        trace_sink: TraceSink | None,
+    ) -> None:
+        self._trace_context.set(
+            _TraceContext(
+                operator_phone=operator_phone,
+                wamid=wamid,
+                trace_sink=trace_sink,
+            )
+        )
+
+    def clear_trace_context(self) -> None:
+        self._trace_context.set(None)
 
     async def classify_intent(
         self,
@@ -457,6 +510,7 @@ class OpenAILLMGateway:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_model=IntentClassification,
+            operation="classify_intent",
         )
 
     async def extract_ad_fields(
@@ -486,6 +540,7 @@ class OpenAILLMGateway:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_model=ExtractedAdFields,
+            operation="extract_ad_fields",
         )
 
     async def extract_branding_fields(
@@ -512,6 +567,7 @@ class OpenAILLMGateway:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_model=ExtractedBrandingFields,
+            operation="extract_branding_fields",
         )
 
     async def generate_reply(
@@ -540,6 +596,7 @@ class OpenAILLMGateway:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_model=ReplyGeneration,
+            operation="generate_reply",
         )
 
     async def _request_json_model(
@@ -549,6 +606,7 @@ class OpenAILLMGateway:
         system_prompt: str,
         user_prompt: str,
         response_model: type[BaseModel],
+        operation: str,
     ) -> Any:
         last_error: Exception | None = None
         for _attempt in range(self._max_retries + 1):
@@ -557,6 +615,7 @@ class OpenAILLMGateway:
                     model_name=model_name,
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
+                    operation=operation,
                 )
                 payload = json.loads(response_text)
                 return response_model.model_validate(payload)
@@ -576,6 +635,7 @@ class OpenAILLMGateway:
         model_name: str,
         system_prompt: str,
         user_prompt: str,
+        operation: str,
     ) -> str:
         request_kwargs: dict[str, Any] = {
             "model": model_name,
@@ -586,6 +646,8 @@ class OpenAILLMGateway:
             "response_format": {"type": "json_object"},
             "timeout": self._timeout_seconds,
         }
+        used_temperature_fallback = False
+        request_error: str | None = None
         try:
             response = await self._client.chat.completions.create(
                 temperature=0,
@@ -593,18 +655,91 @@ class OpenAILLMGateway:
             )
         except Exception as exc:
             if _supports_explicit_zero_temperature(exc):
+                request_error = str(exc)
+                await self._emit_openai_trace(
+                    operation=operation,
+                    model_name=model_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    used_temperature_fallback=used_temperature_fallback,
+                    request_error=request_error,
+                )
                 raise LLMGatewayError(f"OpenAI request failed: {exc}") from exc
             try:
                 response = await self._client.chat.completions.create(
                     **request_kwargs,
                 )
+                used_temperature_fallback = True
             except Exception as retry_exc:
+                request_error = str(retry_exc)
+                await self._emit_openai_trace(
+                    operation=operation,
+                    model_name=model_name,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    used_temperature_fallback=True,
+                    request_error=request_error,
+                )
                 raise LLMGatewayError(f"OpenAI request failed: {retry_exc}") from retry_exc
 
+        await self._emit_openai_trace(
+            operation=operation,
+            model_name=model_name,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            used_temperature_fallback=used_temperature_fallback,
+            request_error=request_error,
+        )
         content = response.choices[0].message.content if response.choices else None
         if not content:
             raise LLMGatewayError("LLM returned empty response")
         return content
+
+    async def _emit_openai_trace(
+        self,
+        *,
+        operation: str,
+        model_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        used_temperature_fallback: bool,
+        request_error: str | None,
+    ) -> None:
+        if not self._trace_enabled:
+            return
+        context = self._trace_context.get()
+        if context is None or context.trace_sink is None:
+            return
+
+        metadata: dict[str, Any] = {
+            "wamid": context.wamid,
+            "operation": operation,
+            "provider": "openai",
+            "model": model_name,
+            "request_params": {
+                "response_format": "json_object",
+                "timeout_seconds": self._timeout_seconds,
+                "temperature_mode": (
+                    "default_provider"
+                    if used_temperature_fallback
+                    else "explicit_zero"
+                ),
+            },
+            "system_prompt": self._truncate_for_trace(system_prompt),
+            "user_prompt": self._truncate_for_trace(user_prompt),
+        }
+        if request_error:
+            metadata["error"] = self._truncate_for_trace(request_error)
+
+        try:
+            await context.trace_sink("openai_request_debug", context.operator_phone, metadata)
+        except Exception:
+            logger.warning("Failed to emit OpenAI trace event", exc_info=True)
+
+    def _truncate_for_trace(self, text: str) -> str:
+        if len(text) <= self._trace_max_chars:
+            return text
+        return text[: self._trace_max_chars] + "..."
 
     def _history_to_text(self, history: list[dict[str, str]]) -> str:
         if not history:

@@ -3,7 +3,7 @@ import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
@@ -77,8 +77,7 @@ _ADMIN_AUTH_CHALLENGE = {"WWW-Authenticate": "Basic"}
 
 
 class OperatorCMSConnectRequest(BaseModel):
-    phone: str | None = Field(default=None, max_length=32)
-    meta_user_id: str | None = Field(default=None, max_length=128)
+    phone: str = Field(max_length=32)
     cms_campaign_id: int = Field(gt=0)
     cms_playlist_id: int = Field(gt=0)
     active: bool = True
@@ -89,7 +88,6 @@ class OperatorCMSMappingResponse(BaseModel):
     display_name: str | None
     language: str
     currency: str
-    meta_user_id: str | None
     cms_campaign_id: int | None
     cms_playlist_id: int | None
     business_name: str | None
@@ -100,6 +98,14 @@ class OperatorCMSMappingResponse(BaseModel):
     active: bool
     created_at: datetime
     updated_at: datetime
+
+
+class OperatorTraceEventResponse(BaseModel):
+    id: str
+    action: str
+    operator_phone: str | None
+    timestamp: datetime
+    metadata: dict[str, Any]
 
 
 def _build_task_authorizer(settings: Settings) -> TaskRequestAuthorizer:
@@ -147,6 +153,8 @@ def _build_ad_generation_service(*, settings: Settings, media_store: MediaStore)
             timeout_seconds=settings.gemini_timeout_seconds,
             max_submit_attempts=settings.gemini_max_submit_attempts,
             retry_base_seconds=settings.gemini_retry_base_seconds,
+            trace_enabled=settings.llm_trace_enabled,
+            trace_max_chars=settings.llm_trace_max_chars,
         )
 
     required = {
@@ -284,7 +292,6 @@ async def _validate_schema_compatibility(
             "business_name",
             "logo_url",
             "brand_colors",
-            "meta_user_id",
             "cms_campaign_id",
             "cms_playlist_id",
             "store_type",
@@ -373,6 +380,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             max_retries=current_settings.llm_max_retries,
             timeout_seconds=current_settings.llm_timeout_seconds,
             max_input_chars=current_settings.llm_max_input_chars,
+            trace_enabled=current_settings.llm_trace_enabled,
+            trace_max_chars=current_settings.llm_trace_max_chars,
         )
     else:
         llm_gateway = NoopLLMGateway()
@@ -587,7 +596,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             display_name=operator.display_name,
             language=operator.language,
             currency=operator.currency,
-            meta_user_id=operator.meta_user_id,
             cms_campaign_id=operator.cms_campaign_id,
             cms_playlist_id=operator.cms_playlist_id,
             business_name=operator.business_name,
@@ -600,42 +608,38 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             updated_at=operator.updated_at,
         )
 
+    def _to_operator_trace_event_response(event) -> OperatorTraceEventResponse:
+        return OperatorTraceEventResponse(
+            id=str(event.id),
+            action=event.action,
+            operator_phone=event.operator_phone,
+            timestamp=event.timestamp,
+            metadata=event.metadata_json,
+        )
+
     async def _upsert_operator_cms_mapping(
         *,
         session: AsyncSession,
-        phone: str | None,
-        meta_user_id: str | None,
+        phone: str,
         cms_campaign_id: int,
         cms_playlist_id: int,
         active: bool,
     ):
         normalized_phone = _normalize_optional_phone(phone)
-        normalized_meta_user_id = _normalize_optional_text(meta_user_id)
-
-        if normalized_phone is None and normalized_meta_user_id is None:
+        if normalized_phone is None:
             raise HTTPException(
                 status_code=422,
-                detail="Either phone or meta_user_id is required",
+                detail="Phone is required",
             )
 
         operator_repo = OperatorRepository(session)
         audit_repo = AuditEventRepository(session)
 
-        operator = None
-        if normalized_phone is not None:
-            operator = await operator_repo.get_by_phone(normalized_phone)
-        if operator is None and normalized_meta_user_id is not None:
-            operator = await operator_repo.get_by_meta_user_id(normalized_meta_user_id)
+        operator = await operator_repo.get_by_phone(normalized_phone)
 
         if operator is None:
-            if normalized_phone is None:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Operator not found for the provided meta_user_id",
-                )
             operator = await operator_repo.create(
                 phone=normalized_phone,
-                meta_user_id=normalized_meta_user_id,
                 active=active,
                 cms_campaign_id=cms_campaign_id,
                 cms_playlist_id=cms_playlist_id,
@@ -647,25 +651,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 metadata={
                     "cms_campaign_id": cms_campaign_id,
                     "cms_playlist_id": cms_playlist_id,
-                    "meta_user_id": normalized_meta_user_id,
                 },
             )
             return operator
 
-        if normalized_phone is not None and operator.phone != normalized_phone:
-            raise HTTPException(
-                status_code=409,
-                detail="Provided phone does not match the located operator",
-            )
-
-        target_meta_user_id = (
-            normalized_meta_user_id
-            if normalized_meta_user_id is not None
-            else operator.meta_user_id
-        )
         await operator_repo.update_cms_mapping(
             operator.phone,
-            meta_user_id=target_meta_user_id,
             cms_campaign_id=cms_campaign_id,
             cms_playlist_id=cms_playlist_id,
         )
@@ -683,7 +674,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             metadata={
                 "cms_campaign_id": updated_operator.cms_campaign_id,
                 "cms_playlist_id": updated_operator.cms_playlist_id,
-                "meta_user_id": updated_operator.meta_user_id,
                 "active": updated_operator.active,
             },
         )
@@ -709,14 +699,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
   </head>
   <body>
     <h1>Operator CMS Mapping</h1>
-    <p class="note">Provide phone or an existing Meta user ID, plus campaign/playlist IDs.</p>
+    <p class="note">Provide phone plus campaign/playlist IDs.</p>
     <form id="mapping-form">
       <fieldset>
         <label>Phone</label>
-        <input id="phone" type="text" name="phone" placeholder="+9725..." />
-
-        <label>Meta User ID (optional)</label>
-        <input id="meta_user_id" type="text" name="meta_user_id" placeholder="meta-user-id" />
+        <input id="phone" type="text" name="phone" placeholder="+9725..." required />
 
         <label>CMS Campaign ID</label>
         <input id="cms_campaign_id" type="number" name="cms_campaign_id" min="1" required />
@@ -734,17 +721,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
       <label>Lookup by Phone</label>
       <input id="lookup_phone" type="text" placeholder="+9725..." />
       <button id="lookup-by-phone" type="button">Get By Phone</button>
-
-      <label>Lookup by Meta User ID</label>
-      <input id="lookup_meta_user_id" type="text" placeholder="meta-user-id" />
-      <button id="lookup-by-meta" type="button">Get By Meta User ID</button>
+    </fieldset>
+    <fieldset>
+      <legend>LLM / Gemini Trace Lookup</legend>
+      <p class="note">Trace events are written only when LLM_TRACE_ENABLED=true.</p>
+      <label>Phone</label>
+      <input id="trace_phone" type="text" placeholder="+9725..." />
+      <label>Limit (1-100)</label>
+      <input id="trace_limit" type="number" min="1" max="100" value="20" />
+      <button id="lookup-traces" type="button">Get Traces</button>
     </fieldset>
     <pre id="result"></pre>
+    <pre id="trace-result"></pre>
     <script>
       const form = document.getElementById('mapping-form');
       const result = document.getElementById('result');
+      const traceResult = document.getElementById('trace-result');
       const lookupByPhoneButton = document.getElementById('lookup-by-phone');
-      const lookupByMetaButton = document.getElementById('lookup-by-meta');
+      const lookupTracesButton = document.getElementById('lookup-traces');
 
       const writeResult = async (response) => {
         const body = await response.text();
@@ -755,7 +749,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         event.preventDefault();
         const payload = {
           phone: document.getElementById('phone').value || null,
-          meta_user_id: document.getElementById('meta_user_id').value || null,
           cms_campaign_id: Number(document.getElementById('cms_campaign_id').value),
           cms_playlist_id: Number(document.getElementById('cms_playlist_id').value),
           active: document.getElementById('active').checked,
@@ -778,14 +771,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await writeResult(response);
       });
 
-      lookupByMetaButton.addEventListener('click', async () => {
-        const metaUserId = document.getElementById('lookup_meta_user_id').value.trim();
-        if (!metaUserId) {
-          result.textContent = 'Please provide a meta user ID value.';
+      lookupTracesButton.addEventListener('click', async () => {
+        const phone = document.getElementById('trace_phone').value.trim();
+        if (!phone) {
+          traceResult.textContent = 'Please provide a phone value for trace lookup.';
           return;
         }
-        const response = await fetch(`/admin/operators/by-meta/${encodeURIComponent(metaUserId)}`);
-        await writeResult(response);
+        const limitRaw = Number(document.getElementById('trace_limit').value);
+        const limit = Number.isFinite(limitRaw)
+          ? Math.min(100, Math.max(1, Math.trunc(limitRaw)))
+          : 20;
+        const response = await fetch(
+          `/admin/operators/${encodeURIComponent(phone)}/traces?limit=${limit}`
+        );
+        const body = await response.text();
+        traceResult.textContent = `${response.status} ${response.statusText}\\n${body}`;
       });
     </script>
   </body>
@@ -803,7 +803,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             operator = await _upsert_operator_cms_mapping(
                 session=session,
                 phone=body.phone,
-                meta_user_id=body.meta_user_id,
                 cms_campaign_id=body.cms_campaign_id,
                 cms_playlist_id=body.cms_playlist_id,
                 active=body.active,
@@ -811,7 +810,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except IntegrityError as exc:
             raise HTTPException(
                 status_code=409,
-                detail="meta_user_id already assigned to another operator",
+                detail="Operator mapping update conflicted",
             ) from exc
         return _to_operator_mapping_response(operator)
 
@@ -827,16 +826,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Operator not found")
         return _to_operator_mapping_response(operator)
 
-    @app.get("/admin/operators/by-meta/{meta_user_id}", response_model=OperatorCMSMappingResponse)
-    async def admin_get_operator_by_meta(
-        meta_user_id: str,
+    @app.get(
+        "/admin/operators/{phone}/traces",
+        response_model=list[OperatorTraceEventResponse],
+    )
+    async def admin_get_operator_traces(
+        phone: str,
         session: DbSessionDep,
         _: AdminAuthDep,
-    ) -> OperatorCMSMappingResponse:
-        operator = await OperatorRepository(session).get_by_meta_user_id(meta_user_id)
-        if operator is None:
-            raise HTTPException(status_code=404, detail="Operator not found")
-        return _to_operator_mapping_response(operator)
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> list[OperatorTraceEventResponse]:
+        normalized_phone = normalize_phone_number(phone)
+        events = await AuditEventRepository(session).list_recent_for_operator_actions(
+            operator_phone=normalized_phone,
+            actions=["openai_request_debug", "gemini_request_debug"],
+            limit=limit,
+        )
+        return [_to_operator_trace_event_response(event) for event in events]
 
     @app.get("/health")
     async def health() -> dict[str, str]:
