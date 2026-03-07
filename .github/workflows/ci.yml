@@ -34,15 +34,101 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     needs: lint-test
+    if: github.ref != 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker image
         run: docker build -t adv-assistant:ci .
 
+  publish-image:
+    runs-on: ubuntu-latest
+    needs: lint-test
+    if: github.ref == 'refs/heads/main' && secrets.GCP_SA_KEY != '' && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != ''
+    outputs:
+      image_digest: ${{ steps.publish.outputs.image_digest }}
+      image_tag: ${{ steps.publish.outputs.image_tag }}
+      staging_image: ${{ steps.publish.outputs.staging_image }}
+      prod_image: ${{ steps.publish.outputs.prod_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth for Artifact Registry
+        env:
+          AR_REGION: ${{ vars.ARTIFACT_REGISTRY_REGION }}
+        run: gcloud auth configure-docker "$AR_REGION-docker.pkg.dev" --quiet
+
+      - name: Build once and push immutable image tags
+        id: publish
+        env:
+          AR_REGION: ${{ vars.ARTIFACT_REGISTRY_REGION }}
+          AR_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}
+          STAGING_PROJECT: ${{ vars.STAGING_GCP_PROJECT_ID }}
+          PROD_PROJECT: ${{ vars.PROD_GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+
+          IMAGE_NAME="adv-assistant"
+          IMAGE_TAG="${GITHUB_SHA}"
+
+          STAGING_TAG="$AR_REGION-docker.pkg.dev/$STAGING_PROJECT/$AR_REPOSITORY/$IMAGE_NAME:$IMAGE_TAG"
+          PROD_TAG="$AR_REGION-docker.pkg.dev/$PROD_PROJECT/$AR_REPOSITORY/$IMAGE_NAME:$IMAGE_TAG"
+
+          docker build -t "$STAGING_TAG" .
+          docker tag "$STAGING_TAG" "$PROD_TAG"
+
+          docker push "$STAGING_TAG"
+          docker push "$PROD_TAG"
+
+          STAGING_DIGEST="$(gcloud artifacts docker images describe "$STAGING_TAG" --project "$STAGING_PROJECT" --format='value(image_summary.digest)')"
+          PROD_DIGEST="$(gcloud artifacts docker images describe "$PROD_TAG" --project "$PROD_PROJECT" --format='value(image_summary.digest)')"
+
+          if [ -z "$STAGING_DIGEST" ] || [ -z "$PROD_DIGEST" ]; then
+            echo "Failed to resolve pushed image digest."
+            exit 1
+          fi
+
+          if [ "$STAGING_DIGEST" != "$PROD_DIGEST" ]; then
+            echo "Digest mismatch between staging and prod pushes."
+            echo "staging=$STAGING_DIGEST"
+            echo "prod=$PROD_DIGEST"
+            exit 1
+          fi
+
+          STAGING_IMAGE="$AR_REGION-docker.pkg.dev/$STAGING_PROJECT/$AR_REPOSITORY/$IMAGE_NAME@$STAGING_DIGEST"
+          PROD_IMAGE="$AR_REGION-docker.pkg.dev/$PROD_PROJECT/$AR_REPOSITORY/$IMAGE_NAME@$PROD_DIGEST"
+
+          {
+            echo "image_digest=$STAGING_DIGEST"
+            echo "image_tag=$IMAGE_TAG"
+            echo "staging_image=$STAGING_IMAGE"
+            echo "prod_image=$PROD_IMAGE"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "tag=$IMAGE_TAG"
+            echo "digest=$STAGING_DIGEST"
+            echo "staging_image=$STAGING_IMAGE"
+            echo "prod_image=$PROD_IMAGE"
+          } > image-digests.txt
+
+      - name: Upload digest manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digests
+          path: image-digests.txt
+
   deploy-staging:
     runs-on: ubuntu-latest
-    needs: docker-build
-    if: github.ref == 'refs/heads/main' && vars.GCP_PROJECT_ID != '' && vars.GCP_REGION != '' && vars.CLOUD_RUN_SERVICE != ''
+    needs: publish-image
+    if: github.ref == 'refs/heads/main' && secrets.GCP_SA_KEY != '' && vars.STAGING_GCP_PROJECT_ID != '' && vars.STAGING_GCP_REGION != '' && vars.STAGING_CLOUD_RUN_SERVICE != ''
     steps:
       - uses: actions/checkout@v4
 
@@ -56,18 +142,21 @@ jobs:
 
       - name: Deploy to Cloud Run (staging)
         env:
-          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-          GCP_REGION: ${{ vars.GCP_REGION }}
-          CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
-          CLOUD_RUN_ALLOW_UNAUTHENTICATED: ${{ vars.CLOUD_RUN_ALLOW_UNAUTHENTICATED }}
+          STAGING_GCP_PROJECT_ID: ${{ vars.STAGING_GCP_PROJECT_ID }}
+          STAGING_GCP_REGION: ${{ vars.STAGING_GCP_REGION }}
+          STAGING_CLOUD_RUN_SERVICE: ${{ vars.STAGING_CLOUD_RUN_SERVICE }}
+          STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED: ${{ vars.STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED }}
+          IMAGE_REF: ${{ needs.publish-image.outputs.staging_image }}
         run: |
+          set -euo pipefail
+
           ALLOW_FLAG=""
-          if [ "$CLOUD_RUN_ALLOW_UNAUTHENTICATED" = "true" ]; then
+          if [ "$STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED" = "true" ]; then
             ALLOW_FLAG="--allow-unauthenticated"
           fi
 
-          gcloud run deploy "$CLOUD_RUN_SERVICE" \
-            --project "$GCP_PROJECT_ID" \
-            --region "$GCP_REGION" \
-            --source . \
+          gcloud run deploy "$STAGING_CLOUD_RUN_SERVICE" \
+            --project "$STAGING_GCP_PROJECT_ID" \
+            --region "$STAGING_GCP_REGION" \
+            --image "$IMAGE_REF" \
             $ALLOW_FLAG

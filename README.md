@@ -134,10 +134,24 @@ The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 
 - lint (`ruff`)
 - tests (`pytest`)
-- Docker build
-- optional staging deploy from `main` when these variables are configured:
-  - repository variables: `GCP_PROJECT_ID`, `GCP_REGION`, `CLOUD_RUN_SERVICE`
-  - repository secret: `GCP_SA_KEY`
+- Docker build validation on PRs and non-`main` branch pushes
+- on `main`, one Docker image build is pushed to Artifact Registry in both staging and prod projects
+- image digest is resolved and saved as CI artifact (`image-digests`)
+- optional staging deploy from `main` uses immutable image digest (`--image ...@sha256:...`)
+
+Required repository variables for `main` image publish:
+- `ARTIFACT_REGISTRY_REGION` (for example `me-west1`)
+- `ARTIFACT_REGISTRY_REPOSITORY` (for example `adv-assistant`)
+- `STAGING_GCP_PROJECT_ID`
+- `PROD_GCP_PROJECT_ID`
+
+Required repository variables for staging deploy:
+- `STAGING_GCP_REGION`
+- `STAGING_CLOUD_RUN_SERVICE`
+- optional: `STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true`
+
+Required repository secret:
+- `GCP_SA_KEY`
 
 ## Infrastructure Bootstrap Helper
 
