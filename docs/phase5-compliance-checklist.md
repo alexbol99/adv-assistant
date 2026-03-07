@@ -10,10 +10,10 @@ Use this checklist before enabling enrichment in staging/production.
 
 ## Data Handling Review
 
-- [ ] Confirm only normalized enrichment fields are persisted in `ad_draft`.
-- [ ] Confirm raw provider payloads are not persisted in DB.
-- [ ] Confirm enrichment audit logs do not contain raw provider payloads.
-- [ ] Confirm retention policy for enrichment-derived fields aligns with product policy (30 days in draft lifecycle scope).
+- [x] Confirm only normalized enrichment fields are persisted in `ad_draft`.
+- [x] Confirm raw provider payloads are not persisted in DB.
+- [x] Confirm enrichment audit logs do not contain raw provider payloads.
+- [x] Confirm retention policy for enrichment-derived fields aligns with product policy (30 days in draft lifecycle scope).
 
 ## Security and Operations
 

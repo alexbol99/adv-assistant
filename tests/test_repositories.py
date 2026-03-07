@@ -351,3 +351,10 @@ async def test_retention_jobs(db_session: AsyncSession) -> None:
 
     draft_rows = await db_session.execute(select(AdDraft))
     assert len(list(draft_rows.scalars().all())) == 1
+
+
+def test_retention_policy_defaults_align_with_product_retention() -> None:
+    policy = RetentionPolicy()
+    assert policy.processed_message_days == 30
+    assert policy.draft_days == 30
+    assert policy.audit_months == 13
