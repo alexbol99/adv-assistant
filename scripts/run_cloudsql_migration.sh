@@ -47,45 +47,37 @@ if [[ -z "$DB_PASSWORD" ]]; then
   exit 1
 fi
 
-sha256_file() {
-  local path="$1"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$path" | awk '{print $1}'
-    return 0
-  fi
-  if command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$path" | awk '{print $1}'
-    return 0
-  fi
-  echo "Missing checksum utility (sha256sum/shasum)."
-  return 1
+hash_value() {
+  local target="$1"
+  local key="$2"
+  gcloud storage hash "$target" 2>/dev/null | awk -v key="$key" '$1 == key ":" {print $2; exit}'
 }
 
 verify_proxy_checksum() {
   local artifact_name="$1"
   local binary_path="$2"
-  local checksums_file
-  checksums_file="$(mktemp /tmp/cloud-sql-proxy-checksums.XXXXXX)"
+  local remote_path
+  remote_path="gs://cloud-sql-connectors/cloud-sql-proxy/v${CLOUD_SQL_PROXY_VERSION}/${artifact_name}"
+  local remote_md5
+  local remote_crc32c
+  local local_md5
+  local local_crc32c
 
-  curl -fsSL \
-    "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v${CLOUD_SQL_PROXY_VERSION}/checksums.txt" \
-    -o "$checksums_file"
+  remote_md5="$(hash_value "$remote_path" "md5_hash")"
+  remote_crc32c="$(hash_value "$remote_path" "crc32c_hash")"
+  local_md5="$(hash_value "$binary_path" "md5_hash")"
+  local_crc32c="$(hash_value "$binary_path" "crc32c_hash")"
 
-  local expected_checksum
-  expected_checksum="$(grep -E "[[:space:]]\\*?${artifact_name}\$" "$checksums_file" | awk '{print $1}' | head -n 1)"
-  rm -f "$checksums_file"
-
-  if [[ -z "$expected_checksum" ]]; then
-    echo "Unable to resolve expected checksum for ${artifact_name}"
+  if [[ -z "$remote_md5" || -z "$remote_crc32c" || -z "$local_md5" || -z "$local_crc32c" ]]; then
+    echo "Failed to resolve Cloud SQL Proxy hash values."
+    echo "remote_path=$remote_path"
     return 1
   fi
 
-  local actual_checksum
-  actual_checksum="$(sha256_file "$binary_path")"
-  if [[ "$actual_checksum" != "$expected_checksum" ]]; then
+  if [[ "$local_md5" != "$remote_md5" || "$local_crc32c" != "$remote_crc32c" ]]; then
     echo "Checksum verification failed for Cloud SQL Proxy binary."
-    echo "expected=$expected_checksum"
-    echo "actual=$actual_checksum"
+    echo "remote_md5=$remote_md5 local_md5=$local_md5"
+    echo "remote_crc32c=$remote_crc32c local_crc32c=$local_crc32c"
     return 1
   fi
 }
