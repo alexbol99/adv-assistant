@@ -269,7 +269,13 @@ async def test_openai_gateway_retries_on_schema_mismatch(monkeypatch: Any) -> No
     )
     calls = {"n": 0}
 
-    async def fake_chat_json(*, model_name: str, system_prompt: str, user_prompt: str) -> str:
+    async def fake_chat_json(
+        *,
+        model_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        operation: str,
+    ) -> str:
         calls["n"] += 1
         if calls["n"] == 1:
             return '{"invalid":"shape"}'
@@ -323,3 +329,58 @@ async def test_openai_gateway_retries_without_temperature_when_model_rejects_it(
     assert len(calls) == 2
     assert calls[0]["temperature"] == 0
     assert "temperature" not in calls[1]
+
+
+async def test_openai_gateway_emits_trace_event_when_enabled(monkeypatch: Any) -> None:
+    gateway = OpenAILLMGateway(
+        api_key="test-key",
+        classification_model="gpt-5-mini",
+        extraction_model="gpt-5-mini",
+        reply_model="gpt-5-mini",
+        max_retries=0,
+        timeout_seconds=5,
+        max_input_chars=2000,
+        trace_enabled=True,
+        trace_max_chars=2000,
+    )
+
+    class _FakeMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class _FakeChoice:
+        def __init__(self, content: str) -> None:
+            self.message = _FakeMessage(content)
+
+    class _FakeResponse:
+        def __init__(self, content: str) -> None:
+            self.choices = [_FakeChoice(content)]
+
+    async def fake_create(**_: Any) -> _FakeResponse:
+        return _FakeResponse('{"intent":"help"}')
+
+    events: list[tuple[str, str | None, dict[str, Any]]] = []
+
+    async def trace_sink(
+        action: str,
+        operator_phone: str | None,
+        metadata: dict[str, Any],
+    ) -> None:
+        events.append((action, operator_phone, metadata))
+
+    gateway.set_trace_context(
+        operator_phone="+972500000999",
+        wamid="wamid-trace-1",
+        trace_sink=trace_sink,
+    )
+    monkeypatch.setattr(gateway._client.chat.completions, "create", fake_create)
+    result = await gateway.classify_intent(message_text="help", language="he", history=[])
+    gateway.clear_trace_context()
+
+    assert result.intent == Intent.HELP
+    assert len(events) == 1
+    action, operator_phone, metadata = events[0]
+    assert action == "openai_request_debug"
+    assert operator_phone == "+972500000999"
+    assert metadata["wamid"] == "wamid-trace-1"
+    assert metadata["provider"] == "openai"

@@ -55,3 +55,11 @@ def test_app_service_role_is_lowercased(monkeypatch) -> None:
     monkeypatch.setenv("APP_SERVICE_ROLE", "WoRkEr")
     settings = Settings.from_env()
     assert settings.app_service_role == "worker"
+
+
+def test_llm_trace_settings_are_loaded(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_TRACE_ENABLED", "true")
+    monkeypatch.setenv("LLM_TRACE_MAX_CHARS", "1234")
+    settings = Settings.from_env()
+    assert settings.llm_trace_enabled is True
+    assert settings.llm_trace_max_chars == 1234

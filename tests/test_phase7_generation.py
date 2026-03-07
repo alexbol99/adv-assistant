@@ -396,6 +396,92 @@ async def test_gemini_service_generates_image_and_uploads_to_media_store() -> No
     await client.aclose()
 
 
+async def test_gemini_service_emits_trace_event_when_enabled() -> None:
+    encoded_png = base64.b64encode(b"png-binary").decode("ascii")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code=200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "mimeType": "image/png",
+                                        "data": encoded_png,
+                                    }
+                                },
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    media_store = FakeMediaStore()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = GeminiFlashImageAdGenerationService(
+        api_key="gemini-test-key",
+        model="gemini-3.1-flash-image-preview",
+        media_store=media_store,
+        trace_enabled=True,
+        trace_max_chars=2000,
+        client=client,
+    )
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="קוטג",
+        price=Decimal("19.90"),
+        currency="ILS",
+        promo_text="מבצע",
+        ean=None,
+        photo_url=None,
+        enriched_brand=None,
+        enriched_category=None,
+        enriched_description=None,
+        preview_reference_url=None,
+        rendered_image_url=None,
+    )
+    trace_events: list[tuple[str, str | None, dict[str, object]]] = []
+
+    async def trace_sink(
+        action: str,
+        operator_phone: str | None,
+        metadata: dict[str, object],
+    ) -> None:
+        trace_events.append((action, operator_phone, metadata))
+
+    service.set_trace_context(
+        operator_phone=draft.operator_phone,
+        wamid="wamid-gemini-trace-1",
+        trace_sink=trace_sink,
+    )
+    await service.submit_for_draft(
+        draft=draft,
+        mode=GenerationMode.FRESH,
+        instruction_text="generate ad image",
+        wamid="wamid-gemini-trace-1",
+        width=1920,
+        height=1080,
+    )
+    service.clear_trace_context()
+
+    assert len(trace_events) == 1
+    action, operator_phone, metadata = trace_events[0]
+    assert action == "gemini_request_debug"
+    assert operator_phone == draft.operator_phone
+    assert metadata["provider"] == "gemini"
+    assert metadata["wamid"] == "wamid-gemini-trace-1"
+    payload = metadata["payload"]
+    assert isinstance(payload, dict)
+    assert payload["generationConfig"] == {"responseModalities": ["IMAGE"]}
+    await client.aclose()
+
+
 async def test_gemini_service_retries_retryable_http_error_then_succeeds() -> None:
     observed_calls = {"count": 0}
     encoded_png = base64.b64encode(b"png-binary").decode("ascii")

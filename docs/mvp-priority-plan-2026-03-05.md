@@ -24,7 +24,6 @@ This document captures the agreed MVP execution order, acceptance rules, and tes
 - Add per-operator CMS routing fields:
   - `cms_campaign_id`
   - `cms_playlist_id`
-  - optional `meta_user_id`
 - Add admin API endpoints for mapping setup/update.
 - Add minimal web admin form for mapping setup/update.
 - Route publish by operator mapping only (no global fallback for missing mapping).
@@ -127,12 +126,12 @@ This document captures the agreed MVP execution order, acceptance rules, and tes
 ### 2) Admin UX for operator data visibility
 - Add a structured operator profile presentation in admin (table/card layout, not raw JSON-only), focused on fast support diagnostics.
 - Keep existing API responses, and improve presentation layer for:
-  - identity and routing (`phone`, `meta_user_id`, campaign/playlist)
+  - identity and routing (`phone`, campaign/playlist)
   - branding/system-memory fields
   - status and timestamps
 
 #### Test checklist
 1. `/admin` renders structured operator data view after lookup.
 2. View displays empty/null fields clearly without breaking layout.
-3. Lookup by phone and by meta user ID both populate the same structured view.
+3. Lookup by phone populates the structured view.
 4. Basic auth protection remains unchanged.

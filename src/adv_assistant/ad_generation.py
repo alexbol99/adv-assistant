@@ -5,6 +5,8 @@ import base64
 import logging
 import math
 import uuid
+from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import StrEnum
@@ -16,6 +18,15 @@ import httpx
 from adv_assistant.media_store import MediaStore, MediaStoreError
 
 logger = logging.getLogger(__name__)
+
+TraceSink = Callable[[str, str | None, dict[str, Any]], Awaitable[None]]
+
+
+@dataclass(slots=True)
+class _TraceContext:
+    operator_phone: str
+    wamid: str | None
+    trace_sink: TraceSink | None
 
 
 class AdGenerationError(RuntimeError):
@@ -103,6 +114,18 @@ class NoopAdGenerationService:
     def enabled(self) -> bool:
         return False
 
+    def set_trace_context(
+        self,
+        *,
+        operator_phone: str,
+        wamid: str | None,
+        trace_sink: TraceSink | None,
+    ) -> None:
+        return None
+
+    def clear_trace_context(self) -> None:
+        return None
+
     async def submit_for_draft(
         self,
         *,
@@ -133,6 +156,8 @@ class GeminiFlashImageAdGenerationService:
         timeout_seconds: float = 30.0,
         max_submit_attempts: int = 3,
         retry_base_seconds: float = 1.0,
+        trace_enabled: bool = False,
+        trace_max_chars: int = 4000,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_key = api_key.strip()
@@ -144,10 +169,34 @@ class GeminiFlashImageAdGenerationService:
         self._owns_client = client is None
         self._client = client or httpx.AsyncClient(timeout=timeout_seconds)
         self._results: dict[str, GenerationPollResult] = {}
+        self._trace_enabled = trace_enabled
+        self._trace_max_chars = max(200, trace_max_chars)
+        self._trace_context: ContextVar[_TraceContext | None] = ContextVar(
+            "gemini_trace_context",
+            default=None,
+        )
 
     @property
     def enabled(self) -> bool:
         return True
+
+    def set_trace_context(
+        self,
+        *,
+        operator_phone: str,
+        wamid: str | None,
+        trace_sink: TraceSink | None,
+    ) -> None:
+        self._trace_context.set(
+            _TraceContext(
+                operator_phone=operator_phone,
+                wamid=wamid,
+                trace_sink=trace_sink,
+            )
+        )
+
+    def clear_trace_context(self) -> None:
+        self._trace_context.set(None)
 
     async def submit_for_draft(
         self,
@@ -180,6 +229,13 @@ class GeminiFlashImageAdGenerationService:
             prompt=prompt,
             mode=mode,
             draft=draft,
+        )
+        await self._emit_gemini_trace(
+            prompt=prompt,
+            mode=mode,
+            draft=draft,
+            aspect_ratio=aspect_ratio,
+            payload=payload,
         )
 
         response: httpx.Response | None = None
@@ -316,6 +372,89 @@ class GeminiFlashImageAdGenerationService:
     async def close(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+    async def _emit_gemini_trace(
+        self,
+        *,
+        prompt: str,
+        mode: GenerationMode,
+        draft: GenerationDraftInput,
+        aspect_ratio: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if not self._trace_enabled:
+            return
+        context = self._trace_context.get()
+        if context is None or context.trace_sink is None:
+            return
+        metadata = {
+            "wamid": context.wamid,
+            "provider": "gemini",
+            "model": self._model,
+            "mode": mode.value,
+            "aspect_ratio": aspect_ratio,
+            "draft_id": str(draft.draft_id),
+            "request_params": {
+                "max_submit_attempts": self._max_submit_attempts,
+                "retry_base_seconds": self._retry_base_seconds,
+            },
+            "prompt": self._truncate_for_trace(prompt),
+            "payload": self._sanitize_payload_for_trace(payload),
+        }
+        try:
+            await context.trace_sink("gemini_request_debug", context.operator_phone, metadata)
+        except Exception:
+            logger.warning("Failed to emit Gemini trace event", exc_info=True)
+
+    def _sanitize_payload_for_trace(self, payload: dict[str, Any]) -> dict[str, Any]:
+        sanitized = dict(payload)
+        contents = payload.get("contents")
+        if not isinstance(contents, list):
+            return sanitized
+
+        sanitized_contents: list[dict[str, Any]] = []
+        for content in contents:
+            if not isinstance(content, dict):
+                continue
+            parts = content.get("parts")
+            if not isinstance(parts, list):
+                sanitized_contents.append(dict(content))
+                continue
+
+            sanitized_parts: list[dict[str, Any]] = []
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                if "text" in part and isinstance(part["text"], str):
+                    sanitized_parts.append({"text": self._truncate_for_trace(part["text"])})
+                    continue
+                inline_data = part.get("inline_data")
+                if isinstance(inline_data, dict):
+                    data_value = inline_data.get("data")
+                    data_len = len(data_value) if isinstance(data_value, str) else 0
+                    sanitized_parts.append(
+                        {
+                            "inline_data": {
+                                "mime_type": inline_data.get("mime_type"),
+                                "data_redacted": True,
+                                "data_b64_chars": data_len,
+                            }
+                        }
+                    )
+                    continue
+                sanitized_parts.append(dict(part))
+
+            content_copy = dict(content)
+            content_copy["parts"] = sanitized_parts
+            sanitized_contents.append(content_copy)
+
+        sanitized["contents"] = sanitized_contents
+        return sanitized
+
+    def _truncate_for_trace(self, text: str) -> str:
+        if len(text) <= self._trace_max_chars:
+            return text
+        return text[: self._trace_max_chars] + "..."
 
     async def _build_request_payload(
         self,
