@@ -47,6 +47,49 @@ if [[ -z "$DB_PASSWORD" ]]; then
   exit 1
 fi
 
+sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return 0
+  fi
+  echo "Missing checksum utility (sha256sum/shasum)."
+  return 1
+}
+
+verify_proxy_checksum() {
+  local artifact_name="$1"
+  local binary_path="$2"
+  local checksums_file
+  checksums_file="$(mktemp /tmp/cloud-sql-proxy-checksums.XXXXXX)"
+
+  curl -fsSL \
+    "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v${CLOUD_SQL_PROXY_VERSION}/checksums.txt" \
+    -o "$checksums_file"
+
+  local expected_checksum
+  expected_checksum="$(grep -E "[[:space:]]\\*?${artifact_name}\$" "$checksums_file" | awk '{print $1}' | head -n 1)"
+  rm -f "$checksums_file"
+
+  if [[ -z "$expected_checksum" ]]; then
+    echo "Unable to resolve expected checksum for ${artifact_name}"
+    return 1
+  fi
+
+  local actual_checksum
+  actual_checksum="$(sha256_file "$binary_path")"
+  if [[ "$actual_checksum" != "$expected_checksum" ]]; then
+    echo "Checksum verification failed for Cloud SQL Proxy binary."
+    echo "expected=$expected_checksum"
+    echo "actual=$actual_checksum"
+    return 1
+  fi
+}
+
 resolve_proxy_download_artifact() {
   local os
   local arch
@@ -91,16 +134,27 @@ if [[ ! -x "$PROXY_BIN" ]]; then
   curl -fsSL \
     "https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v${CLOUD_SQL_PROXY_VERSION}/${artifact_name}" \
     -o "$PROXY_BIN"
+  verify_proxy_checksum "$artifact_name" "$PROXY_BIN"
   chmod +x "$PROXY_BIN"
 fi
 
-"$PROXY_BIN" "$CLOUD_SQL_CONNECTION_NAME" --port "$SQL_PROXY_PORT" >/tmp/cloud-sql-proxy.log 2>&1 &
+PROXY_LOG_FILE="$(mktemp /tmp/cloud-sql-proxy.XXXXXX.log)"
+"$PROXY_BIN" "$CLOUD_SQL_CONNECTION_NAME" --port "$SQL_PROXY_PORT" >"$PROXY_LOG_FILE" 2>&1 &
 PROXY_PID="$!"
 cleanup() {
   kill "$PROXY_PID" >/dev/null 2>&1 || true
+  rm -f "$PROXY_LOG_FILE"
 }
 trap cleanup EXIT
 sleep 3
+
+# Verify that the Cloud SQL Proxy started successfully before proceeding.
+if ! kill -0 "$PROXY_PID" >/dev/null 2>&1; then
+  echo "Cloud SQL Proxy process (PID=${PROXY_PID}) is not running after startup delay."
+  echo "Cloud SQL Proxy log:"
+  cat "$PROXY_LOG_FILE" || true
+  exit 1
+fi
 
 MIGRATION_URL="postgresql+psycopg://${DB_MIGRATOR_USER}:${DB_PASSWORD}@127.0.0.1:${SQL_PROXY_PORT}/${DB_NAME}"
 
@@ -116,5 +170,5 @@ while [[ "$attempt" -le "$MIGRATION_RETRIES" ]]; do
 done
 
 echo "Migration failed after ${MIGRATION_RETRIES} attempts."
-cat /tmp/cloud-sql-proxy.log || true
+cat "$PROXY_LOG_FILE" || true
 exit 1

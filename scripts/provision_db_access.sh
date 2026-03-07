@@ -82,14 +82,14 @@ for target in "${TARGET_ITEMS[@]}"; do
       ;;
     *)
       echo "Invalid PROVISION_TARGETS value: '$target'"
-      echo "Allowed values: staging, production"
+      echo "Allowed values: staging, production (or 'prod' as an alias)"
       exit 1
       ;;
   esac
 done
 
 if [[ "$PROVISION_STAGING" != "true" && "$PROVISION_PROD" != "true" ]]; then
-  echo "PROVISION_TARGETS must include at least one target: staging or production."
+  echo "PROVISION_TARGETS must include at least one target: staging or production (or 'prod' as an alias)."
   exit 1
 fi
 
@@ -120,12 +120,17 @@ validate_sql_identifier() {
 require_cmd gcloud
 require_cmd openssl
 
-validate_sql_identifier "$DB_STAGING" "DB_STAGING"
-validate_sql_identifier "$DB_PROD" "DB_PROD"
-validate_sql_identifier "$APP_USER_STAGING" "APP_USER_STAGING"
-validate_sql_identifier "$APP_USER_PROD" "APP_USER_PROD"
-validate_sql_identifier "$MIGRATOR_USER_STAGING" "MIGRATOR_USER_STAGING"
-validate_sql_identifier "$MIGRATOR_USER_PROD" "MIGRATOR_USER_PROD"
+if [[ "$PROVISION_STAGING" == "true" ]]; then
+  validate_sql_identifier "$DB_STAGING" "DB_STAGING"
+  validate_sql_identifier "$APP_USER_STAGING" "APP_USER_STAGING"
+  validate_sql_identifier "$MIGRATOR_USER_STAGING" "MIGRATOR_USER_STAGING"
+fi
+
+if [[ "$PROVISION_PROD" == "true" ]]; then
+  validate_sql_identifier "$DB_PROD" "DB_PROD"
+  validate_sql_identifier "$APP_USER_PROD" "APP_USER_PROD"
+  validate_sql_identifier "$MIGRATOR_USER_PROD" "MIGRATOR_USER_PROD"
+fi
 
 echo "Using GCP project: $GCP_PROJECT_ID"
 echo "Using Cloud SQL instance: $CLOUD_SQL_INSTANCE"

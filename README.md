@@ -139,10 +139,10 @@ The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 - on `main`, one Docker image build is pushed to Artifact Registry in both staging and prod projects
 - on release tags (`v*`), one Docker image build is pushed to Artifact Registry in both staging and prod projects
 - image digest is resolved and saved as CI artifact (`image-digests`)
-- optional staging migration job from `main` runs Alembic with a dedicated migrator DB user before deploy
-- optional staging deploy from `main` uses immutable image digest (`--image ...@sha256:...`) and deploys worker first, then webhook
-- optional production migration job from release tag (`v*`) runs Alembic with a dedicated migrator DB user before deploy
-- optional production deploy from release tag (`v*`) uses immutable image digest (`--image ...@sha256:...`) and deploys worker first, then webhook
+- staging migration job from `main` runs Alembic with a dedicated migrator DB user and must succeed before staging deploy
+- staging deploy from `main` uses immutable image digest (`--image ...@sha256:...`) and deploys worker first, then webhook
+- production migration job from release tag (`v*`) runs Alembic with a dedicated migrator DB user and must succeed before production deploy
+- production deploy from release tag (`v*`) uses immutable image digest (`--image ...@sha256:...`) and deploys worker first, then webhook
 
 Required repository variables for `main` image publish:
 - `ARTIFACT_REGISTRY_REGION` (for example `me-west1`)
