@@ -34,10 +34,11 @@ Current rollout decision:
 CI deploy jobs support secret bindings via repository variables containing secret names:
 
 - Staging:
-  - required now: `STAGING_SECRET_WHATSAPP_ACCESS_TOKEN`
-  - optional now: `STAGING_SECRET_DATABASE_URL`, `STAGING_SECRET_VERIFY_TOKEN`, `STAGING_SECRET_META_APP_SECRET`, `STAGING_SECRET_ADMIN_BASIC_USERNAME`, `STAGING_SECRET_ADMIN_BASIC_PASSWORD`, `STAGING_SECRET_OPENAI_API_KEY`, `STAGING_SECRET_GEMINI_API_KEY`, `STAGING_SECRET_NANA_BANANA_API_KEY`, `STAGING_SECRET_CMS_CITYSCREEN_APP_TOKEN`
+  - required now: `STAGING_SECRET_DATABASE_URL`, `STAGING_SECRET_WHATSAPP_ACCESS_TOKEN`
+  - optional now: `STAGING_SECRET_VERIFY_TOKEN`, `STAGING_SECRET_META_APP_SECRET`, `STAGING_SECRET_ADMIN_BASIC_USERNAME`, `STAGING_SECRET_ADMIN_BASIC_PASSWORD`, `STAGING_SECRET_OPENAI_API_KEY`, `STAGING_SECRET_GEMINI_API_KEY`, `STAGING_SECRET_NANA_BANANA_API_KEY`, `STAGING_SECRET_CMS_CITYSCREEN_APP_TOKEN`
 - Production:
-  - all bindings are optional until production secret rollout is completed.
+  - required now: `PROD_SECRET_DATABASE_URL`
+  - other bindings are optional until production secret rollout is completed.
 
 Example mapping:
 
@@ -53,4 +54,3 @@ Keep non-secret values in environment-specific repository variables, for example
 - deploy flags such as `STAGING_DEPLOY_ENABLED`
 
 Do not store API tokens/passwords in repository variables.
-

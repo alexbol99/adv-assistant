@@ -159,11 +159,11 @@ Required repository variables for staging deploy:
 - `STAGING_TASKS_REGION`
 - `STAGING_TASKS_QUEUE`
 - `STAGING_TASKS_SERVICE_ACCOUNT_EMAIL`
+- `STAGING_SECRET_DATABASE_URL` (Secret Manager mapping for `DATABASE_URL`; prevents SQLite fallback in Cloud Run)
 - `STAGING_SECRET_WHATSAPP_ACCESS_TOKEN` (Step 5 convention; currently `WHATSAPP_ACCESS_TOKEN_STAGING`)
 - optional: `STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true` (applies to webhook service only)
 
 Optional repository variables for staging secret bindings:
-- `STAGING_SECRET_DATABASE_URL`
 - `STAGING_SECRET_VERIFY_TOKEN`
 - `STAGING_SECRET_META_APP_SECRET`
 - `STAGING_SECRET_ADMIN_BASIC_USERNAME`
@@ -186,10 +186,10 @@ Required repository variables for production deploy:
 - `PROD_TASKS_REGION`
 - `PROD_TASKS_QUEUE`
 - `PROD_TASKS_SERVICE_ACCOUNT_EMAIL`
+- `PROD_SECRET_DATABASE_URL` (Secret Manager mapping for `DATABASE_URL`; prevents SQLite fallback in Cloud Run)
 - optional: `PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true` (applies to webhook service only)
 
 Optional repository variables for production secret bindings:
-- `PROD_SECRET_DATABASE_URL`
 - `PROD_SECRET_VERIFY_TOKEN`
 - `PROD_SECRET_META_APP_SECRET`
 - `PROD_SECRET_WHATSAPP_ACCESS_TOKEN` (deferred for now)

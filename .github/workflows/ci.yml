@@ -165,7 +165,7 @@ jobs:
   deploy-staging:
     runs-on: ubuntu-latest
     needs: [publish-image, migrate-staging]
-    if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.STAGING_GCP_REGION != '' && vars.STAGING_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.STAGING_CLOUD_RUN_WORKER_SERVICE != '' && vars.STAGING_TASKS_REGION != '' && vars.STAGING_TASKS_QUEUE != '' && vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL != '' && vars.STAGING_CLOUD_SQL_CONNECTION_NAME != '' && vars.STAGING_DB_NAME != '' && vars.STAGING_DB_MIGRATOR_USER != '' && vars.STAGING_DB_MIGRATOR_PASS_SECRET != '' && vars.STAGING_SECRET_WHATSAPP_ACCESS_TOKEN != ''
+    if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.STAGING_GCP_REGION != '' && vars.STAGING_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.STAGING_CLOUD_RUN_WORKER_SERVICE != '' && vars.STAGING_TASKS_REGION != '' && vars.STAGING_TASKS_QUEUE != '' && vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL != '' && vars.STAGING_CLOUD_SQL_CONNECTION_NAME != '' && vars.STAGING_DB_NAME != '' && vars.STAGING_DB_MIGRATOR_USER != '' && vars.STAGING_DB_MIGRATOR_PASS_SECRET != '' && vars.STAGING_SECRET_DATABASE_URL != '' && vars.STAGING_SECRET_WHATSAPP_ACCESS_TOKEN != ''
     steps:
       - uses: actions/checkout@v4
 
@@ -201,8 +201,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -z "${STAGING_SECRET_DATABASE_URL:-}" ]; then
+            echo "ERROR: STAGING_SECRET_DATABASE_URL is not set; refusing to deploy without persistent DATABASE_URL." >&2
+            exit 1
+          fi
+
           build_secret_bindings() {
-            local include_whatsapp="$1"
+            local service_role="$1"
             local bindings=()
 
             add_binding() {
@@ -214,17 +219,21 @@ jobs:
             }
 
             add_binding "DATABASE_URL" "${STAGING_SECRET_DATABASE_URL:-}"
-            add_binding "VERIFY_TOKEN" "${STAGING_SECRET_VERIFY_TOKEN:-}"
-            add_binding "META_APP_SECRET" "${STAGING_SECRET_META_APP_SECRET:-}"
             add_binding "ADMIN_BASIC_USERNAME" "${STAGING_SECRET_ADMIN_BASIC_USERNAME:-}"
             add_binding "ADMIN_BASIC_PASSWORD" "${STAGING_SECRET_ADMIN_BASIC_PASSWORD:-}"
-            add_binding "OPENAI_API_KEY" "${STAGING_SECRET_OPENAI_API_KEY:-}"
-            add_binding "GEMINI_API_KEY" "${STAGING_SECRET_GEMINI_API_KEY:-}"
-            add_binding "NANA_BANANA_API_KEY" "${STAGING_SECRET_NANA_BANANA_API_KEY:-}"
-            add_binding "CMS_CITYSCREEN_APP_TOKEN" "${STAGING_SECRET_CMS_CITYSCREEN_APP_TOKEN:-}"
 
-            if [ "$include_whatsapp" = "true" ]; then
+            if [ "$service_role" = "webhook" ]; then
+              add_binding "VERIFY_TOKEN" "${STAGING_SECRET_VERIFY_TOKEN:-}"
+              add_binding "META_APP_SECRET" "${STAGING_SECRET_META_APP_SECRET:-}"
               add_binding "WHATSAPP_ACCESS_TOKEN" "${STAGING_SECRET_WHATSAPP_ACCESS_TOKEN:-}"
+            fi
+
+            if [ "$service_role" = "worker" ]; then
+              add_binding "WHATSAPP_ACCESS_TOKEN" "${STAGING_SECRET_WHATSAPP_ACCESS_TOKEN:-}"
+              add_binding "OPENAI_API_KEY" "${STAGING_SECRET_OPENAI_API_KEY:-}"
+              add_binding "GEMINI_API_KEY" "${STAGING_SECRET_GEMINI_API_KEY:-}"
+              add_binding "NANA_BANANA_API_KEY" "${STAGING_SECRET_NANA_BANANA_API_KEY:-}"
+              add_binding "CMS_CITYSCREEN_APP_TOKEN" "${STAGING_SECRET_CMS_CITYSCREEN_APP_TOKEN:-}"
             fi
 
             if [ ${#bindings[@]} -eq 0 ]; then
@@ -236,8 +245,8 @@ jobs:
             echo "${bindings[*]}"
           }
 
-          WORKER_SECRET_BINDINGS="$(build_secret_bindings false)"
-          WEBHOOK_SECRET_BINDINGS="$(build_secret_bindings true)"
+          WORKER_SECRET_BINDINGS="$(build_secret_bindings worker)"
+          WEBHOOK_SECRET_BINDINGS="$(build_secret_bindings webhook)"
 
           WORKER_BASE_URL="$(gcloud run services describe "$STAGING_CLOUD_RUN_WORKER_SERVICE" \
             --project "$STAGING_GCP_PROJECT_ID" \
@@ -338,7 +347,7 @@ jobs:
   deploy-production:
     runs-on: ubuntu-latest
     needs: [publish-image, migrate-production]
-    if: startsWith(github.ref, 'refs/tags/v') && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.PROD_GCP_REGION != '' && vars.PROD_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.PROD_CLOUD_RUN_WORKER_SERVICE != '' && vars.PROD_TASKS_REGION != '' && vars.PROD_TASKS_QUEUE != '' && vars.PROD_TASKS_SERVICE_ACCOUNT_EMAIL != '' && vars.PROD_CLOUD_SQL_CONNECTION_NAME != '' && vars.PROD_DB_NAME != '' && vars.PROD_DB_MIGRATOR_USER != '' && vars.PROD_DB_MIGRATOR_PASS_SECRET != ''
+    if: startsWith(github.ref, 'refs/tags/v') && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.PROD_GCP_REGION != '' && vars.PROD_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.PROD_CLOUD_RUN_WORKER_SERVICE != '' && vars.PROD_TASKS_REGION != '' && vars.PROD_TASKS_QUEUE != '' && vars.PROD_TASKS_SERVICE_ACCOUNT_EMAIL != '' && vars.PROD_CLOUD_SQL_CONNECTION_NAME != '' && vars.PROD_DB_NAME != '' && vars.PROD_DB_MIGRATOR_USER != '' && vars.PROD_DB_MIGRATOR_PASS_SECRET != '' && vars.PROD_SECRET_DATABASE_URL != ''
     steps:
       - uses: actions/checkout@v4
 
@@ -374,8 +383,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ -z "${PROD_SECRET_DATABASE_URL:-}" ]; then
+            echo "ERROR: PROD_SECRET_DATABASE_URL is not set; refusing to deploy without persistent DATABASE_URL." >&2
+            exit 1
+          fi
+
           build_secret_bindings() {
-            local include_whatsapp="$1"
+            local service_role="$1"
             local bindings=()
 
             add_binding() {
@@ -387,17 +401,21 @@ jobs:
             }
 
             add_binding "DATABASE_URL" "${PROD_SECRET_DATABASE_URL:-}"
-            add_binding "VERIFY_TOKEN" "${PROD_SECRET_VERIFY_TOKEN:-}"
-            add_binding "META_APP_SECRET" "${PROD_SECRET_META_APP_SECRET:-}"
             add_binding "ADMIN_BASIC_USERNAME" "${PROD_SECRET_ADMIN_BASIC_USERNAME:-}"
             add_binding "ADMIN_BASIC_PASSWORD" "${PROD_SECRET_ADMIN_BASIC_PASSWORD:-}"
-            add_binding "OPENAI_API_KEY" "${PROD_SECRET_OPENAI_API_KEY:-}"
-            add_binding "GEMINI_API_KEY" "${PROD_SECRET_GEMINI_API_KEY:-}"
-            add_binding "NANA_BANANA_API_KEY" "${PROD_SECRET_NANA_BANANA_API_KEY:-}"
-            add_binding "CMS_CITYSCREEN_APP_TOKEN" "${PROD_SECRET_CMS_CITYSCREEN_APP_TOKEN:-}"
 
-            if [ "$include_whatsapp" = "true" ]; then
+            if [ "$service_role" = "webhook" ]; then
+              add_binding "VERIFY_TOKEN" "${PROD_SECRET_VERIFY_TOKEN:-}"
+              add_binding "META_APP_SECRET" "${PROD_SECRET_META_APP_SECRET:-}"
               add_binding "WHATSAPP_ACCESS_TOKEN" "${PROD_SECRET_WHATSAPP_ACCESS_TOKEN:-}"
+            fi
+
+            if [ "$service_role" = "worker" ]; then
+              add_binding "WHATSAPP_ACCESS_TOKEN" "${PROD_SECRET_WHATSAPP_ACCESS_TOKEN:-}"
+              add_binding "OPENAI_API_KEY" "${PROD_SECRET_OPENAI_API_KEY:-}"
+              add_binding "GEMINI_API_KEY" "${PROD_SECRET_GEMINI_API_KEY:-}"
+              add_binding "NANA_BANANA_API_KEY" "${PROD_SECRET_NANA_BANANA_API_KEY:-}"
+              add_binding "CMS_CITYSCREEN_APP_TOKEN" "${PROD_SECRET_CMS_CITYSCREEN_APP_TOKEN:-}"
             fi
 
             if [ ${#bindings[@]} -eq 0 ]; then
@@ -409,8 +427,8 @@ jobs:
             echo "${bindings[*]}"
           }
 
-          WORKER_SECRET_BINDINGS="$(build_secret_bindings false)"
-          WEBHOOK_SECRET_BINDINGS="$(build_secret_bindings true)"
+          WORKER_SECRET_BINDINGS="$(build_secret_bindings worker)"
+          WEBHOOK_SECRET_BINDINGS="$(build_secret_bindings webhook)"
 
           WORKER_BASE_URL="$(gcloud run services describe "$PROD_CLOUD_RUN_WORKER_SERVICE" \
             --project "$PROD_GCP_PROJECT_ID" \
