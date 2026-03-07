@@ -128,7 +128,7 @@
 - Override migration DB URL:
   - `ALEMBIC_DATABASE_URL=postgresql+psycopg://... uv run alembic upgrade head`
 
-## CI / Staging Deploy
+## CI / Staging + Production Deploy
 
 The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 
@@ -136,8 +136,10 @@ The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 - tests (`pytest`)
 - Docker build validation on PRs and non-`main` branch pushes
 - on `main`, one Docker image build is pushed to Artifact Registry in both staging and prod projects
+- on release tags (`v*`), one Docker image build is pushed to Artifact Registry in both staging and prod projects
 - image digest is resolved and saved as CI artifact (`image-digests`)
 - optional staging deploy from `main` uses immutable image digest (`--image ...@sha256:...`)
+- optional production deploy from release tag (`v*`) uses immutable image digest (`--image ...@sha256:...`)
 
 Required repository variables for `main` image publish:
 - `ARTIFACT_REGISTRY_REGION` (for example `me-west1`)
@@ -149,6 +151,11 @@ Required repository variables for staging deploy:
 - `STAGING_GCP_REGION`
 - `STAGING_CLOUD_RUN_SERVICE`
 - optional: `STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true`
+
+Required repository variables for production deploy:
+- `PROD_GCP_REGION`
+- `PROD_CLOUD_RUN_SERVICE`
+- optional: `PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true`
 
 Required repository secret:
 - `GCP_SA_KEY`
