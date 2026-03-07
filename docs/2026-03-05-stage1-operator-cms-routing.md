@@ -13,7 +13,6 @@ This document summarizes the implemented MVP Stage 1 scope: per-operator CMS rou
 ## Data Model and Migration
 
 ### New `operator` columns
-- `meta_user_id` (nullable, unique, indexed)
 - `cms_campaign_id` (nullable int)
 - `cms_playlist_id` (nullable int)
 
@@ -27,7 +26,6 @@ This document summarizes the implemented MVP Stage 1 scope: per-operator CMS rou
 
 In `OperatorRepository`:
 - `create(...)` now accepts optional mapping fields.
-- Added `get_by_meta_user_id(...)`.
 - Added `update_cms_mapping(...)`.
 
 ## Publish Flow Changes
@@ -54,17 +52,16 @@ In `OperatorRepository`:
 - `GET /admin` – minimal mapping form UI.
 - `POST /admin/operators/connect` – create/update mapping.
 - `GET /admin/operators/by-phone/{phone}` – fetch mapping.
-- `GET /admin/operators/by-meta/{meta_user_id}` – fetch mapping.
 
 ### Behavior
-- Supports lookup by phone and/or existing Meta user ID.
+- Supports lookup by phone.
 - Can create operator when phone is provided and operator does not exist.
 - Lookup responses now include operator profile context used in generation:
   - `display_name`, `language`, `currency`
   - `business_name`, `logo_url`, `brand_colors`
   - `store_type`, `creative_guidance`
   - `created_at`, `updated_at`
-- Admin page now includes a dedicated "Operator Profile Lookup" panel (phone/meta lookup buttons + JSON output).
+- Admin page now includes a dedicated "Operator Profile Lookup" panel (phone lookup + JSON output).
 - Emits admin audit events:
   - `admin_operator_created_with_cms_mapping`
   - `admin_operator_cms_mapping_updated`

@@ -83,6 +83,8 @@ class Settings:
     llm_max_retries: int = 1
     llm_timeout_seconds: int = 15
     llm_max_input_chars: int = 2000
+    llm_trace_enabled: bool = False
+    llm_trace_max_chars: int = 4000
 
     enrichment_enabled: bool = True
     open_food_facts_base_url: str = "https://world.openfoodfacts.org"
@@ -164,6 +166,8 @@ class Settings:
             llm_max_retries=_int_env("LLM_MAX_RETRIES", 1),
             llm_timeout_seconds=_int_env("LLM_TIMEOUT_SECONDS", 15),
             llm_max_input_chars=_int_env("LLM_MAX_INPUT_CHARS", 2000),
+            llm_trace_enabled=_bool_env("LLM_TRACE_ENABLED", False),
+            llm_trace_max_chars=_int_env("LLM_TRACE_MAX_CHARS", 4000),
             enrichment_enabled=_bool_env("ENRICHMENT_ENABLED", True),
             open_food_facts_base_url=os.getenv(
                 "OPEN_FOOD_FACTS_BASE_URL", "https://world.openfoodfacts.org"

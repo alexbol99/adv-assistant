@@ -41,7 +41,6 @@ def test_alembic_upgrade_creates_phase1_tables(tmp_path: Path, monkeypatch) -> N
         "business_name",
         "logo_url",
         "brand_colors",
-        "meta_user_id",
         "cms_campaign_id",
         "cms_playlist_id",
         "store_type",
@@ -103,7 +102,6 @@ def test_alembic_downgrade_removes_operator_cms_mapping_columns(
     inspector = inspect(engine)
 
     operator_columns = {column["name"] for column in inspector.get_columns("operator")}
-    assert "meta_user_id" not in operator_columns
     assert "cms_campaign_id" not in operator_columns
     assert "cms_playlist_id" not in operator_columns
 

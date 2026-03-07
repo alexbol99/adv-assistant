@@ -43,3 +43,11 @@ def test_gemini_model_falls_back_to_default_when_blank(monkeypatch) -> None:
     monkeypatch.setenv("GEMINI_MODEL", "   ")
     settings = Settings.from_env()
     assert settings.gemini_model == "gemini-3.1-flash-image-preview"
+
+
+def test_llm_trace_settings_are_loaded(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_TRACE_ENABLED", "true")
+    monkeypatch.setenv("LLM_TRACE_MAX_CHARS", "1234")
+    settings = Settings.from_env()
+    assert settings.llm_trace_enabled is True
+    assert settings.llm_trace_max_chars == 1234

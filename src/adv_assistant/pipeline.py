@@ -1,5 +1,6 @@
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,6 +56,8 @@ from adv_assistant.tasks_queue import InboundTaskPayload
 from adv_assistant.whatsapp import NoopWhatsAppClient, WhatsAppClient
 
 logger = logging.getLogger(__name__)
+
+TraceSink = Callable[[str, str | None, dict[str, Any]], Awaitable[None]]
 
 _PENDING_UPLOAD_LOGO = "logo"
 _PENDING_FOLLOWUP_PRICE = "price"
@@ -157,12 +160,27 @@ class InboundTaskProcessor:
             published_repo = PublishedAdRepository(session)
             processed_repo = ProcessedInboundMessageRepository(session)
             audit_repo = AuditEventRepository(session)
+            trace_sink = self._build_trace_sink(audit_repo=audit_repo)
+            self._set_provider_trace_context(
+                self._llm_gateway,
+                operator_phone=payload.operator_phone,
+                wamid=payload.wamid,
+                trace_sink=trace_sink,
+            )
+            self._set_provider_trace_context(
+                self._ad_generation_service,
+                operator_phone=payload.operator_phone,
+                wamid=payload.wamid,
+                trace_sink=trace_sink,
+            )
 
             inserted = await processed_repo.mark_processed(
                 wamid=payload.wamid,
                 operator_phone=payload.operator_phone,
             )
             if not inserted:
+                self._clear_provider_trace_context(self._llm_gateway)
+                self._clear_provider_trace_context(self._ad_generation_service)
                 return ProcessInboundResult(duplicate=True)
 
             operator = await operator_repo.get_by_phone(payload.operator_phone)
@@ -173,6 +191,8 @@ class InboundTaskProcessor:
                     operator_phone=payload.operator_phone,
                     metadata={"wamid": payload.wamid},
                 )
+                self._clear_provider_trace_context(self._llm_gateway)
+                self._clear_provider_trace_context(self._ad_generation_service)
                 return ProcessInboundResult(duplicate=False, unauthorized_operator=True)
 
             now = utcnow()
@@ -928,6 +948,8 @@ class InboundTaskProcessor:
                     "llm_used": llm_used,
                 },
             )
+            self._clear_provider_trace_context(self._llm_gateway)
+            self._clear_provider_trace_context(self._ad_generation_service)
             return ProcessInboundResult(
                 duplicate=False,
                 unauthorized_operator=False,
@@ -940,6 +962,38 @@ class InboundTaskProcessor:
                 generated_image_url=generated_image_url,
                 publish_buttons_prompt=publish_buttons_prompt,
             )
+
+    def _build_trace_sink(self, *, audit_repo: AuditEventRepository) -> TraceSink:
+        async def _trace_sink(action: str, operator_phone: str | None, metadata: dict[str, Any]):
+            await audit_repo.log(
+                actor="system",
+                action=action,
+                operator_phone=operator_phone,
+                metadata=metadata,
+            )
+
+        return _trace_sink
+
+    def _set_provider_trace_context(
+        self,
+        provider: object,
+        *,
+        operator_phone: str,
+        wamid: str | None,
+        trace_sink: TraceSink | None,
+    ) -> None:
+        setter = getattr(provider, "set_trace_context", None)
+        if callable(setter):
+            setter(
+                operator_phone=operator_phone,
+                wamid=wamid,
+                trace_sink=trace_sink,
+            )
+
+    def _clear_provider_trace_context(self, provider: object) -> None:
+        clearer = getattr(provider, "clear_trace_context", None)
+        if callable(clearer):
+            clearer()
 
     async def _confirm_publish_to_cms(
         self,

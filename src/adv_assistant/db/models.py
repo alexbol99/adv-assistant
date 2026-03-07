@@ -29,9 +29,6 @@ class Operator(TimestampMixin, Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     phone: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
     display_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    meta_user_id: Mapped[str | None] = mapped_column(
-        String(128), nullable=True, unique=True, index=True
-    )
     language: Mapped[str] = mapped_column(String(2), nullable=False, default=Language.HE.value)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="ILS")
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)

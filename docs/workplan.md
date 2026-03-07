@@ -25,7 +25,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 **Goal:** each authorized operator publishes to their own CMS campaign/playlist mapping.
 
 **Scope**
-- Add per-operator CMS mapping fields (`cms_campaign_id`, `cms_playlist_id`) and optional `meta_user_id`.
+- Add per-operator CMS mapping fields (`cms_campaign_id`, `cms_playlist_id`).
 - Add a minimal admin API + web form to register/update operator CMS mapping.
 - Keep publish-only scope for MVP (no list/delete-all implementation in this stage).
 - If operator mapping is missing, block publish with the fixed user message:
@@ -87,7 +87,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 **Validation targets**
 1. Automated tests confirm publish buttons are present for preview success + follow-up paths.
 2. Manual WhatsApp E2E confirms button visibility in real conversation flow.
-3. Admin UI lookup renders a structured operator profile view from both phone and meta-user lookups.
+3. Admin UI lookup renders a structured operator profile view from phone lookup.
 
 ---
 

@@ -63,20 +63,14 @@ async def test_crud_repositories(db_session: AsyncSession) -> None:
 
     updated_mapping = await operator_repo.update_cms_mapping(
         operator.phone,
-        meta_user_id="meta-user-1",
         cms_campaign_id=157,
         cms_playlist_id=139,
     )
     assert updated_mapping is True
     refreshed_operator = await operator_repo.get_by_phone(operator.phone)
     assert refreshed_operator is not None
-    assert refreshed_operator.meta_user_id == "meta-user-1"
     assert refreshed_operator.cms_campaign_id == 157
     assert refreshed_operator.cms_playlist_id == 139
-
-    by_meta = await operator_repo.get_by_meta_user_id("meta-user-1")
-    assert by_meta is not None
-    assert by_meta.phone == operator.phone
 
     active_operators = await operator_repo.list_active()
     assert len(active_operators) == 1
@@ -203,6 +197,38 @@ async def test_session_repository_can_clear_nullable_fields(db_session: AsyncSes
     assert cleared.pending_upload_type is None
     assert cleared.pending_followup_question is None
     assert cleared.expires_at is None
+
+
+async def test_audit_repository_lists_recent_operator_actions(db_session: AsyncSession) -> None:
+    audit_repo = AuditEventRepository(db_session)
+
+    await audit_repo.log(
+        actor="system",
+        action="openai_request_debug",
+        operator_phone="+972500000888",
+        metadata={"wamid": "w-1"},
+    )
+    await audit_repo.log(
+        actor="system",
+        action="gemini_request_debug",
+        operator_phone="+972500000888",
+        metadata={"wamid": "w-2"},
+    )
+    await audit_repo.log(
+        actor="system",
+        action="inbound_message_processed",
+        operator_phone="+972500000888",
+        metadata={"wamid": "w-3"},
+    )
+
+    rows = await audit_repo.list_recent_for_operator_actions(
+        operator_phone="+972500000888",
+        actions=["openai_request_debug", "gemini_request_debug"],
+        limit=10,
+    )
+
+    assert len(rows) == 2
+    assert {row.action for row in rows} == {"openai_request_debug", "gemini_request_debug"}
 
 
 async def test_retention_jobs(db_session: AsyncSession) -> None:

@@ -29,7 +29,6 @@ class OperatorRepository:
         self,
         *,
         phone: str,
-        meta_user_id: str | None = None,
         display_name: str | None = None,
         language: str = "he",
         currency: str = "ILS",
@@ -44,7 +43,6 @@ class OperatorRepository:
     ) -> Operator:
         operator = Operator(
             phone=phone,
-            meta_user_id=meta_user_id,
             display_name=display_name,
             language=language,
             currency=currency,
@@ -63,12 +61,6 @@ class OperatorRepository:
 
     async def get_by_phone(self, phone: str) -> Operator | None:
         result = await self.session.execute(select(Operator).where(Operator.phone == phone))
-        return result.scalar_one_or_none()
-
-    async def get_by_meta_user_id(self, meta_user_id: str) -> Operator | None:
-        result = await self.session.execute(
-            select(Operator).where(Operator.meta_user_id == meta_user_id)
-        )
         return result.scalar_one_or_none()
 
     async def list_active(self) -> list[Operator]:
@@ -120,13 +112,10 @@ class OperatorRepository:
         self,
         phone: str,
         *,
-        meta_user_id: str | None | object = _UNSET,
         cms_campaign_id: int | None | object = _UNSET,
         cms_playlist_id: int | None | object = _UNSET,
     ) -> bool:
         values: dict[str, Any] = {"updated_at": utcnow()}
-        if meta_user_id is not _UNSET:
-            values["meta_user_id"] = meta_user_id
         if cms_campaign_id is not _UNSET:
             values["cms_campaign_id"] = cms_campaign_id
         if cms_playlist_id is not _UNSET:
@@ -387,6 +376,24 @@ class AuditEventRepository:
     async def list_recent(self, limit: int = 100) -> list[AuditEvent]:
         result = await self.session.execute(
             select(AuditEvent).order_by(AuditEvent.timestamp.desc()).limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def list_recent_for_operator_actions(
+        self,
+        *,
+        operator_phone: str,
+        actions: list[str],
+        limit: int = 50,
+    ) -> list[AuditEvent]:
+        result = await self.session.execute(
+            select(AuditEvent)
+            .where(
+                AuditEvent.operator_phone == operator_phone,
+                AuditEvent.action.in_(actions),
+            )
+            .order_by(AuditEvent.timestamp.desc())
+            .limit(limit)
         )
         return list(result.scalars().all())
 
