@@ -44,6 +44,7 @@ def test_gemini_model_falls_back_to_default_when_blank(monkeypatch) -> None:
     settings = Settings.from_env()
     assert settings.gemini_model == "gemini-3.1-flash-image-preview"
 
+
 def test_app_service_role_defaults_to_all(monkeypatch) -> None:
     monkeypatch.delenv("APP_SERVICE_ROLE", raising=False)
     settings = Settings.from_env()
