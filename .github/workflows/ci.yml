@@ -126,10 +126,46 @@ jobs:
           name: image-digests
           path: image-digests.txt
 
-  deploy-staging:
+  migrate-staging:
     runs-on: ubuntu-latest
     needs: publish-image
-    if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.STAGING_GCP_REGION != '' && vars.STAGING_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.STAGING_CLOUD_RUN_WORKER_SERVICE != '' && vars.STAGING_TASKS_REGION != '' && vars.STAGING_TASKS_QUEUE != '' && vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL != ''
+    if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_GCP_PROJECT_ID != '' && vars.STAGING_CLOUD_SQL_CONNECTION_NAME != '' && vars.STAGING_DB_NAME != '' && vars.STAGING_DB_MIGRATOR_USER != '' && vars.STAGING_DB_MIGRATOR_PASS_SECRET != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run Alembic migrations (staging)
+        env:
+          GCP_PROJECT_ID: ${{ vars.STAGING_GCP_PROJECT_ID }}
+          CLOUD_SQL_CONNECTION_NAME: ${{ vars.STAGING_CLOUD_SQL_CONNECTION_NAME }}
+          DB_NAME: ${{ vars.STAGING_DB_NAME }}
+          DB_MIGRATOR_USER: ${{ vars.STAGING_DB_MIGRATOR_USER }}
+          DB_MIGRATOR_PASS_SECRET: ${{ vars.STAGING_DB_MIGRATOR_PASS_SECRET }}
+        run: |
+          scripts/run_cloudsql_migration.sh
+
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: [publish-image, migrate-staging]
+    if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.STAGING_GCP_REGION != '' && vars.STAGING_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.STAGING_CLOUD_RUN_WORKER_SERVICE != '' && vars.STAGING_TASKS_REGION != '' && vars.STAGING_TASKS_QUEUE != '' && vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL != '' && vars.STAGING_CLOUD_SQL_CONNECTION_NAME != '' && vars.STAGING_DB_NAME != '' && vars.STAGING_DB_MIGRATOR_USER != '' && vars.STAGING_DB_MIGRATOR_PASS_SECRET != ''
     steps:
       - uses: actions/checkout@v4
 
@@ -198,10 +234,46 @@ jobs:
             --update-env-vars "APP_SERVICE_ROLE=webhook,TASKS_MODE=cloud,GCP_PROJECT_ID=$STAGING_GCP_PROJECT_ID,TASKS_REGION=$STAGING_TASKS_REGION,TASKS_QUEUE=$STAGING_TASKS_QUEUE,TASKS_SERVICE_ACCOUNT_EMAIL=$STAGING_TASKS_SERVICE_ACCOUNT_EMAIL,TASKS_HANDLER_URL=$TASKS_HANDLER_URL,TASKS_OIDC_AUDIENCE=$TASKS_HANDLER_URL" \
             $ALLOW_FLAG
 
-  deploy-production:
+  migrate-production:
     runs-on: ubuntu-latest
     needs: publish-image
-    if: startsWith(github.ref, 'refs/tags/v') && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.PROD_GCP_REGION != '' && vars.PROD_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.PROD_CLOUD_RUN_WORKER_SERVICE != '' && vars.PROD_TASKS_REGION != '' && vars.PROD_TASKS_QUEUE != '' && vars.PROD_TASKS_SERVICE_ACCOUNT_EMAIL != ''
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PROD_GCP_PROJECT_ID != '' && vars.PROD_CLOUD_SQL_CONNECTION_NAME != '' && vars.PROD_DB_NAME != '' && vars.PROD_DB_MIGRATOR_USER != '' && vars.PROD_DB_MIGRATOR_PASS_SECRET != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run Alembic migrations (production)
+        env:
+          GCP_PROJECT_ID: ${{ vars.PROD_GCP_PROJECT_ID }}
+          CLOUD_SQL_CONNECTION_NAME: ${{ vars.PROD_CLOUD_SQL_CONNECTION_NAME }}
+          DB_NAME: ${{ vars.PROD_DB_NAME }}
+          DB_MIGRATOR_USER: ${{ vars.PROD_DB_MIGRATOR_USER }}
+          DB_MIGRATOR_PASS_SECRET: ${{ vars.PROD_DB_MIGRATOR_PASS_SECRET }}
+        run: |
+          scripts/run_cloudsql_migration.sh
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [publish-image, migrate-production]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.PROD_GCP_REGION != '' && vars.PROD_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.PROD_CLOUD_RUN_WORKER_SERVICE != '' && vars.PROD_TASKS_REGION != '' && vars.PROD_TASKS_QUEUE != '' && vars.PROD_TASKS_SERVICE_ACCOUNT_EMAIL != '' && vars.PROD_CLOUD_SQL_CONNECTION_NAME != '' && vars.PROD_DB_NAME != '' && vars.PROD_DB_MIGRATOR_USER != '' && vars.PROD_DB_MIGRATOR_PASS_SECRET != ''
     steps:
       - uses: actions/checkout@v4
 
