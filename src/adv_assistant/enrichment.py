@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass
@@ -111,9 +112,13 @@ class OpenFoodFactsProvider:
         *,
         base_url: str = "https://world.openfoodfacts.org",
         timeout_seconds: float = 8.0,
+        max_attempts: int = 2,
+        retry_base_seconds: float = 0.5,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._owns_client = client is None
+        self._max_attempts = max(1, max_attempts)
+        self._retry_base_seconds = max(0.0, retry_base_seconds)
         self._client = client or httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout_seconds,
@@ -127,11 +132,55 @@ class OpenFoodFactsProvider:
         return "open_food_facts"
 
     async def lookup(self, *, ean: str, language: str) -> EnrichedProduct | None:
-        try:
-            response = await self._client.get(f"/api/v2/product/{ean}")
-            response.raise_for_status()
-        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-            logger.warning("Open Food Facts lookup failed for ean=%s: %s", ean, exc)
+        response: httpx.Response | None = None
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                response = await self._client.get(f"/api/v2/product/{ean}")
+                response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                retryable = _is_retryable_open_food_facts_status(status_code)
+                if retryable and attempt < self._max_attempts:
+                    delay_seconds = _retry_delay_seconds(
+                        attempt=attempt,
+                        base_seconds=self._retry_base_seconds,
+                    )
+                    logger.warning(
+                        "Open Food Facts lookup retryable HTTP error for ean=%s "
+                        "(status=%s, attempt=%s/%s, retry_in=%.2fs): %s",
+                        ean,
+                        status_code,
+                        attempt,
+                        self._max_attempts,
+                        delay_seconds,
+                        exc,
+                    )
+                    await asyncio.sleep(delay_seconds)
+                    continue
+                logger.warning("Open Food Facts lookup failed for ean=%s: %s", ean, exc)
+                return None
+            except httpx.RequestError as exc:
+                if attempt < self._max_attempts:
+                    delay_seconds = _retry_delay_seconds(
+                        attempt=attempt,
+                        base_seconds=self._retry_base_seconds,
+                    )
+                    logger.warning(
+                        "Open Food Facts lookup retryable request error for ean=%s "
+                        "(attempt=%s/%s, retry_in=%.2fs): %s",
+                        ean,
+                        attempt,
+                        self._max_attempts,
+                        delay_seconds,
+                        exc,
+                    )
+                    await asyncio.sleep(delay_seconds)
+                    continue
+                logger.warning("Open Food Facts lookup failed for ean=%s: %s", ean, exc)
+                return None
+
+        if response is None:
             return None
         payload = response.json()
         if int(payload.get("status", 0)) != 1:
@@ -224,3 +273,17 @@ def _pick_text(payload: dict[str, object], *keys: str) -> str | None:
         if stripped:
             return stripped
     return None
+
+
+def _is_retryable_open_food_facts_status(status_code: int | None) -> bool:
+    if status_code is None:
+        return False
+    if status_code in {408, 429}:
+        return True
+    return 500 <= status_code <= 599
+
+
+def _retry_delay_seconds(*, attempt: int, base_seconds: float) -> float:
+    safe_attempt = max(1, attempt)
+    safe_base = max(0.0, base_seconds)
+    return safe_base * (2 ** (safe_attempt - 1))

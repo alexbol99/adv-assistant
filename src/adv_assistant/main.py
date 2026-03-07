@@ -137,6 +137,8 @@ def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentServ
             OpenFoodFactsProvider(
                 base_url=settings.open_food_facts_base_url,
                 timeout_seconds=settings.enrichment_http_timeout_seconds,
+                max_attempts=settings.enrichment_max_attempts,
+                retry_base_seconds=settings.enrichment_retry_base_seconds,
             ),
             NoopProductLookupProvider("ean_fallback"),
             NoopProductLookupProvider("web_search"),

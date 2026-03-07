@@ -18,8 +18,8 @@ Use this checklist before enabling enrichment in staging/production.
 ## Security and Operations
 
 - [ ] API secrets stored in Secret Manager (not in repo, not in plaintext env files committed to git).
-- [ ] Outbound request timeouts and retries are configured to avoid webhook/task blocking.
-- [ ] Enrichment disable switch verified (`ENRICHMENT_ENABLED=false`).
+- [x] Outbound request timeouts and retries are configured to avoid webhook/task blocking.
+- [x] Enrichment disable switch verified (`ENRICHMENT_ENABLED=false`).
 
 ## Sign-off
 
