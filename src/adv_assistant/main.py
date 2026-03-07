@@ -60,6 +60,7 @@ from adv_assistant.tasks_auth import (
 )
 from adv_assistant.tasks_queue import (
     CloudTasksEnqueuer,
+    DisabledTaskEnqueuer,
     InboundTaskPayload,
     InlineTaskEnqueuer,
     TaskEnqueuer,
@@ -360,6 +361,11 @@ async def _validate_media_lifecycle(
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     current_settings = settings or Settings.from_env()
+    service_role = current_settings.app_service_role.strip().lower()
+    if service_role not in {"all", "webhook", "worker"}:
+        raise RuntimeError("APP_SERVICE_ROLE must be one of: all, webhook, worker")
+    webhook_enabled = service_role in {"all", "webhook"}
+    worker_enabled = service_role in {"all", "worker"}
 
     engine = create_engine(current_settings.database_url)
     session_factory = create_session_factory(engine)
@@ -469,10 +475,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     pass
         return result
 
-    task_enqueuer = _build_task_enqueuer(
-        settings=current_settings,
-        process_callback=process_and_maybe_send_reply,
-    )
+    if webhook_enabled:
+        task_enqueuer = _build_task_enqueuer(
+            settings=current_settings,
+            process_callback=process_and_maybe_send_reply,
+        )
+    else:
+        task_enqueuer = DisabledTaskEnqueuer()
     task_authorizer = _build_task_authorizer(current_settings)
 
     @asynccontextmanager
@@ -505,6 +514,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.media_store = media_store
     app.state.cms_publisher = cms_publisher
     app.state.process_and_maybe_send_reply = process_and_maybe_send_reply
+    app.state.webhook_enabled = webhook_enabled
+    app.state.worker_enabled = worker_enabled
 
     def get_settings() -> Settings:
         return app.state.settings
@@ -580,6 +591,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
 
     AdminAuthDep = Annotated[None, Depends(_require_admin)]
+
+    def _ensure_route_enabled(*, enabled: bool) -> None:
+        if enabled:
+            return
+        raise HTTPException(status_code=404, detail="Not found")
 
     def _to_operator_mapping_response(operator: Operator) -> OperatorCMSMappingResponse:
         return OperatorCMSMappingResponse(
@@ -849,6 +865,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         verify_token: HubToken = "",
         challenge: HubChallenge = "",
     ) -> PlainTextResponse:
+        _ensure_route_enabled(enabled=app.state.webhook_enabled)
         if mode == "subscribe" and verify_token == settings_value.meta_verify_token:
             return PlainTextResponse(content=challenge, status_code=200)
         raise HTTPException(status_code=403, detail="Verification failed")
@@ -861,6 +878,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task_enqueuer_value: TaskEnqueuerDep,
         whatsapp_client_value: WhatsAppClientDep,
     ) -> dict[str, int | str]:
+        _ensure_route_enabled(enabled=app.state.webhook_enabled)
         body = await request.body()
         signature_header = request.headers.get("X-Hub-Signature-256")
         if not verify_x_hub_signature(
@@ -963,6 +981,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         task_authorizer_value: TaskAuthorizerDep,
         process_inbound_value: ProcessInboundDep,
     ) -> dict[str, str]:
+        _ensure_route_enabled(enabled=app.state.worker_enabled)
         authorization_header = request.headers.get("Authorization")
         if not await task_authorizer_value.is_authorized(authorization_header):
             raise HTTPException(status_code=401, detail="Unauthorized caller")
