@@ -13,6 +13,7 @@
 | [MVP Priority Plan](docs/mvp-priority-plan-2026-03-05.md) | Current MVP stage order, locked decisions, and acceptance tests. |
 | [Phase 5 Compliance Checklist](docs/phase5-compliance-checklist.md) | Pre-production legal/compliance checklist for enrichment sources and data handling. |
 | [DB Migration Discipline](docs/database-migration-discipline.md) | Expand/contract migration policy and rollout sequence for safe staged deployments. |
+| [Secrets and Configuration Management](docs/secrets-and-configuration-management.md) | Secret Manager naming convention and Cloud Run secret-binding rollout. |
 
 ## Quick Summary
 
@@ -140,9 +141,9 @@ The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 - on release tags (`v*`), one Docker image build is pushed to Artifact Registry in both staging and prod projects
 - image digest is resolved and saved as CI artifact (`image-digests`)
 - staging migration job from `main` runs Alembic with a dedicated migrator DB user and must succeed before staging deploy
-- staging deploy from `main` uses immutable image digest (`--image ...@sha256:...`) and deploys worker first, then webhook
+- staging deploy from `main` uses immutable image digest (`--image ...@sha256:...`), injects configured Secret Manager bindings, and deploys worker first, then webhook
 - production migration job from release tag (`v*`) runs Alembic with a dedicated migrator DB user and must succeed before production deploy
-- production deploy from release tag (`v*`) uses immutable image digest (`--image ...@sha256:...`) and deploys worker first, then webhook
+- production deploy from release tag (`v*`) uses immutable image digest (`--image ...@sha256:...`), injects configured Secret Manager bindings, and deploys worker first, then webhook
 
 Required repository variables for `main` image publish:
 - `ARTIFACT_REGISTRY_REGION` (for example `me-west1`)
@@ -158,7 +159,19 @@ Required repository variables for staging deploy:
 - `STAGING_TASKS_REGION`
 - `STAGING_TASKS_QUEUE`
 - `STAGING_TASKS_SERVICE_ACCOUNT_EMAIL`
+- `STAGING_SECRET_DATABASE_URL` (Secret Manager mapping for `DATABASE_URL`; prevents SQLite fallback in Cloud Run)
+- `STAGING_SECRET_WHATSAPP_ACCESS_TOKEN` (Step 5 convention; currently `WHATSAPP_ACCESS_TOKEN_STAGING`)
 - optional: `STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true` (applies to webhook service only)
+
+Optional repository variables for staging secret bindings:
+- `STAGING_SECRET_VERIFY_TOKEN`
+- `STAGING_SECRET_META_APP_SECRET`
+- `STAGING_SECRET_ADMIN_BASIC_USERNAME`
+- `STAGING_SECRET_ADMIN_BASIC_PASSWORD`
+- `STAGING_SECRET_OPENAI_API_KEY`
+- `STAGING_SECRET_GEMINI_API_KEY`
+- `STAGING_SECRET_NANA_BANANA_API_KEY`
+- `STAGING_SECRET_CMS_CITYSCREEN_APP_TOKEN`
 
 Required repository variables for staging migration job:
 - `STAGING_CLOUD_SQL_CONNECTION_NAME` (format: `project:region:instance`)
@@ -173,7 +186,19 @@ Required repository variables for production deploy:
 - `PROD_TASKS_REGION`
 - `PROD_TASKS_QUEUE`
 - `PROD_TASKS_SERVICE_ACCOUNT_EMAIL`
+- `PROD_SECRET_DATABASE_URL` (Secret Manager mapping for `DATABASE_URL`; prevents SQLite fallback in Cloud Run)
 - optional: `PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true` (applies to webhook service only)
+
+Optional repository variables for production secret bindings:
+- `PROD_SECRET_VERIFY_TOKEN`
+- `PROD_SECRET_META_APP_SECRET`
+- `PROD_SECRET_WHATSAPP_ACCESS_TOKEN` (deferred for now)
+- `PROD_SECRET_ADMIN_BASIC_USERNAME`
+- `PROD_SECRET_ADMIN_BASIC_PASSWORD`
+- `PROD_SECRET_OPENAI_API_KEY`
+- `PROD_SECRET_GEMINI_API_KEY`
+- `PROD_SECRET_NANA_BANANA_API_KEY`
+- `PROD_SECRET_CMS_CITYSCREEN_APP_TOKEN`
 
 Required repository variables for production migration job:
 - `PROD_CLOUD_SQL_CONNECTION_NAME` (format: `project:region:instance`)
