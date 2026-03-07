@@ -724,8 +724,10 @@ class OpenAILLMGateway:
                     "default_provider" if used_temperature_fallback else "explicit_zero"
                 ),
             },
-            "system_prompt": self._truncate_for_trace(system_prompt),
-            "user_prompt": self._truncate_for_trace(user_prompt),
+            "system_prompt_redacted": "<redacted>",
+            "system_prompt_length": len(system_prompt),
+            "user_prompt_redacted": "<redacted>",
+            "user_prompt_length": len(user_prompt),
         }
         if request_error:
             metadata["error"] = self._truncate_for_trace(request_error)
