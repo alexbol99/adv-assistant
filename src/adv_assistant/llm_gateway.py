@@ -22,6 +22,7 @@ class _TraceContext:
     wamid: str | None
     trace_sink: TraceSink | None
 
+
 SUPPORTED_INTENTS = (
     "create_ad",
     "regenerate_with_reference",
@@ -720,9 +721,7 @@ class OpenAILLMGateway:
                 "response_format": "json_object",
                 "timeout_seconds": self._timeout_seconds,
                 "temperature_mode": (
-                    "default_provider"
-                    if used_temperature_fallback
-                    else "explicit_zero"
+                    "default_provider" if used_temperature_fallback else "explicit_zero"
                 ),
             },
             "system_prompt": self._truncate_for_trace(system_prompt),
