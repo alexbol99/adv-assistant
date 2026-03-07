@@ -114,7 +114,8 @@ Exit criteria:
 3. Use separate deploy service accounts for staging and production.
 4. Restrict worker invocation to Cloud Tasks service account only.
 5. Enforce least privilege on Cloud Run/Cloud SQL/GCS IAM roles.
-6. Add dependency scanning and container vulnerability scanning in CI.
+6. For CMS outbound security, use a fixed egress IP and request CMS-side IP allowlisting (possible in this deployment model).
+7. Add dependency scanning and container vulnerability scanning in CI.
 
 Exit criteria:
 - No long-lived service account keys in CI; short-lived federated credentials only.
@@ -220,6 +221,7 @@ Exit criteria:
 - Adopt GitHub OIDC + Workload Identity Federation (replace static service-account JSON keys).
 - Enforce least privilege everywhere (runtime SA, deploy SA, tasks invoker, DB users).
 - Keep worker private and OIDC-protected.
+- For third-party CMS integration, expose a stable outbound IP and ask the CMS team to allowlist that IP.
 - Keep secrets in Secret Manager only.
 - Add image/dependency scanning and secret scanning in CI.
 - Add audit trail retention and access reviews.
