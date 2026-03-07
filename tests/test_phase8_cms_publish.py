@@ -220,6 +220,40 @@ async def test_confirm_publish_button_blocks_when_operator_cms_mapping_missing(
         assert updated_draft.status == AdDraftStatus.PREVIEW_READY
 
 
+async def test_confirm_publish_button_blocks_when_operator_cms_mapping_not_positive(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000806"
+    await _seed_operator(session_factory, phone, campaign_id=0, playlist_id=139)
+    draft_id = await _seed_preview_draft(
+        session_factory,
+        phone=phone,
+        rendered_image_url="https://storage.googleapis.com/media/preview.png",
+    )
+    cms = FakeCMSPublisher()
+    processor = InboundTaskProcessor(session_factory, cms_publisher=cms)
+
+    payload = InboundTaskPayload(
+        wamid="wamid-phase8-confirm-publish-invalid-mapping",
+        operator_phone=phone,
+        raw_message={
+            "type": "interactive",
+            "interactive": {"button_reply": {"id": BUTTON_CONFIRM_PUBLISH}},
+        },
+    )
+    result = await processor.process(payload)
+
+    assert result.status == "processed"
+    assert result.deterministic_action == "confirm_publish"
+    assert result.reply_text == "אתה לא מחובר למערכת כרגע, פנה לתמיכה כדי לייצר את החיבור"
+    assert cms.calls == 0
+
+    async with session_scope(session_factory) as session:
+        updated_draft = await session.get(AdDraft, draft_id)
+        assert updated_draft is not None
+        assert updated_draft.status == AdDraftStatus.PREVIEW_READY
+
+
 async def test_confirm_publish_routes_by_operator_cms_mapping(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

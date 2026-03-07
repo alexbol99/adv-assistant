@@ -1011,7 +1011,9 @@ class InboundTaskProcessor:
                 return current_draft, "אין כרגע תמונת תצוגה מוכנה לפרסום."
             return current_draft, "There is no generated preview image ready for publishing."
 
-        if operator.cms_campaign_id is None or operator.cms_playlist_id is None:
+        campaign_id = _coerce_positive_int(operator.cms_campaign_id)
+        playlist_id = _coerce_positive_int(operator.cms_playlist_id)
+        if campaign_id is None or playlist_id is None:
             await audit_repo.log(
                 actor="system",
                 action="publish_blocked_operator_not_connected",
@@ -1019,6 +1021,8 @@ class InboundTaskProcessor:
                 metadata={
                     "wamid": payload.wamid,
                     "draft_id": str(current_draft.id),
+                    "cms_campaign_id": operator.cms_campaign_id,
+                    "cms_playlist_id": operator.cms_playlist_id,
                 },
             )
             return current_draft, _cms_not_connected_reply()
@@ -1047,8 +1051,8 @@ class InboundTaskProcessor:
             publish_result = await self._cms_publisher.publish_generated_image(
                 image_url=current_draft.rendered_image_url,
                 title=title,
-                campaign_id=operator.cms_campaign_id,
-                playlist_id=operator.cms_playlist_id,
+                campaign_id=campaign_id,
+                playlist_id=playlist_id,
             )
             cms_id = str(publish_result.advertisement_id)
             existing = await published_repo.get_by_cms_id(cms_id)
@@ -1075,8 +1079,8 @@ class InboundTaskProcessor:
                     "file_id": publish_result.file_id,
                     "advertisement_id": publish_result.advertisement_id,
                     "slot_id": publish_result.slot_id,
-                    "campaign_id": operator.cms_campaign_id,
-                    "playlist_id": operator.cms_playlist_id,
+                    "campaign_id": campaign_id,
+                    "playlist_id": playlist_id,
                 },
             )
             logger.info(
@@ -1824,6 +1828,23 @@ def _publish_buttons_prompt(language: str) -> str:
     if language.lower() == "he":
         return "לפרסם את המודעה הזו ל-CMS?"
     return "Publish this ad to CMS?"
+
+
+def _coerce_positive_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            parsed = int(stripped)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
 
 
 def _cms_not_connected_reply() -> str:
