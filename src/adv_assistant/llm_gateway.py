@@ -22,7 +22,6 @@ class _TraceContext:
     wamid: str | None
     trace_sink: TraceSink | None
 
-
 SUPPORTED_INTENTS = (
     "create_ad",
     "regenerate_with_reference",
