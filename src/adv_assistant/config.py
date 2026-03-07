@@ -50,6 +50,7 @@ def _env_with_default(name: str, default: str) -> str:
 class Settings:
     app_name: str = "adv-assistant"
     database_url: str = field(default_factory=get_database_url)
+    app_service_role: str = "all"
 
     meta_verify_token: str = "change-me"
     meta_app_secret: str | None = None
@@ -134,6 +135,7 @@ class Settings:
         return cls(
             app_name=os.getenv("APP_NAME", "adv-assistant"),
             database_url=get_database_url(),
+            app_service_role=_env_with_default("APP_SERVICE_ROLE", "all").lower(),
             meta_verify_token=os.getenv("VERIFY_TOKEN", "change-me"),
             meta_app_secret=os.getenv("META_APP_SECRET"),
             replay_window_seconds=_int_env("REPLAY_WINDOW_SECONDS", 300),

@@ -60,6 +60,7 @@ from adv_assistant.tasks_auth import (
 )
 from adv_assistant.tasks_queue import (
     CloudTasksEnqueuer,
+    DisabledTaskEnqueuer,
     InboundTaskPayload,
     InlineTaskEnqueuer,
     TaskEnqueuer,
@@ -367,6 +368,11 @@ async def _validate_media_lifecycle(
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     current_settings = settings or Settings.from_env()
+    service_role = current_settings.app_service_role.strip().lower()
+    if service_role not in {"all", "webhook", "worker"}:
+        raise RuntimeError("APP_SERVICE_ROLE must be one of: all, webhook, worker")
+    webhook_enabled = service_role in {"all", "webhook"}
+    worker_enabled = service_role in {"all", "worker"}
 
     engine = create_engine(current_settings.database_url)
     session_factory = create_session_factory(engine)
@@ -478,10 +484,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     pass
         return result
 
-    task_enqueuer = _build_task_enqueuer(
-        settings=current_settings,
-        process_callback=process_and_maybe_send_reply,
-    )
+    if webhook_enabled:
+        task_enqueuer = _build_task_enqueuer(
+            settings=current_settings,
+            process_callback=process_and_maybe_send_reply,
+        )
+    else:
+        task_enqueuer = DisabledTaskEnqueuer()
     task_authorizer = _build_task_authorizer(current_settings)
 
     @asynccontextmanager
@@ -514,6 +523,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.media_store = media_store
     app.state.cms_publisher = cms_publisher
     app.state.process_and_maybe_send_reply = process_and_maybe_send_reply
+    app.state.webhook_enabled = webhook_enabled
+    app.state.worker_enabled = worker_enabled
 
     def get_settings() -> Settings:
         return app.state.settings
@@ -848,133 +859,137 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/webhook")
-    async def verify_webhook(
-        settings_value: SettingsDep,
-        mode: HubMode = "",
-        verify_token: HubToken = "",
-        challenge: HubChallenge = "",
-    ) -> PlainTextResponse:
-        if mode == "subscribe" and verify_token == settings_value.meta_verify_token:
-            return PlainTextResponse(content=challenge, status_code=200)
-        raise HTTPException(status_code=403, detail="Verification failed")
+    if app.state.webhook_enabled:
 
-    @app.post("/webhook")
-    async def receive_webhook(
-        request: Request,
-        session: DbSessionDep,
-        settings_value: SettingsDep,
-        task_enqueuer_value: TaskEnqueuerDep,
-        whatsapp_client_value: WhatsAppClientDep,
-    ) -> dict[str, int | str]:
-        body = await request.body()
-        signature_header = request.headers.get("X-Hub-Signature-256")
-        if not verify_x_hub_signature(
-            app_secret=settings_value.meta_app_secret,
-            payload_body=body,
-            signature_header=signature_header,
-        ):
-            raise HTTPException(status_code=401, detail="Invalid signature")
+        @app.get("/webhook")
+        async def verify_webhook(
+            settings_value: SettingsDep,
+            mode: HubMode = "",
+            verify_token: HubToken = "",
+            challenge: HubChallenge = "",
+        ) -> PlainTextResponse:
+            if mode == "subscribe" and verify_token == settings_value.meta_verify_token:
+                return PlainTextResponse(content=challenge, status_code=200)
+            raise HTTPException(status_code=403, detail="Verification failed")
 
-        payload = await request.json()
-        events = extract_inbound_messages(payload)
-        now_value = utcnow()
-        operator_repo = OperatorRepository(session)
-        audit_repo = AuditEventRepository(session)
-
-        enqueued_count = 0
-        for event in events:
-            if not is_within_replay_window(
-                message_timestamp=event.timestamp,
-                now=now_value,
-                replay_window_seconds=settings_value.replay_window_seconds,
+        @app.post("/webhook")
+        async def receive_webhook(
+            request: Request,
+            session: DbSessionDep,
+            settings_value: SettingsDep,
+            task_enqueuer_value: TaskEnqueuerDep,
+            whatsapp_client_value: WhatsAppClientDep,
+        ) -> dict[str, int | str]:
+            body = await request.body()
+            signature_header = request.headers.get("X-Hub-Signature-256")
+            if not verify_x_hub_signature(
+                app_secret=settings_value.meta_app_secret,
+                payload_body=body,
+                signature_header=signature_header,
             ):
-                await audit_repo.log(
-                    actor="system",
-                    action="webhook_replay_rejected",
-                    operator_phone=event.operator_phone,
-                    metadata={"wamid": event.wamid},
-                )
-                continue
+                raise HTTPException(status_code=401, detail="Invalid signature")
 
-            operator = await operator_repo.get_by_phone(event.operator_phone)
-            if not operator or not operator.active:
-                if await _should_send_unauthorized_rejection(
-                    audit_repo=audit_repo,
-                    phone=event.operator_phone,
-                    now_value=now_value,
-                    window_minutes=settings_value.unauthorized_rejection_window_minutes,
+            payload = await request.json()
+            events = extract_inbound_messages(payload)
+            now_value = utcnow()
+            operator_repo = OperatorRepository(session)
+            audit_repo = AuditEventRepository(session)
+
+            enqueued_count = 0
+            for event in events:
+                if not is_within_replay_window(
+                    message_timestamp=event.timestamp,
+                    now=now_value,
+                    replay_window_seconds=settings_value.replay_window_seconds,
                 ):
-                    try:
-                        await whatsapp_client_value.send_text(
-                            to_phone=event.operator_phone,
-                            message=settings_value.unauthorized_rejection_message,
-                        )
-                    except Exception as exc:
-                        await audit_repo.log(
-                            actor="system",
-                            action="unauthorized_rejection_failed",
-                            operator_phone=event.operator_phone,
-                            metadata={"wamid": event.wamid, "error": str(exc)},
-                        )
-                    else:
-                        await audit_repo.log(
-                            actor="system",
-                            action="unauthorized_rejection_sent",
-                            operator_phone=event.operator_phone,
-                            metadata={"wamid": event.wamid},
-                        )
-                continue
-
-            payload_obj = InboundTaskPayload(
-                wamid=event.wamid,
-                operator_phone=event.operator_phone,
-                message_timestamp=event.timestamp.isoformat() if event.timestamp else None,
-                raw_message=event.raw_message,
-            )
-            try:
-                await task_enqueuer_value.enqueue_inbound(payload_obj)
-            except Exception as exc:
-                logger.exception(
-                    "Inbound enqueue/processing failed (wamid=%s, operator_phone=%s, mode=%s)",
-                    event.wamid,
-                    event.operator_phone,
-                    settings_value.tasks_mode,
-                )
-                async with session_scope(session_factory) as error_session:
-                    await AuditEventRepository(error_session).log(
+                    await audit_repo.log(
                         actor="system",
-                        action="inbound_enqueue_failed",
+                        action="webhook_replay_rejected",
                         operator_phone=event.operator_phone,
-                        metadata={
-                            "wamid": event.wamid,
-                            "tasks_mode": settings_value.tasks_mode,
-                            "error": str(exc),
-                        },
+                        metadata={"wamid": event.wamid},
                     )
-                if settings_value.tasks_mode == "cloud":
-                    raise
-                raise HTTPException(
-                    status_code=500,
-                    detail="Inbound processing failed",
-                ) from exc
-            enqueued_count += 1
+                    continue
 
-        return {"status": "accepted", "received": len(events), "enqueued": enqueued_count}
+                operator = await operator_repo.get_by_phone(event.operator_phone)
+                if not operator or not operator.active:
+                    if await _should_send_unauthorized_rejection(
+                        audit_repo=audit_repo,
+                        phone=event.operator_phone,
+                        now_value=now_value,
+                        window_minutes=settings_value.unauthorized_rejection_window_minutes,
+                    ):
+                        try:
+                            await whatsapp_client_value.send_text(
+                                to_phone=event.operator_phone,
+                                message=settings_value.unauthorized_rejection_message,
+                            )
+                        except Exception as exc:
+                            await audit_repo.log(
+                                actor="system",
+                                action="unauthorized_rejection_failed",
+                                operator_phone=event.operator_phone,
+                                metadata={"wamid": event.wamid, "error": str(exc)},
+                            )
+                        else:
+                            await audit_repo.log(
+                                actor="system",
+                                action="unauthorized_rejection_sent",
+                                operator_phone=event.operator_phone,
+                                metadata={"wamid": event.wamid},
+                            )
+                    continue
 
-    @app.post("/tasks/process-message")
-    async def process_message_task(
-        request: Request,
-        payload: InboundTaskPayload,
-        task_authorizer_value: TaskAuthorizerDep,
-        process_inbound_value: ProcessInboundDep,
-    ) -> dict[str, str]:
-        authorization_header = request.headers.get("Authorization")
-        if not await task_authorizer_value.is_authorized(authorization_header):
-            raise HTTPException(status_code=401, detail="Unauthorized caller")
+                payload_obj = InboundTaskPayload(
+                    wamid=event.wamid,
+                    operator_phone=event.operator_phone,
+                    message_timestamp=event.timestamp.isoformat() if event.timestamp else None,
+                    raw_message=event.raw_message,
+                )
+                try:
+                    await task_enqueuer_value.enqueue_inbound(payload_obj)
+                except Exception as exc:
+                    logger.exception(
+                        "Inbound enqueue/processing failed (wamid=%s, operator_phone=%s, mode=%s)",
+                        event.wamid,
+                        event.operator_phone,
+                        settings_value.tasks_mode,
+                    )
+                    async with session_scope(session_factory) as error_session:
+                        await AuditEventRepository(error_session).log(
+                            actor="system",
+                            action="inbound_enqueue_failed",
+                            operator_phone=event.operator_phone,
+                            metadata={
+                                "wamid": event.wamid,
+                                "tasks_mode": settings_value.tasks_mode,
+                                "error": str(exc),
+                            },
+                        )
+                    if settings_value.tasks_mode == "cloud":
+                        raise
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Inbound processing failed",
+                    ) from exc
+                enqueued_count += 1
 
-        result = await process_inbound_value(payload)
-        return {"status": result.status}
+            return {"status": "accepted", "received": len(events), "enqueued": enqueued_count}
+
+    if app.state.worker_enabled:
+
+        @app.post("/tasks/process-message")
+        async def process_message_task(
+            request: Request,
+            payload: InboundTaskPayload,
+            task_authorizer_value: TaskAuthorizerDep,
+            process_inbound_value: ProcessInboundDep,
+        ) -> dict[str, str]:
+            authorization_header = request.headers.get("Authorization")
+            if not await task_authorizer_value.is_authorized(authorization_header):
+                raise HTTPException(status_code=401, detail="Unauthorized caller")
+
+            result = await process_inbound_value(payload)
+            return {"status": result.status}
 
     return app
 

@@ -45,6 +45,18 @@ def test_gemini_model_falls_back_to_default_when_blank(monkeypatch) -> None:
     assert settings.gemini_model == "gemini-3.1-flash-image-preview"
 
 
+def test_app_service_role_defaults_to_all(monkeypatch) -> None:
+    monkeypatch.delenv("APP_SERVICE_ROLE", raising=False)
+    settings = Settings.from_env()
+    assert settings.app_service_role == "all"
+
+
+def test_app_service_role_is_lowercased(monkeypatch) -> None:
+    monkeypatch.setenv("APP_SERVICE_ROLE", "WoRkEr")
+    settings = Settings.from_env()
+    assert settings.app_service_role == "worker"
+
+
 def test_llm_trace_settings_are_loaded(monkeypatch) -> None:
     monkeypatch.setenv("LLM_TRACE_ENABLED", "true")
     monkeypatch.setenv("LLM_TRACE_MAX_CHARS", "1234")
