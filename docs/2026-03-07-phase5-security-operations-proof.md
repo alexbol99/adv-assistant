@@ -39,8 +39,26 @@ Status: **pending environment-level verification**.
 
 Code-level hardening completed:
 - Removed hardcoded CMS token fallback from app config.
+- Added automated verifier script:
+  - `scripts/verify_cloudrun_secret_bindings.sh`
 
 Still required outside code:
 - Confirm staging/production secrets are provisioned in Secret Manager and
   bound into Cloud Run runtime.
 
+### Verification command (staging example)
+
+```bash
+STAGING_SECRET_DATABASE_URL=DATABASE_URL_STAGING \
+STAGING_SECRET_WHATSAPP_ACCESS_TOKEN=WHATSAPP_ACCESS_TOKEN_STAGING \
+scripts/verify_cloudrun_secret_bindings.sh \
+  --target staging \
+  --project-id adv-assistant-staging-488908 \
+  --region me-west1 \
+  --worker-service adv-assistant-worker-staging \
+  --webhook-service adv-assistant-webhook-staging
+```
+
+Current blocker:
+- local gcloud token refresh requires interactive re-auth (`gcloud auth login`)
+  before running the command non-interactively.
