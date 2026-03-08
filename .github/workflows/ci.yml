@@ -389,6 +389,7 @@ jobs:
 
           TASKS_ID_TOKEN="$(gcloud auth print-identity-token \
             --impersonate-service-account="$STAGING_TASKS_SERVICE_ACCOUNT_EMAIL" \
+            --include-email \
             --audiences="$TASKS_URL")"
           if [ -z "$TASKS_ID_TOKEN" ]; then
             echo "Worker auth smoke failed: could not mint OIDC token for tasks service account." >&2
