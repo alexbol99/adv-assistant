@@ -63,3 +63,23 @@ def test_llm_trace_settings_are_loaded(monkeypatch) -> None:
     settings = Settings.from_env()
     assert settings.llm_trace_enabled is True
     assert settings.llm_trace_max_chars == 1234
+
+
+def test_enrichment_retry_settings_are_loaded(monkeypatch) -> None:
+    monkeypatch.setenv("ENRICHMENT_MAX_ATTEMPTS", "4")
+    monkeypatch.setenv("ENRICHMENT_RETRY_BASE_SECONDS", "0.25")
+    settings = Settings.from_env()
+    assert settings.enrichment_max_attempts == 4
+    assert settings.enrichment_retry_base_seconds == 0.25
+
+
+def test_enrichment_enabled_can_be_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("ENRICHMENT_ENABLED", "false")
+    settings = Settings.from_env()
+    assert settings.enrichment_enabled is False
+
+
+def test_cms_cityscreen_app_token_defaults_to_none_when_missing(monkeypatch) -> None:
+    monkeypatch.delenv("CMS_CITYSCREEN_APP_TOKEN", raising=False)
+    settings = Settings.from_env()
+    assert settings.cms_cityscreen_app_token is None

@@ -81,6 +81,8 @@
   - `ENRICHMENT_ENABLED` (default `true`)
   - `OPEN_FOOD_FACTS_BASE_URL` (default `https://world.openfoodfacts.org`)
   - `ENRICHMENT_HTTP_TIMEOUT_SECONDS` (default `8`)
+  - `ENRICHMENT_MAX_ATTEMPTS` (default `2`)
+  - `ENRICHMENT_RETRY_BASE_SECONDS` (default `0.5`)
   - provider chain order: Open Food Facts -> EAN fallback -> web-search fallback
   - only normalized enrichment fields are stored in DB; raw provider payloads are not persisted
 - Ad generation configuration (Phase 7):

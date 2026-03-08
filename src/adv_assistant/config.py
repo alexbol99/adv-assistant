@@ -90,6 +90,8 @@ class Settings:
     enrichment_enabled: bool = True
     open_food_facts_base_url: str = "https://world.openfoodfacts.org"
     enrichment_http_timeout_seconds: int = 8
+    enrichment_max_attempts: int = 2
+    enrichment_retry_base_seconds: float = 0.5
 
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.1-flash-image-preview"
@@ -126,7 +128,7 @@ class Settings:
     media_verify_lifecycle_on_startup: bool = False
 
     cms_cityscreen_base_url: str = "https://play.eu.cityscreen.cloud"
-    cms_cityscreen_app_token: str | None = "90b93b88177b6ad4616d28e563a9b700"
+    cms_cityscreen_app_token: str | None = None
     cms_cityscreen_campaign_id: int = 157
     cms_cityscreen_playlist_id: int = 139
 
@@ -175,6 +177,8 @@ class Settings:
                 "OPEN_FOOD_FACTS_BASE_URL", "https://world.openfoodfacts.org"
             ),
             enrichment_http_timeout_seconds=_int_env("ENRICHMENT_HTTP_TIMEOUT_SECONDS", 8),
+            enrichment_max_attempts=_int_env("ENRICHMENT_MAX_ATTEMPTS", 2),
+            enrichment_retry_base_seconds=_float_env("ENRICHMENT_RETRY_BASE_SECONDS", 0.5),
             gemini_api_key=_optional_env("GEMINI_API_KEY"),
             gemini_model=_env_with_default("GEMINI_MODEL", "gemini-3.1-flash-image-preview"),
             gemini_base_url=_env_with_default(
@@ -223,8 +227,7 @@ class Settings:
                 "CMS_CITYSCREEN_BASE_URL",
                 "https://play.eu.cityscreen.cloud",
             ),
-            cms_cityscreen_app_token=_optional_env("CMS_CITYSCREEN_APP_TOKEN")
-            or "90b93b88177b6ad4616d28e563a9b700",
+            cms_cityscreen_app_token=_optional_env("CMS_CITYSCREEN_APP_TOKEN"),
             cms_cityscreen_campaign_id=_int_env("CMS_CITYSCREEN_CAMPAIGN_ID", 157),
             cms_cityscreen_playlist_id=_int_env("CMS_CITYSCREEN_PLAYLIST_ID", 139),
         )

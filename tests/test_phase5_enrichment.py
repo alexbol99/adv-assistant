@@ -289,6 +289,58 @@ async def test_open_food_facts_provider_request_error_returns_none() -> None:
     await client.aclose()
 
 
+async def test_open_food_facts_provider_retries_retryable_http_error_then_succeeds() -> None:
+    payload = {
+        "status": 1,
+        "product": {
+            "product_name_he": "טונה",
+            "brands": "StarKist",
+        },
+    }
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(status_code=503, json={"error": "temporary"})
+        return httpx.Response(status_code=200, json=payload)
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://world.openfoodfacts.org",
+    )
+    provider = OpenFoodFactsProvider(client=client, max_attempts=2, retry_base_seconds=0.0)
+
+    result = await provider.lookup(ean="7290001234567", language="he")
+
+    assert result is not None
+    assert result.product_name == "טונה"
+    assert call_count == 2
+    await client.aclose()
+
+
+async def test_open_food_facts_provider_does_not_retry_non_retryable_http_error() -> None:
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return httpx.Response(status_code=404, json={"status": 0})
+
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="https://world.openfoodfacts.org",
+    )
+    provider = OpenFoodFactsProvider(client=client, max_attempts=3, retry_base_seconds=0.0)
+
+    result = await provider.lookup(ean="7290001234567", language="he")
+
+    assert result is None
+    assert call_count == 1
+    await client.aclose()
+
+
 async def test_provider_chain_uses_fallback_order() -> None:
     provider_1 = StaticProvider("open_food_facts", None)
     provider_2 = StaticProvider(
