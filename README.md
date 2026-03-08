@@ -242,5 +242,16 @@ Defaults:
 
 If automatic grant application is unavailable (missing `psql`, `cloud-sql-proxy`, or admin password), the script prints manual SQL commands.
 
+## Secret Binding Verification (Staging/Production)
+
+Use `scripts/verify_cloudrun_secret_bindings.sh` to verify:
+
+- configured secret names exist in Secret Manager;
+- Cloud Run `worker` and `webhook` services are bound to the expected secrets.
+
+Example (staging):
+
+- `STAGING_SECRET_DATABASE_URL=DATABASE_URL_STAGING STAGING_SECRET_WHATSAPP_ACCESS_TOKEN=WHATSAPP_ACCESS_TOKEN_STAGING scripts/verify_cloudrun_secret_bindings.sh --target staging --project-id adv-assistant-staging-488908 --region me-west1 --worker-service adv-assistant-worker-staging --webhook-service adv-assistant-webhook-staging`
+
 Run migrations explicitly (same approach as CI migration jobs):
 - `GCP_PROJECT_ID=adv-assistant-staging-488908 CLOUD_SQL_CONNECTION_NAME=adv-assistant-staging-488908:me-west1:adv-assistant-staging-pg DB_NAME=adv_assistant_staging DB_MIGRATOR_USER=adv_assistant_migrator_staging DB_MIGRATOR_PASS_SECRET=DB_MIGRATOR_PASS_STAGING scripts/run_cloudsql_migration.sh`

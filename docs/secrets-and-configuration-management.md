@@ -54,3 +54,31 @@ Keep non-secret values in environment-specific repository variables, for example
 - deploy flags such as `STAGING_DEPLOY_ENABLED`
 
 Do not store API tokens/passwords in repository variables.
+
+## Verification Command
+
+Use the helper script to verify both:
+
+- Secret names exist in Secret Manager.
+- Cloud Run worker/webhook services are bound to those secrets via env bindings.
+
+Example (staging):
+
+```bash
+STAGING_SECRET_DATABASE_URL=DATABASE_URL_STAGING \
+STAGING_SECRET_WHATSAPP_ACCESS_TOKEN=WHATSAPP_ACCESS_TOKEN_STAGING \
+STAGING_SECRET_VERIFY_TOKEN=VERIFY_TOKEN_STAGING \
+STAGING_SECRET_META_APP_SECRET=META_APP_SECRET_STAGING \
+STAGING_SECRET_ADMIN_BASIC_USERNAME=ADMIN_BASIC_USERNAME_STAGING \
+STAGING_SECRET_ADMIN_BASIC_PASSWORD=ADMIN_BASIC_PASSWORD_STAGING \
+STAGING_SECRET_OPENAI_API_KEY=OPENAI_API_KEY_STAGING \
+STAGING_SECRET_GEMINI_API_KEY=GEMINI_API_KEY_STAGING \
+STAGING_SECRET_NANA_BANANA_API_KEY=NANA_BANANA_API_KEY_STAGING \
+STAGING_SECRET_CMS_CITYSCREEN_APP_TOKEN=CMS_CITYSCREEN_APP_TOKEN_STAGING \
+scripts/verify_cloudrun_secret_bindings.sh \
+  --target staging \
+  --project-id adv-assistant-staging-488908 \
+  --region me-west1 \
+  --worker-service adv-assistant-worker-staging \
+  --webhook-service adv-assistant-webhook-staging
+```
