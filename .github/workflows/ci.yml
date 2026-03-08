@@ -313,6 +313,145 @@ jobs:
           fi
           gcloud run deploy "$STAGING_CLOUD_RUN_WEBHOOK_SERVICE" "${WEBHOOK_DEPLOY_ARGS[@]}"
 
+  smoke-staging:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_GCP_PROJECT_ID != '' && vars.STAGING_GCP_REGION != '' && vars.STAGING_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.STAGING_CLOUD_RUN_WORKER_SERVICE != '' && vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL != '' && vars.STAGING_SECRET_VERIFY_TOKEN != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Smoke tests (staging)
+        env:
+          STAGING_GCP_PROJECT_ID: ${{ vars.STAGING_GCP_PROJECT_ID }}
+          STAGING_GCP_REGION: ${{ vars.STAGING_GCP_REGION }}
+          STAGING_CLOUD_RUN_WEBHOOK_SERVICE: ${{ vars.STAGING_CLOUD_RUN_WEBHOOK_SERVICE }}
+          STAGING_CLOUD_RUN_WORKER_SERVICE: ${{ vars.STAGING_CLOUD_RUN_WORKER_SERVICE }}
+          STAGING_TASKS_SERVICE_ACCOUNT_EMAIL: ${{ vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL }}
+          STAGING_SECRET_VERIFY_TOKEN: ${{ vars.STAGING_SECRET_VERIFY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          WEBHOOK_URL="$(gcloud run services describe "$STAGING_CLOUD_RUN_WEBHOOK_SERVICE" \
+            --project "$STAGING_GCP_PROJECT_ID" \
+            --region "$STAGING_GCP_REGION" \
+            --format='value(status.url)')"
+          WORKER_URL="$(gcloud run services describe "$STAGING_CLOUD_RUN_WORKER_SERVICE" \
+            --project "$STAGING_GCP_PROJECT_ID" \
+            --region "$STAGING_GCP_REGION" \
+            --format='value(status.url)')"
+
+          if [ -z "$WEBHOOK_URL" ] || [ -z "$WORKER_URL" ]; then
+            echo "Smoke test failed: could not resolve Cloud Run service URLs." >&2
+            exit 1
+          fi
+
+          curl -fsS "$WEBHOOK_URL/health" >/tmp/webhook-health.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/webhook-health.json").read_text())
+          if payload.get("status") != "ok":
+              raise SystemExit(f"Unexpected /health payload: {payload}")
+          PY
+
+          VERIFY_TOKEN="$(gcloud secrets versions access latest \
+            --project "$STAGING_GCP_PROJECT_ID" \
+            --secret "$STAGING_SECRET_VERIFY_TOKEN")"
+          CHALLENGE="smoke-$(date +%s)"
+          VERIFY_RESPONSE="$(curl -fsS -G "$WEBHOOK_URL/webhook" \
+            --data-urlencode "hub.mode=subscribe" \
+            --data-urlencode "hub.verify_token=$VERIFY_TOKEN" \
+            --data-urlencode "hub.challenge=$CHALLENGE")"
+          if [ "$VERIFY_RESPONSE" != "$CHALLENGE" ]; then
+            echo "Webhook verification smoke failed: challenge mismatch." >&2
+            exit 1
+          fi
+
+          TASKS_URL="${WORKER_URL}/tasks/process-message"
+          UNAUTH_STATUS_CODE="$(curl -sS -o /tmp/worker-unauth-body.txt -w '%{http_code}' \
+            -X POST "$TASKS_URL" \
+            -H 'Content-Type: application/json' \
+            -d '{"wamid":"smoke-unauth","operator_phone":"+19990000001","raw_message":{"type":"text","text":{"body":"smoke unauth"}}}')"
+          if [ "$UNAUTH_STATUS_CODE" != "401" ] && [ "$UNAUTH_STATUS_CODE" != "403" ]; then
+            echo "Worker unauth smoke failed: expected 401/403, got $UNAUTH_STATUS_CODE." >&2
+            cat /tmp/worker-unauth-body.txt >&2 || true
+            exit 1
+          fi
+
+          TASKS_ID_TOKEN="$(gcloud auth print-identity-token \
+            --impersonate-service-account="$STAGING_TASKS_SERVICE_ACCOUNT_EMAIL" \
+            --audiences="$TASKS_URL")"
+          if [ -z "$TASKS_ID_TOKEN" ]; then
+            echo "Worker auth smoke failed: could not mint OIDC token for tasks service account." >&2
+            exit 1
+          fi
+
+          WAMID="smoke-wamid-$(date +%s)-$RANDOM"
+          OPERATOR_PHONE="+1999$(date +%s)"
+          PAYLOAD="$(cat <<EOF
+          {"wamid":"$WAMID","operator_phone":"$OPERATOR_PHONE","raw_message":{"type":"text","text":{"body":"smoke worker auth"}}}
+          EOF
+          )"
+
+          AUTH_STATUS_CODE="$(curl -sS -o /tmp/worker-auth-body.json -w '%{http_code}' \
+            -X POST "$TASKS_URL" \
+            -H "Authorization: Bearer $TASKS_ID_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD")"
+          if [ "$AUTH_STATUS_CODE" != "200" ]; then
+            echo "Worker auth smoke failed: expected 200, got $AUTH_STATUS_CODE." >&2
+            cat /tmp/worker-auth-body.json >&2 || true
+            exit 1
+          fi
+
+          FIRST_STATUS="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/worker-auth-body.json").read_text())
+          print(payload.get("status", ""))
+          PY
+          )"
+          if [ "$FIRST_STATUS" != "unauthorized_operator" ] && [ "$FIRST_STATUS" != "duplicate_skipped" ] && [ "$FIRST_STATUS" != "processed" ]; then
+            echo "Worker auth smoke failed: unexpected status '$FIRST_STATUS'." >&2
+            cat /tmp/worker-auth-body.json >&2 || true
+            exit 1
+          fi
+
+          DEDUP_STATUS_CODE="$(curl -sS -o /tmp/worker-dedup-body.json -w '%{http_code}' \
+            -X POST "$TASKS_URL" \
+            -H "Authorization: Bearer $TASKS_ID_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD")"
+          if [ "$DEDUP_STATUS_CODE" != "200" ]; then
+            echo "Worker dedup smoke failed: expected 200, got $DEDUP_STATUS_CODE." >&2
+            cat /tmp/worker-dedup-body.json >&2 || true
+            exit 1
+          fi
+
+          DEDUP_STATUS="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/worker-dedup-body.json").read_text())
+          print(payload.get("status", ""))
+          PY
+          )"
+          if [ "$DEDUP_STATUS" != "duplicate_skipped" ]; then
+            echo "Worker dedup smoke failed: expected duplicate_skipped, got '$DEDUP_STATUS'." >&2
+            cat /tmp/worker-dedup-body.json >&2 || true
+            exit 1
+          fi
+
   migrate-production:
     runs-on: ubuntu-latest
     needs: publish-image
