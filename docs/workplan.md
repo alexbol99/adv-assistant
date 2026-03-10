@@ -15,6 +15,40 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 
 ---
 
+## Priority Track — Conversation Flow V1 (Active)
+
+**Goal:** Ship the new operator conversation flow as the top-priority delivery track.
+
+### State Storage Contract
+
+| Domain state | Source of truth |
+|--------------|-----------------|
+| Business onboarding profile | `business_profile` singleton per `business_scope` (`default` in current deployment) |
+| Current request type | `ad_draft.request_type` |
+| Classification resolved/not-resolved | `ad_draft.classification_status` + `ad_draft.is_classification_resolved` |
+| Identified product candidates | `draft_product` rows per draft |
+| Waiting for product confirmation | `ad_draft.awaiting_product_confirmation` |
+| Pending question category | `conversation_session.pending_question_type` (+ context JSON) |
+| Generation readiness | deterministic computation from draft/session/product state, persisted in `ad_draft.generation_ready` as orchestration cache |
+| Current variant round | `ad_variant_round` (`ACTIVE` status is unique per draft) |
+
+### Execution Backlog (V1)
+
+1. `T1` Update product/workplan docs for V1 flow, Hebrew-only V1 policy, and state contract.
+2. `T2` Add schema/migration foundations (`business_profile`, session state fields, draft state fields, `draft_product`, `ad_variant_round`, `ad_variant`).
+3. `T3` Add repositories/state utilities for round replacement, candidate tracking, and pending-question updates.
+4. `T4` Add first-time onboarding gate (business name + logo required).
+5. `T5` Implement request-type classification loop until unambiguous.
+6. `T6` Implement product/visual discovery with external image lookup and explicit fallback behavior.
+7. `T7` Implement one-question policy engine with dynamic next-question selection.
+8. `T8` Implement dynamic prompt composer and enforce exactly two valid variants per generation round.
+9. `T9` Implement deterministic variant actions with single-active-round lifecycle (`ACTIVE` -> `SUPERSEDED`).
+10. `T10` Implement publish-gate with idempotency for confirm-publish retries/duplicates.
+11. `T11` Add E2E coverage including “already enough info -> direct generation” and “image-only request” paths.
+12. `T12` Ship end-to-end feature flag toggle (fully new flow vs fully legacy flow, no mixed mode).
+
+---
+
 ## Phase 0 — Program Controls and Bootstrap
 
 **Goal:** Establish delivery controls, tooling, and cloud baseline.
@@ -302,6 +336,6 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 
 ## Immediate Next Actions
 
-1. Implement Phase 2 webhook ingress endpoints (`GET /webhook`, `POST /webhook`) with signature verification and replay-window checks.
-2. Integrate Cloud Tasks enqueue + OIDC-protected task processor path, and enforce `wamid` dedup before business handling.
-3. Prepare Gate A evidence package (security tests + updated ingress ADRs) before starting Phase 3.
+1. Complete `T1` documentation updates for the V1 conversation flow and state contract.
+2. Complete `T2` schema migration and model updates for conversation-flow state foundations.
+3. Execute a migration/test proof (`alembic upgrade head` + `pytest`) before starting `T3`.

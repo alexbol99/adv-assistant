@@ -23,8 +23,8 @@ The **WhatsApp Advertisement Assistant Bot** is a conversational tool that allow
 - Allow the operator to regenerate the ad — either using the previous image as a reference or from scratch — if the initial result is not satisfactory.
 - Publish completed advertisements to the store's TV Content Management System (CMS).
 - Remove (delete all) advertisements from the CMS when instructed.
-- Support Hebrew-language conversations and Israeli business conventions by default.
-- Remember each operator's language and currency preferences across sessions (identified by phone number).
+- Use Hebrew-language conversations and Israeli business conventions for V1.
+- Keep V1 language fixed to Hebrew and currency defaulted to ILS.
 - Support multiple operators per store with identical permissions.
 
 ### Non-Goals
@@ -54,21 +54,23 @@ Once the bot has sufficient information, it suggests generating an advertisement
 | Principle | Description |
 |-----------|-------------|
 | **Free-form first** | The bot accepts any natural phrasing. The operator does not need to learn commands or follow a script. |
-| **Clarify only missing essentials** | The bot asks follow-up questions only when the minimum required information is absent: at minimum, a **product name** and a **price**. It does not ask for optional details unless they are genuinely needed. |
+| **Clarify only when needed** | The bot asks **one question at a time** only when it is required for a good ad result. It does not ask for known data and stops asking once there is enough information for generation. |
 | **Show, don't ask too much** | After gathering the essentials, the bot generates and shows an ad rather than asking more questions. Improvement is driven by the operator's reaction to the visual, not by a pre-generation questionnaire. |
 | **Iterate with context** | The bot retains context between turns in an ad session. When regenerating, it applies only the changes the operator specifies (e.g., *"make the price bigger"*, *"use a blue background"*) without losing other collected details. |
 | **Draft isolation** | In multi-operator mode, each operator works on their own draft. Drafts are not shared across operators. |
-| **Memory** | The bot remembers the operator's preferred **language** and **currency** based on their WhatsApp number (phone number identity). These preferences are applied automatically in future sessions and can be overridden at any time. |
+| **Memory** | The bot preserves conversation state per operator draft/session. In V1, language is fixed to Hebrew and currency defaults to ILS. |
 
 ### 3.3 Required vs Optional Fields
 
 | Field | Required? | Notes |
 |-------|-----------|-------|
-| Product name | **Required** | Must be confirmed before generating an ad. |
-| Price | **Required** | Defaults to ILS (₪) unless the operator specifies another currency. |
-| Product photo | Optional | Operator may send an image; the bot incorporates it into the generated ad. |
-| EAN barcode | Optional | Helps the bot identify the product and enrich details from the web. |
-| Promotional text | Optional | E.g., "20% off today only". The bot may suggest text if not provided. |
+| Business name (first run only) | **Required** | Collected in onboarding. |
+| Business logo (first run only) | **Required** | Collected in onboarding; brand colors may be inferred automatically from logo. |
+| Brand colors | Optional | Can be provided manually if no logo; if logo exists, inferred colors are used without extra confirmation. |
+| Request type | **Required before generation** | Must resolve to one of: single-product, multi-product, store-general. |
+| Product identification | Conditional | Required for product ads; derived from text/image/external lookup and confirmed when uncertain. |
+| Price / offer | Optional | Not a hard requirement in V1. |
+| Promotional text | Optional | E.g., "20% off today only". |
 
 ### 3.4 Example Happy Path
 
@@ -172,7 +174,7 @@ The operator provides content (text, prices, optional images). The bot handles l
 | Date format | DD/MM/YYYY |
 | Number format | Israeli (e.g., 1,234.56) |
 
-The operator may override currency and language per session. Overrides are remembered across sessions for the same phone number (see §3.2, Memory principle).
+In V1, language override is disabled and all operator-facing responses are Hebrew. Currency defaults to ILS.
 
 ---
 
@@ -219,7 +221,30 @@ Additionally, product names and promotional text entered by the operator may ina
 
 ---
 
-## 10. Out of Scope
+## 10. Priority V1 Conversational Flow (2026-03-10)
+
+### 10.1 Flow
+1. First-time onboarding asks only for business name and logo (required), and optionally brand colors if logo is missing.
+2. User can send free-form text, image, or both.
+3. Bot classifies request into `single_product`, `multi_product`, or `store_general`; if ambiguous, it keeps asking one classification question until resolved.
+4. For product ads, bot performs product/visual discovery from text/image and may use external sources for candidate images.
+5. Bot asks one clarification question at a time, only when strictly needed.
+6. Bot builds a dynamic generation prompt from user request, clarifications, business profile, and screen constraints.
+7. Bot generates exactly two ad variants per round (valid outputs only).
+8. Bot returns both variants with deterministic action buttons (select variant 1/2, create two more, restart).
+9. Bot marks selected variant as approved.
+10. Bot publishes to CMS only after deterministic final confirmation.
+
+### 10.2 State Model (Source of Truth)
+- `business_profile`: singleton per `business_scope` (for current deployment scope, this is `default`).
+- `conversation_session.pending_question_type`: enum-driven pending question state (`onboarding`, `classification`, `product_confirmation`, `candidate_selection`, `missing_info`, etc.).
+- `ad_draft.request_type` + `ad_draft.classification_status`: classification lifecycle.
+- `draft_product`: normalized identified product candidates and confirmation status.
+- `ad_draft.awaiting_product_confirmation`: waiting gate for product confirmation flow.
+- `ad_draft.generation_ready`: computed state persisted as orchestration cache; generation re-validates readiness from current state before execution.
+- `ad_variant_round` / `ad_variant`: last active generation round and two concrete variant outputs.
+
+## 11. Out of Scope
 
 The following are explicitly outside the scope of this product:
 
@@ -231,3 +256,8 @@ The following are explicitly outside the scope of this product:
 - Automated ad generation from a product catalog (without operator involvement).
 - Scheduling or time-based ad management.
 - Individual ad update or removal (only full delete-all is supported).
+- Automated QA scoring of generated ads.
+- Smart iterative edit engine for post-generation correction requests.
+- Style-history memory and preferred-template personalization.
+- Rigid required-fields state machine.
+- Separate internal brief artifact before generation.
