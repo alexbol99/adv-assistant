@@ -16,8 +16,8 @@ from adv_assistant.ad_generation import (
 )
 from adv_assistant.cms_cityscreen import CMSPublisher, CMSPublishError, NoopCMSPublisher
 from adv_assistant.db.base import utcnow
-from adv_assistant.db.enums import AdDraftStatus
-from adv_assistant.db.models import AdDraft, Operator
+from adv_assistant.db.enums import AdDraftStatus, PendingQuestionType
+from adv_assistant.db.models import AdDraft, ConversationSession, Operator
 from adv_assistant.db.repositories import (
     AdDraftRepository,
     AuditEventRepository,
@@ -58,6 +58,9 @@ from adv_assistant.whatsapp import NoopWhatsAppClient, WhatsAppClient
 logger = logging.getLogger(__name__)
 
 TraceSink = Callable[[str, str | None, dict[str, Any]], Awaitable[None]]
+
+_ONBOARDING_STEP_AWAITING_NAME = "awaiting_name"
+_ONBOARDING_STEP_AWAITING_LOGO = "awaiting_logo"
 
 _PENDING_UPLOAD_LOGO = "logo"
 _PENDING_FOLLOWUP_PRICE = "price"
@@ -102,6 +105,18 @@ class ProcessInboundResult:
         if self.unauthorized_operator:
             return "unauthorized_operator"
         return "processed"
+
+
+def _operator_needs_onboarding(operator: Operator) -> bool:
+    """Return True if the operator has not completed first-time onboarding."""
+    return operator.business_name is None or operator.logo_url is None
+
+
+def _resolve_onboarding_step(operator: Operator) -> str:
+    """Determine which onboarding step applies based on operator state."""
+    if operator.business_name is None:
+        return _ONBOARDING_STEP_AWAITING_NAME
+    return _ONBOARDING_STEP_AWAITING_LOGO
 
 
 def _extract_text(raw_message: dict[str, Any]) -> str | None:
@@ -208,6 +223,83 @@ class InboundTaskProcessor:
                 current_draft_id = session_obj.current_draft_id
                 pending_upload_type = session_obj.pending_upload_type
                 pending_followup_question = session_obj.pending_followup_question
+
+            # --- ONBOARDING GATE ---
+            if _operator_needs_onboarding(operator):
+                ob_text = _extract_text(payload.raw_message)
+                ob_image_id = _extract_image_media_id(payload.raw_message)
+
+                reply_text = await self._handle_onboarding(
+                    payload=payload,
+                    operator=operator,
+                    operator_repo=operator_repo,
+                    session_repo=session_repo,
+                    audit_repo=audit_repo,
+                    session_obj=session_obj,
+                    incoming_text=ob_text,
+                    incoming_image_media_id=ob_image_id,
+                )
+
+                user_text = (
+                    ob_text
+                    or ("[image]" if ob_image_id else "[unsupported]")
+                )
+                history.append(
+                    {"role": "user", "text": user_text, "wamid": payload.wamid}
+                )
+                history.append(
+                    {"role": "assistant", "text": reply_text, "wamid": payload.wamid}
+                )
+
+                await session_repo.create_or_update(
+                    operator_phone=payload.operator_phone,
+                    language=operator.language,
+                    history=history,
+                    last_active_at=now,
+                )
+
+                # Persist onboarding step if still needed.
+                if _operator_needs_onboarding(operator):
+                    await session_repo.set_pending_question(
+                        operator_phone=payload.operator_phone,
+                        pending_question_type=PendingQuestionType.ONBOARDING,
+                        pending_question_context={
+                            "step": _resolve_onboarding_step(operator),
+                        },
+                    )
+
+                if session_created:
+                    await audit_repo.log(
+                        actor="system",
+                        action="conversation_session_created",
+                        operator_phone=payload.operator_phone,
+                        metadata={"wamid": payload.wamid},
+                    )
+                await audit_repo.log(
+                    actor="system",
+                    action="inbound_message_processed",
+                    operator_phone=payload.operator_phone,
+                    metadata={
+                        "wamid": payload.wamid,
+                        "session_created": session_created,
+                        "draft_created": False,
+                        "intent": "onboarding",
+                        "deterministic_action": "onboarding",
+                        "llm_used": False,
+                    },
+                )
+                self._clear_provider_trace_context(self._llm_gateway)
+                self._clear_provider_trace_context(self._ad_generation_service)
+                return ProcessInboundResult(
+                    duplicate=False,
+                    session_created=session_created,
+                    draft_created=False,
+                    llm_used=False,
+                    intent="onboarding",
+                    deterministic_action="onboarding",
+                    reply_text=reply_text,
+                )
+            # --- END ONBOARDING GATE ---
 
             draft_created = False
             if current_draft_id is not None:
@@ -1224,6 +1316,151 @@ class InboundTaskProcessor:
             reply_text = f"{reply_text}\n\n{enrichment_notice}"
         return current_draft, reply_text
 
+    async def _handle_onboarding(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        operator: Operator,
+        operator_repo: OperatorRepository,
+        session_repo: ConversationSessionRepository,
+        audit_repo: AuditEventRepository,
+        session_obj: ConversationSession | None,
+        incoming_text: str | None,
+        incoming_image_media_id: str | None,
+    ) -> str:
+        """Handle the onboarding flow. Returns reply text."""
+        language = operator.language
+        step = _resolve_onboarding_step(operator)
+
+        # Determine if we've already asked the question for this step.
+        already_asked = (
+            session_obj is not None
+            and session_obj.pending_question_type == PendingQuestionType.ONBOARDING
+        )
+
+        if step == _ONBOARDING_STEP_AWAITING_NAME:
+            return await self._handle_onboarding_name(
+                payload=payload,
+                operator=operator,
+                operator_repo=operator_repo,
+                session_repo=session_repo,
+                audit_repo=audit_repo,
+                already_asked=already_asked,
+                incoming_text=incoming_text,
+                incoming_image_media_id=incoming_image_media_id,
+                language=language,
+            )
+        return await self._handle_onboarding_logo(
+            payload=payload,
+            operator=operator,
+            operator_repo=operator_repo,
+            session_repo=session_repo,
+            audit_repo=audit_repo,
+            incoming_image_media_id=incoming_image_media_id,
+            language=language,
+        )
+
+    async def _handle_onboarding_name(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        operator: Operator,
+        operator_repo: OperatorRepository,
+        session_repo: ConversationSessionRepository,
+        audit_repo: AuditEventRepository,
+        already_asked: bool,
+        incoming_text: str | None,
+        incoming_image_media_id: str | None,
+        language: str,
+    ) -> str:
+        """Onboarding step: collect business name from text."""
+        # First contact: show welcome and ask for name.
+        if not already_asked:
+            return _onboarding_welcome_reply(language)
+
+        # Already asked — now process the response.
+        if incoming_text is None:
+            if incoming_image_media_id is not None:
+                return _onboarding_name_expected_text_reply(language)
+            return _onboarding_welcome_reply(language)
+
+        business_name = _truncate(incoming_text, 200)
+        if business_name is None:
+            return _onboarding_welcome_reply(language)
+
+        await operator_repo.update_branding(
+            payload.operator_phone, business_name=business_name,
+        )
+        operator.business_name = business_name
+
+        await audit_repo.log(
+            actor="system",
+            action="onboarding_business_name_captured",
+            operator_phone=payload.operator_phone,
+            metadata={"wamid": payload.wamid, "business_name": business_name},
+        )
+
+        await session_repo.set_pending_question(
+            operator_phone=payload.operator_phone,
+            pending_question_type=PendingQuestionType.ONBOARDING,
+            pending_question_context={"step": _ONBOARDING_STEP_AWAITING_LOGO},
+        )
+
+        return _onboarding_name_saved_ask_logo_reply(language, business_name)
+
+    async def _handle_onboarding_logo(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        operator: Operator,
+        operator_repo: OperatorRepository,
+        session_repo: ConversationSessionRepository,
+        audit_repo: AuditEventRepository,
+        incoming_image_media_id: str | None,
+        language: str,
+    ) -> str:
+        """Onboarding step: collect logo image."""
+        if incoming_image_media_id is None:
+            return _onboarding_logo_expected_image_reply(language)
+
+        try:
+            ingested_photo = await self._operator_photo_ingestor.ingest_whatsapp_image(
+                media_id=incoming_image_media_id,
+            )
+        except MediaIngestError as exc:
+            await audit_repo.log(
+                actor="system",
+                action="onboarding_logo_upload_failed",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "media_id": incoming_image_media_id,
+                    "error": str(exc),
+                },
+            )
+            return _onboarding_logo_upload_failed_reply(language)
+
+        await operator_repo.update_branding(
+            payload.operator_phone, logo_url=ingested_photo.public_url,
+        )
+        operator.logo_url = ingested_photo.public_url
+
+        await audit_repo.log(
+            actor="system",
+            action="onboarding_logo_captured",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "logo_url": ingested_photo.public_url,
+            },
+        )
+
+        await session_repo.clear_pending_question(
+            operator_phone=payload.operator_phone,
+        )
+
+        return _onboarding_complete_reply(language)
+
     async def _process_logo_upload(
         self,
         *,
@@ -1876,6 +2113,107 @@ def _branding_not_detected_reply(language: str) -> str:
     return (
         "I could not detect branding or general preference details in your message. "
         "Try sending your business name, brand colors, store type, or creative guidance."
+    )
+
+
+# --- Onboarding reply messages ---
+
+
+def _onboarding_welcome_reply(language: str) -> str:
+    if language.lower() == "he":
+        return (
+            "שלום! ברוך הבא למערכת יצירת המודעות.\n"
+            "לפני שנתחיל, אני צריך כמה פרטים.\n\n"
+            "מה שם העסק שלך?"
+        )
+    if language.lower() == "ar":
+        return (
+            "مرحبًا! أهلاً بك في نظام إنشاء الإعلانات.\n"
+            "قبل أن نبدأ، أحتاج بعض التفاصيل.\n\n"
+            "ما اسم عملك؟"
+        )
+    if language.lower() == "ru":
+        return (
+            "Здравствуйте! Добро пожаловать в систему создания рекламы.\n"
+            "Прежде чем начать, мне нужно несколько деталей.\n\n"
+            "Как называется ваш бизнес?"
+        )
+    return (
+        "Hello! Welcome to the ad creation system.\n"
+        "Before we start, I need a few details.\n\n"
+        "What is your business name?"
+    )
+
+
+def _onboarding_name_expected_text_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "אני צריך קודם את שם העסק שלך. שלח לי את השם כהודעת טקסט."
+    if language.lower() == "ar":
+        return "أحتاج أولاً إلى اسم عملك. أرسل لي الاسم كرسالة نصية."
+    if language.lower() == "ru":
+        return "Сначала мне нужно название вашего бизнеса. Отправьте его текстовым сообщением."
+    return "I need your business name first. Please send it as a text message."
+
+
+def _onboarding_name_saved_ask_logo_reply(language: str, business_name: str) -> str:
+    if language.lower() == "he":
+        return f"תודה! שם העסק \"{business_name}\" נשמר.\n\nעכשיו שלח לי את הלוגו של העסק כתמונה."
+    if language.lower() == "ar":
+        return f"شكرًا! تم حفظ اسم العمل \"{business_name}\".\n\nالآن أرسل لي شعار العمل كصورة."
+    if language.lower() == "ru":
+        return (
+            f"Спасибо! Название бизнеса \"{business_name}\" сохранено.\n\n"
+            f"Теперь отправьте мне логотип вашего бизнеса как изображение."
+        )
+    return (
+        f"Thanks! Business name \"{business_name}\" saved.\n\n"
+        f"Now send me your business logo as an image."
+    )
+
+
+def _onboarding_logo_expected_image_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "אני צריך את הלוגו של העסק. שלח לי אותו כתמונה."
+    if language.lower() == "ar":
+        return "أحتاج إلى شعار العمل. أرسله لي كصورة."
+    if language.lower() == "ru":
+        return "Мне нужен логотип вашего бизнеса. Отправьте его как изображение."
+    return "I need your business logo. Please send it as an image."
+
+
+def _onboarding_logo_upload_failed_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "לא הצלחתי לעבד את התמונה. נסה לשלוח את הלוגו שוב."
+    if language.lower() == "ar":
+        return "لم أتمكن من معالجة الصورة. حاول إرسال الشعار مرة أخرى."
+    if language.lower() == "ru":
+        return "Не удалось обработать изображение. Попробуйте отправить логотип ещё раз."
+    return "I could not process the image. Please try sending the logo again."
+
+
+def _onboarding_complete_reply(language: str) -> str:
+    if language.lower() == "he":
+        return (
+            "מעולה! ההרשמה הושלמה בהצלחה ✓\n\n"
+            "עכשיו אפשר להתחיל ליצור מודעות. "
+            "שלח לי את המוצר או השירות שתרצה לפרסם."
+        )
+    if language.lower() == "ar":
+        return (
+            "ممتاز! تم إكمال التسجيل بنجاح ✓\n\n"
+            "يمكنك الآن البدء في إنشاء الإعلانات. "
+            "أرسل لي المنتج أو الخدمة التي تريد الإعلان عنها."
+        )
+    if language.lower() == "ru":
+        return (
+            "Отлично! Регистрация успешно завершена ✓\n\n"
+            "Теперь можно начать создавать рекламу. "
+            "Отправьте мне товар или услугу, которые хотите рекламировать."
+        )
+    return (
+        "Excellent! Onboarding completed successfully ✓\n\n"
+        "You can now start creating ads. "
+        "Send me the product or service you'd like to advertise."
     )
 
 

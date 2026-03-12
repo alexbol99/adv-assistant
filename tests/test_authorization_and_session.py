@@ -41,7 +41,12 @@ async def _seed_operator(
     active: bool = True,
 ) -> None:
     async with session_scope(session_factory) as session:
-        await OperatorRepository(session).create(phone=phone, active=active)
+        await OperatorRepository(session).create(
+            phone=phone,
+            active=active,
+            business_name="Test Biz",
+            logo_url="https://example.com/logo.png",
+        )
 
 
 async def _count_rows(

@@ -220,7 +220,12 @@ async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[As
 
 async def _seed_operator(factory: async_sessionmaker[AsyncSession], phone: str) -> None:
     async with session_scope(factory) as session:
-        await OperatorRepository(session).create(phone=phone, active=True)
+        await OperatorRepository(session).create(
+            phone=phone,
+            active=True,
+            business_name="Test Biz",
+            logo_url="https://example.com/logo.png",
+        )
 
 
 async def test_gcs_media_store_upload_and_lifecycle_rule_check() -> None:

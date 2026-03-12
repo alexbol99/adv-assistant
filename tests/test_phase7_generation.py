@@ -210,7 +210,13 @@ async def _seed_operator(
     factory: async_sessionmaker[AsyncSession], phone: str, *, language: str = "en"
 ) -> None:
     async with session_scope(factory) as session:
-        await OperatorRepository(session).create(phone=phone, language=language, active=True)
+        await OperatorRepository(session).create(
+            phone=phone,
+            language=language,
+            active=True,
+            business_name="Test Biz",
+            logo_url="https://example.com/logo.png",
+        )
 
 
 def test_derive_aspect_ratio_for_1920x1080() -> None:

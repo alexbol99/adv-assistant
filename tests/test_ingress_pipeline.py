@@ -147,7 +147,12 @@ async def phase2_client(phase2_app) -> AsyncIterator[AsyncClient]:
 
 async def _seed_operator(session_factory, phone: str) -> None:
     async with session_scope(session_factory) as session:
-        await OperatorRepository(session).create(phone=phone, active=True)
+        await OperatorRepository(session).create(
+            phone=phone,
+            active=True,
+            business_name="Test Biz",
+            logo_url="https://example.com/logo.png",
+        )
 
 
 async def _count_audit_events(
