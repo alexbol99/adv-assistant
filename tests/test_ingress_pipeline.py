@@ -35,6 +35,7 @@ class FakeWhatsAppClient:
     def __init__(self) -> None:
         self.messages: list[tuple[str, str]] = []
         self.images: list[tuple[str, str, str | None]] = []
+        self.buttons: list[tuple[str, str, list[tuple[str, str]]]] = []
 
     async def send_text(self, *, to_phone: str, message: str) -> None:
         self.messages.append((to_phone, message))
@@ -47,6 +48,15 @@ class FakeWhatsAppClient:
         caption: str | None = None,
     ) -> None:
         self.images.append((to_phone, image_url, caption))
+
+    async def send_buttons(
+        self,
+        *,
+        to_phone: str,
+        body_text: str,
+        buttons: list[tuple[str, str]],
+    ) -> None:
+        self.buttons.append((to_phone, body_text, buttons))
 
     async def close(self) -> None:
         return None
@@ -62,6 +72,15 @@ class FailingWhatsAppClient:
         to_phone: str,
         image_url: str,
         caption: str | None = None,
+    ) -> None:
+        raise RuntimeError("401 Unauthorized")
+
+    async def send_buttons(
+        self,
+        *,
+        to_phone: str,
+        body_text: str,
+        buttons: list[tuple[str, str]],
     ) -> None:
         raise RuntimeError("401 Unauthorized")
 
@@ -171,6 +190,94 @@ async def test_webhook_verification_challenge_forbidden(phase2_client: AsyncClie
     )
 
     assert response.status_code == 403
+
+
+async def test_worker_role_disables_webhook_endpoint(tmp_path: Path) -> None:
+    db_path = tmp_path / "worker-role.db"
+    settings = Settings(
+        app_name="adv-assistant-worker-test",
+        database_url=f"sqlite+aiosqlite:///{db_path}",
+        app_service_role="worker",
+        tasks_mode="cloud",
+        tasks_oidc_audience="https://example.run.app/tasks/process-message",
+    )
+    app = create_app(settings)
+    async with app.state.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await app.router.startup()
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(
+                "/webhook",
+                params={
+                    "hub.mode": "subscribe",
+                    "hub.verify_token": "hello_verify_2025",
+                    "hub.challenge": "1234",
+                },
+            )
+        assert response.status_code == 404
+    finally:
+        await app.router.shutdown()
+
+
+async def test_webhook_role_disables_task_endpoint(tmp_path: Path) -> None:
+    db_path = tmp_path / "webhook-role.db"
+    settings = Settings(
+        app_name="adv-assistant-webhook-test",
+        database_url=f"sqlite+aiosqlite:///{db_path}",
+        app_service_role="webhook",
+        tasks_mode="inline",
+    )
+    app = create_app(settings)
+    async with app.state.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await app.router.startup()
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/tasks/process-message",
+                json={
+                    "wamid": "wamid-webhook-role",
+                    "operator_phone": "+972526508861",
+                    "raw_message": {"type": "text"},
+                },
+                headers={"Authorization": "Bearer test"},
+            )
+        assert response.status_code == 404
+    finally:
+        await app.router.shutdown()
+
+
+async def test_webhook_role_disables_task_endpoint_before_body_validation(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "webhook-role-invalid-body.db"
+    settings = Settings(
+        app_name="adv-assistant-webhook-test",
+        database_url=f"sqlite+aiosqlite:///{db_path}",
+        app_service_role="webhook",
+        tasks_mode="inline",
+    )
+    app = create_app(settings)
+    async with app.state.engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    await app.router.startup()
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.post(
+                "/tasks/process-message",
+                content="{invalid-json",
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": "Bearer test",
+                },
+            )
+        assert response.status_code == 404
+    finally:
+        await app.router.shutdown()
 
 
 async def test_webhook_rejects_invalid_signature(phase2_client: AsyncClient) -> None:

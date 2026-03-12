@@ -17,7 +17,7 @@ from adv_assistant.db.models import (
 @dataclass(slots=True)
 class RetentionPolicy:
     processed_message_days: int = 30
-    draft_days: int = 90
+    draft_days: int = 30
     session_days: int = 90
     audit_months: int = 13
 

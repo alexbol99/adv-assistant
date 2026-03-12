@@ -10,7 +10,10 @@
 | [Architecture & Technical Specification](docs/architecture-and-technical-spec.md) | System components, data flow diagrams, conceptual data model, intents/commands, CMS integration interface, reliability, and prompt-injection guardrails. |
 | [Technology Decisions](docs/technology-decisions.md) | Concrete technology decisions: Python stack, GCP Cloud Run + Cloud Tasks deployment, Cloud SQL PostgreSQL, GCS media storage, Nano Banana ad generation, and product enrichment approach for Israeli grocery. |
 | [Workplan](docs/workplan.md) | Step-by-step implementation phases (0–11) for building the application. |
+| [MVP Priority Plan](docs/mvp-priority-plan-2026-03-05.md) | Current MVP stage order, locked decisions, and acceptance tests. |
 | [Phase 5 Compliance Checklist](docs/phase5-compliance-checklist.md) | Pre-production legal/compliance checklist for enrichment sources and data handling. |
+| [DB Migration Discipline](docs/database-migration-discipline.md) | Expand/contract migration policy and rollout sequence for safe staged deployments. |
+| [Secrets and Configuration Management](docs/secrets-and-configuration-management.md) | Secret Manager naming convention and Cloud Run secret-binding rollout. |
 
 ## Quick Summary
 
@@ -29,7 +32,7 @@
    - `uv run ruff format --check .`
    - `uv run pytest`
 3. Run the app locally:
-   - `uv run uvicorn adv_assistant.main:app --reload --host 0.0.0.0 --port 8080`
+   - `uv run uvicorn --app-dir src adv_assistant.main:app --reload --host 0.0.0.0 --port 8080`
    - or `make run` (auto-loads `.env` into process env)
 4. Run with Docker:
    - `docker compose up --build`
@@ -49,6 +52,11 @@
 - Runtime modes:
   - `TASKS_MODE=inline` for local development (task payload is processed in-process)
   - `TASKS_MODE=cloud` for Cloud Tasks enqueue
+- Admin mapping UI auth:
+  - `ADMIN_BASIC_USERNAME`
+  - `ADMIN_BASIC_PASSWORD`
+  - if these are missing, `/admin` and admin API endpoints return `503 Admin authentication is not configured`
+  - local dev tip: run via `make run` so `.env` is loaded into process environment
 - Cloud mode requires:
   - `GCP_PROJECT_ID`, `TASKS_REGION`, `TASKS_QUEUE`
   - `TASKS_HANDLER_URL`
@@ -73,27 +81,41 @@
   - `ENRICHMENT_ENABLED` (default `true`)
   - `OPEN_FOOD_FACTS_BASE_URL` (default `https://world.openfoodfacts.org`)
   - `ENRICHMENT_HTTP_TIMEOUT_SECONDS` (default `8`)
+  - `ENRICHMENT_MAX_ATTEMPTS` (default `2`)
+  - `ENRICHMENT_RETRY_BASE_SECONDS` (default `0.5`)
   - provider chain order: Open Food Facts -> EAN fallback -> web-search fallback
   - only normalized enrichment fields are stored in DB; raw provider payloads are not persisted
-- Ad generation configuration (Phase 7, polling-only):
-  - `NANA_BANANA_API_KEY`
-  - `NANA_BANANA_BASE_URL` (quickstart style, e.g. `https://api.nanobananaapi.ai/api/v1/nanobanana`)
-  - `NANA_BANANA_API_URL` (optional explicit override for generate endpoint)
-  - `NANA_BANANA_STATUS_API_URL_TEMPLATE` (optional explicit status endpoint template; must include `{job_id}`)
-  - `NANA_BANANA_MODEL` (default `nanobanana-2`)
-  - `NANA_BANANA_GENERATION_TYPE` (default `TEXTTOIAMGE`, per provider quickstart)
-  - `NANA_BANANA_NUM_IMAGES` (default `1`)
-  - `NANA_BANANA_WATERMARK` (optional boolean)
-  - `NANA_BANANA_TIMEOUT_SECONDS` (default `20`)
-  - `NANA_BANANA_POLL_INITIAL_SECONDS` (default `2`)
-  - `NANA_BANANA_POLL_MAX_SECONDS` (default `10`)
-  - `NANA_BANANA_POLL_TIMEOUT_SECONDS` (default `900`)
+- Ad generation configuration (Phase 7):
+  - Gemini (preferred):
+    - `GEMINI_API_KEY`
+    - `GEMINI_MODEL` (default `gemini-3.1-flash-image-preview`)
+    - `GEMINI_BASE_URL` (default `https://generativelanguage.googleapis.com/v1beta`)
+    - `GEMINI_TIMEOUT_SECONDS` (default `30`)
+  - Nano Banana (legacy fallback):
+    - `NANA_BANANA_API_KEY`
+    - `NANA_BANANA_BASE_URL` (quickstart style, e.g. `https://api.nanobananaapi.ai/api/v1/nanobanana`)
+    - `NANA_BANANA_API_URL` (optional explicit override for generate endpoint)
+    - `NANA_BANANA_STATUS_API_URL_TEMPLATE` (optional explicit status endpoint template; must include `{job_id}`)
+    - `NANA_BANANA_MODEL` (default `nanobanana-2`)
+    - `NANA_BANANA_GENERATION_TYPE` (default `TEXTTOIAMGE`, per provider quickstart)
+    - `NANA_BANANA_NUM_IMAGES` (default `1`)
+    - `NANA_BANANA_WATERMARK` (optional boolean)
+    - `NANA_BANANA_TIMEOUT_SECONDS` (default `20`)
+    - `NANA_BANANA_POLL_INITIAL_SECONDS` (default `2`)
+    - `NANA_BANANA_POLL_MAX_SECONDS` (default `10`)
+    - `NANA_BANANA_POLL_TIMEOUT_SECONDS` (default `900`)
   - `AD_RENDER_WIDTH` / `AD_RENDER_HEIGHT` (default `1920x1080`; aspect ratio derived automatically)
+  - when using Gemini image generation, set `MEDIA_STORE_MODE` to a cloud backend (`gcs` or `s3`) for public preview URLs
 - Media lifecycle/storage configuration (Phase 6):
-  - `MEDIA_STORE_MODE` (`noop` or `gcs`, default `noop`)
+  - `MEDIA_STORE_MODE` (`noop`, `gcs`, or `s3`, default `noop`)
   - `MEDIA_GCS_BUCKET` (required when `MEDIA_STORE_MODE=gcs`)
   - `MEDIA_GCS_PUBLIC_BASE_URL` (default `https://storage.googleapis.com`)
   - `MEDIA_GCS_OBJECT_PREFIX` (default `operator-photos`)
+  - `MEDIA_S3_BUCKET` (required when `MEDIA_STORE_MODE=s3`)
+  - `MEDIA_S3_REGION` (recommended for `MEDIA_STORE_MODE=s3`)
+  - `MEDIA_S3_PUBLIC_BASE_URL` (optional full public prefix, for example a CloudFront URL)
+  - `MEDIA_S3_OBJECT_PREFIX` (default `operator-photos`)
+  - `MEDIA_S3_ENDPOINT_URL` (optional, for S3-compatible endpoints)
   - `MEDIA_LIFECYCLE_DAYS` (default `90`)
   - `MEDIA_VERIFY_LIFECYCLE_ON_STARTUP` (default `false`; when `true`, app startup validates a matching GCS Delete lifecycle rule)
   - `WHATSAPP_MEDIA_TIMEOUT_SECONDS` (default `15`)
@@ -110,16 +132,84 @@
 - Override migration DB URL:
   - `ALEMBIC_DATABASE_URL=postgresql+psycopg://... uv run alembic upgrade head`
 
-## CI / Staging Deploy
+## CI / Staging + Production Deploy
 
 The repository includes a CI workflow (`.github/workflows/ci.yml`) that runs:
 
 - lint (`ruff`)
 - tests (`pytest`)
-- Docker build
-- optional staging deploy from `main` when these variables are configured:
-  - repository variables: `GCP_PROJECT_ID`, `GCP_REGION`, `CLOUD_RUN_SERVICE`
-  - repository secret: `GCP_SA_KEY`
+- Docker build validation on PRs and non-`main` branch pushes
+- on `main`, one Docker image build is pushed to Artifact Registry in both staging and prod projects
+- on release tags (`v*`), one Docker image build is pushed to Artifact Registry in both staging and prod projects
+- image digest is resolved and saved as CI artifact (`image-digests`)
+- staging migration job from `main` runs Alembic with a dedicated migrator DB user and must succeed before staging deploy
+- staging deploy from `main` uses immutable image digest (`--image ...@sha256:...`), injects configured Secret Manager bindings, and deploys worker first, then webhook
+- production migration job from release tag (`v*`) runs Alembic with a dedicated migrator DB user and must succeed before production deploy
+- production deploy from release tag (`v*`) uses immutable image digest (`--image ...@sha256:...`), injects configured Secret Manager bindings, and deploys worker first, then webhook
+
+Required repository variables for `main` image publish:
+- `ARTIFACT_REGISTRY_REGION` (for example `me-west1`)
+- `ARTIFACT_REGISTRY_REPOSITORY` (for example `adv-assistant`)
+- `STAGING_GCP_PROJECT_ID`
+- `PROD_GCP_PROJECT_ID`
+
+Required repository variables for staging deploy:
+- `STAGING_DEPLOY_ENABLED=true` (set to `false` to skip staging deploy while infra is not ready)
+- `STAGING_GCP_REGION`
+- `STAGING_CLOUD_RUN_WORKER_SERVICE`
+- `STAGING_CLOUD_RUN_WEBHOOK_SERVICE`
+- `STAGING_TASKS_REGION`
+- `STAGING_TASKS_QUEUE`
+- `STAGING_TASKS_SERVICE_ACCOUNT_EMAIL`
+- `STAGING_SECRET_DATABASE_URL` (Secret Manager mapping for `DATABASE_URL`; prevents SQLite fallback in Cloud Run)
+- `STAGING_SECRET_WHATSAPP_ACCESS_TOKEN` (Step 5 convention; currently `WHATSAPP_ACCESS_TOKEN_STAGING`)
+- optional: `STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true` (applies to webhook service only)
+
+Optional repository variables for staging secret bindings:
+- `STAGING_SECRET_VERIFY_TOKEN`
+- `STAGING_SECRET_META_APP_SECRET`
+- `STAGING_SECRET_ADMIN_BASIC_USERNAME`
+- `STAGING_SECRET_ADMIN_BASIC_PASSWORD`
+- `STAGING_SECRET_OPENAI_API_KEY`
+- `STAGING_SECRET_GEMINI_API_KEY`
+- `STAGING_SECRET_NANA_BANANA_API_KEY`
+- `STAGING_SECRET_CMS_CITYSCREEN_APP_TOKEN`
+
+Required repository variables for staging migration job:
+- `STAGING_CLOUD_SQL_CONNECTION_NAME` (format: `project:region:instance`)
+- `STAGING_DB_NAME`
+- `STAGING_DB_MIGRATOR_USER`
+- `STAGING_DB_MIGRATOR_PASS_SECRET` (Secret Manager secret name in staging project)
+
+Required repository variables for production deploy:
+- `PROD_GCP_REGION`
+- `PROD_CLOUD_RUN_WORKER_SERVICE`
+- `PROD_CLOUD_RUN_WEBHOOK_SERVICE`
+- `PROD_TASKS_REGION`
+- `PROD_TASKS_QUEUE`
+- `PROD_TASKS_SERVICE_ACCOUNT_EMAIL`
+- `PROD_SECRET_DATABASE_URL` (Secret Manager mapping for `DATABASE_URL`; prevents SQLite fallback in Cloud Run)
+- optional: `PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED=true` (applies to webhook service only)
+
+Optional repository variables for production secret bindings:
+- `PROD_SECRET_VERIFY_TOKEN`
+- `PROD_SECRET_META_APP_SECRET`
+- `PROD_SECRET_WHATSAPP_ACCESS_TOKEN` (deferred for now)
+- `PROD_SECRET_ADMIN_BASIC_USERNAME`
+- `PROD_SECRET_ADMIN_BASIC_PASSWORD`
+- `PROD_SECRET_OPENAI_API_KEY`
+- `PROD_SECRET_GEMINI_API_KEY`
+- `PROD_SECRET_NANA_BANANA_API_KEY`
+- `PROD_SECRET_CMS_CITYSCREEN_APP_TOKEN`
+
+Required repository variables for production migration job:
+- `PROD_CLOUD_SQL_CONNECTION_NAME` (format: `project:region:instance`)
+- `PROD_DB_NAME`
+- `PROD_DB_MIGRATOR_USER`
+- `PROD_DB_MIGRATOR_PASS_SECRET` (Secret Manager secret name in production project)
+
+Required repository secret:
+- `GCP_SA_KEY`
 
 ## Infrastructure Bootstrap Helper
 
@@ -136,15 +226,32 @@ Use `scripts/provision_db_access.sh` to provision:
 - Secret Manager password entries
 - SQL grants and least-privilege hardening (automatic when admin DB password is available)
 
-Example:
-- `CLOUD_SQL_INSTANCE=adv-assistant-pg scripts/provision_db_access.sh`
+Example (staging-only target in staging project/instance):
+- `GCP_PROJECT_ID=adv-assistant-staging-488908 CLOUD_SQL_INSTANCE=adv-assistant-staging-pg PROVISION_TARGETS=staging scripts/provision_db_access.sh`
+
+Example (production-only target in production project/instance):
+- `GCP_PROJECT_ID=adv-assistant-prod-488908 CLOUD_SQL_INSTANCE=adv-assistant-prod-pg PROVISION_TARGETS=production scripts/provision_db_access.sh`
 
 Recommended first run (bootstraps postgres admin password into Secret Manager and applies grants automatically):
-- `BOOTSTRAP_POSTGRES_ADMIN_PASSWORD=true CLOUD_SQL_INSTANCE=adv-assistant-pg scripts/provision_db_access.sh`
+- `BOOTSTRAP_POSTGRES_ADMIN_PASSWORD=true GCP_PROJECT_ID=adv-assistant-staging-488908 CLOUD_SQL_INSTANCE=adv-assistant-staging-pg PROVISION_TARGETS=staging scripts/provision_db_access.sh`
 
 Defaults:
-- `GCP_PROJECT_ID=ads-assistant-488908`
+- `PROVISION_TARGETS=staging,production` (set explicitly to `staging` or `production` for isolated projects/instances)
 - existing user passwords are not rotated unless `ROTATE_EXISTING_PASSWORDS=true`
 - automatic SQL grant application is enabled (`APPLY_SQL_GRANTS=true`)
 
 If automatic grant application is unavailable (missing `psql`, `cloud-sql-proxy`, or admin password), the script prints manual SQL commands.
+
+## Secret Binding Verification (Staging/Production)
+
+Use `scripts/verify_cloudrun_secret_bindings.sh` to verify:
+
+- configured secret names exist in Secret Manager;
+- Cloud Run `worker` and `webhook` services are bound to the expected secrets.
+
+Example (staging):
+
+- `STAGING_SECRET_DATABASE_URL=DATABASE_URL_STAGING STAGING_SECRET_WHATSAPP_ACCESS_TOKEN=WHATSAPP_ACCESS_TOKEN_STAGING scripts/verify_cloudrun_secret_bindings.sh --target staging --project-id adv-assistant-staging-488908 --region me-west1 --worker-service adv-assistant-worker-staging --webhook-service adv-assistant-webhook-staging`
+
+Run migrations explicitly (same approach as CI migration jobs):
+- `GCP_PROJECT_ID=adv-assistant-staging-488908 CLOUD_SQL_CONNECTION_NAME=adv-assistant-staging-488908:me-west1:adv-assistant-staging-pg DB_NAME=adv_assistant_staging DB_MIGRATOR_USER=adv_assistant_migrator_staging DB_MIGRATOR_PASS_SECRET=DB_MIGRATOR_PASS_STAGING scripts/run_cloudsql_migration.sh`

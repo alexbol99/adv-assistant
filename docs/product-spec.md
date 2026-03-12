@@ -59,6 +59,11 @@ Once the bot has sufficient information, it suggests generating an advertisement
 | **Iterate with context** | The bot retains context between turns in an ad session. When regenerating, it applies only the changes the operator specifies (e.g., *"make the price bigger"*, *"use a blue background"*) without losing other collected details. |
 | **Draft isolation** | In multi-operator mode, each operator works on their own draft. Drafts are not shared across operators. |
 | **Memory** | The bot preserves conversation state per operator draft/session. In V1, language is fixed to Hebrew and currency defaults to ILS. |
+| **Clarify only missing essentials** | The bot asks follow-up questions only when minimum generation input is absent. For first generation, only **product name** is mandatory. Price and other details are collected as follow-up optimizations. |
+| **Show, don't ask too much** | After gathering the essentials, the bot generates and shows an ad rather than asking more questions. Improvement is driven by the operator's reaction to the visual, not by a pre-generation questionnaire. |
+| **Iterate with context** | The bot retains context between turns in an ad session. When regenerating, it applies only the changes the operator specifies (e.g., *"make the price bigger"*, *"use a blue background"*) without losing other collected details. |
+| **Draft isolation** | In multi-operator mode, each operator works on their own draft. Drafts are not shared across operators. |
+| **Memory** | The bot keeps two memory layers: **system memory** per operator (preferred language, store type, global creative guidance, logo) and **draft memory** per ad (product name, optional brand, optional price/currency, product photo). System memory persists across ads; draft memory does not. |
 
 ### 3.3 Required vs Optional Fields
 
@@ -71,6 +76,11 @@ Once the bot has sufficient information, it suggests generating an advertisement
 | Product identification | Conditional | Required for product ads; derived from text/image/external lookup and confirmed when uncertain. |
 | Price / offer | Optional | Not a hard requirement in V1. |
 | Promotional text | Optional | E.g., "20% off today only". |
+| Product name | **Required** | Must be confirmed before generating an ad. |
+| Price | Optional (recommended) | Defaults to ILS (₪) unless the operator specifies another currency. First generation may proceed without price. |
+| Product photo | Optional | Operator may send an image; the bot incorporates it into the generated ad. |
+| EAN barcode | Optional | Helps the bot identify the product and enrich details from the web. |
+| Promotional text | Optional | E.g., "20% off today only". The bot may suggest text if not provided. |
 
 ### 3.4 Example Happy Path
 
@@ -130,7 +140,8 @@ The operator can ask what actions the bot supports.
 An **admin console** is an essential part of the product. It enables configuration and oversight of the system without requiring direct code changes. The admin console provides:
 
 - **Operator management**: register, update, or deactivate authorised WhatsApp phone numbers.
-- **CMS connection settings**: configure the TV CMS endpoint used for publishing.
+- **CMS connection settings**: configure the TV CMS endpoint and per-operator mapping to CMS campaign/playlist.
+- **Operator-CMS mapping tools**: connect an operator by phone number (and optionally Meta user identifier) to required CMS routing fields.
 - **Default settings**: set the default language, currency, and regional preferences.
 - **Active advertisement overview**: view the current list of ads published to the CMS.
 - **Audit log**: view a history of bot actions (ad created, published, deleted) with timestamps.

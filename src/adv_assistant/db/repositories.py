@@ -7,6 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from adv_assistant.db.base import utcnow
+from adv_assistant.db.enums import AdDraftStatus
 from adv_assistant.db.models import (
     AdDraft,
     AuditEvent,
@@ -16,6 +17,8 @@ from adv_assistant.db.models import (
     PublishedAd,
     SystemConfig,
 )
+
+_UNSET = object()
 
 
 class OperatorRepository:
@@ -30,6 +33,13 @@ class OperatorRepository:
         language: str = "he",
         currency: str = "ILS",
         active: bool = True,
+        cms_campaign_id: int | None = None,
+        cms_playlist_id: int | None = None,
+        business_name: str | None = None,
+        logo_url: str | None = None,
+        brand_colors: list[str] | None = None,
+        store_type: str | None = None,
+        creative_guidance: str | None = None,
     ) -> Operator:
         operator = Operator(
             phone=phone,
@@ -37,6 +47,13 @@ class OperatorRepository:
             language=language,
             currency=currency,
             active=active,
+            cms_campaign_id=cms_campaign_id,
+            cms_playlist_id=cms_playlist_id,
+            business_name=business_name,
+            logo_url=logo_url,
+            brand_colors=brand_colors,
+            store_type=store_type,
+            creative_guidance=creative_guidance,
         )
         self.session.add(operator)
         await self.session.flush()
@@ -59,6 +76,59 @@ class OperatorRepository:
         await self.session.flush()
         return (result.rowcount or 0) > 0
 
+    async def update_branding(
+        self,
+        phone: str,
+        *,
+        business_name: str | None | object = _UNSET,
+        logo_url: str | None | object = _UNSET,
+        brand_colors: list[str] | None | object = _UNSET,
+        language: str | None | object = _UNSET,
+        store_type: str | None | object = _UNSET,
+        creative_guidance: str | None | object = _UNSET,
+    ) -> bool:
+        values: dict[str, Any] = {"updated_at": utcnow()}
+        if business_name is not _UNSET:
+            values["business_name"] = business_name
+        if logo_url is not _UNSET:
+            values["logo_url"] = logo_url
+        if brand_colors is not _UNSET:
+            values["brand_colors"] = brand_colors
+        if language is not _UNSET:
+            values["language"] = language
+        if store_type is not _UNSET:
+            values["store_type"] = store_type
+        if creative_guidance is not _UNSET:
+            values["creative_guidance"] = creative_guidance
+        if len(values) == 1:
+            return False
+        result = await self.session.execute(
+            update(Operator).where(Operator.phone == phone).values(**values)
+        )
+        await self.session.flush()
+        return (result.rowcount or 0) > 0
+
+    async def update_cms_mapping(
+        self,
+        phone: str,
+        *,
+        cms_campaign_id: int | None | object = _UNSET,
+        cms_playlist_id: int | None | object = _UNSET,
+    ) -> bool:
+        values: dict[str, Any] = {"updated_at": utcnow()}
+        if cms_campaign_id is not _UNSET:
+            values["cms_campaign_id"] = cms_campaign_id
+        if cms_playlist_id is not _UNSET:
+            values["cms_playlist_id"] = cms_playlist_id
+        if len(values) == 1:
+            return False
+
+        result = await self.session.execute(
+            update(Operator).where(Operator.phone == phone).values(**values)
+        )
+        await self.session.flush()
+        return (result.rowcount or 0) > 0
+
 
 class ConversationSessionRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -76,9 +146,11 @@ class ConversationSessionRepository:
         operator_phone: str,
         language: str | None = None,
         history: list[dict[str, Any]] | None = None,
-        current_draft_id: uuid.UUID | None = None,
+        current_draft_id: uuid.UUID | None | object = _UNSET,
+        pending_upload_type: str | None | object = _UNSET,
+        pending_followup_question: str | None | object = _UNSET,
         last_active_at: datetime | None = None,
-        expires_at: datetime | None = None,
+        expires_at: datetime | None | object = _UNSET,
     ) -> ConversationSession:
         session_obj = await self.get_by_operator_phone(operator_phone)
         if session_obj is None:
@@ -86,9 +158,15 @@ class ConversationSessionRepository:
                 operator_phone=operator_phone,
                 language=language or "he",
                 history=history or [],
-                current_draft_id=current_draft_id,
+                current_draft_id=(None if current_draft_id is _UNSET else current_draft_id),
+                pending_upload_type=(
+                    None if pending_upload_type is _UNSET else pending_upload_type
+                ),
+                pending_followup_question=(
+                    None if pending_followup_question is _UNSET else pending_followup_question
+                ),
                 last_active_at=last_active_at or utcnow(),
-                expires_at=expires_at,
+                expires_at=None if expires_at is _UNSET else expires_at,
             )
             self.session.add(session_obj)
         else:
@@ -96,11 +174,15 @@ class ConversationSessionRepository:
                 session_obj.language = language
             if history is not None:
                 session_obj.history = history
-            if current_draft_id is not None:
+            if current_draft_id is not _UNSET:
                 session_obj.current_draft_id = current_draft_id
+            if pending_upload_type is not _UNSET:
+                session_obj.pending_upload_type = pending_upload_type
+            if pending_followup_question is not _UNSET:
+                session_obj.pending_followup_question = pending_followup_question
             if last_active_at is not None:
                 session_obj.last_active_at = last_active_at
-            if expires_at is not None:
+            if expires_at is not _UNSET:
                 session_obj.expires_at = expires_at
             session_obj.updated_at = utcnow()
 
@@ -197,6 +279,38 @@ class AdDraftRepository:
         await self.session.flush()
         return await self.get_by_id(draft_id)
 
+    async def reset_product_fields(
+        self,
+        *,
+        draft_id: uuid.UUID,
+        operator_phone: str,
+        expected_version: int,
+        currency: str = "ILS",
+    ) -> AdDraft | None:
+        """Clear all product-specific fields for a fresh ad creation."""
+        return await self.update_for_operator_with_version(
+            draft_id=draft_id,
+            operator_phone=operator_phone,
+            expected_version=expected_version,
+            product_name=None,
+            product_brand=None,
+            price=None,
+            currency=currency,
+            promo_text=None,
+            ean=None,
+            photo_url=None,
+            enriched_brand=None,
+            enriched_category=None,
+            enriched_description=None,
+            enriched_image_url=None,
+            enrichment_source="none",
+            enrichment_unavailable_notified_at=None,
+            generation_job_id=None,
+            preview_reference_url=None,
+            rendered_image_url=None,
+            status=AdDraftStatus.DRAFT,
+        )
+
 
 class PublishedAdRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -262,6 +376,24 @@ class AuditEventRepository:
     async def list_recent(self, limit: int = 100) -> list[AuditEvent]:
         result = await self.session.execute(
             select(AuditEvent).order_by(AuditEvent.timestamp.desc()).limit(limit)
+        )
+        return list(result.scalars().all())
+
+    async def list_recent_for_operator_actions(
+        self,
+        *,
+        operator_phone: str,
+        actions: list[str],
+        limit: int = 50,
+    ) -> list[AuditEvent]:
+        result = await self.session.execute(
+            select(AuditEvent)
+            .where(
+                AuditEvent.operator_phone == operator_phone,
+                AuditEvent.action.in_(actions),
+            )
+            .order_by(AuditEvent.timestamp.desc())
+            .limit(limit)
         )
         return list(result.scalars().all())
 

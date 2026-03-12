@@ -46,6 +46,79 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 10. `T10` Implement publish-gate with idempotency for confirm-publish retries/duplicates.
 11. `T11` Add E2E coverage including “already enough info -> direct generation” and “image-only request” paths.
 12. `T12` Ship end-to-end feature flag toggle (fully new flow vs fully legacy flow, no mixed mode).
+## MVP Priority Reset (as of March 5, 2026)
+
+This section defines the immediate delivery order for the first MVP.
+Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
+
+### Stage 1 — Multi-Operator CMS Routing (Highest Priority)
+
+**Goal:** each authorized operator publishes to their own CMS campaign/playlist mapping.
+
+**Scope**
+- Add per-operator CMS mapping fields (`cms_campaign_id`, `cms_playlist_id`).
+- Add a minimal admin API + web form to register/update operator CMS mapping.
+- Keep publish-only scope for MVP (no list/delete-all implementation in this stage).
+- If operator mapping is missing, block publish with the fixed user message:
+  - "אתה לא מחובר למערכת כרגע, פנה לתמיכה כדי לייצר את החיבור"
+
+**Test obligations**
+- Migration up/down tests for operator CMS mapping fields.
+- Repository tests for create/update/read mapping.
+- Admin auth tests (basic username/password): unauthorized requests must fail closed.
+- Integration test: two operators publish to two different campaign/playlist targets.
+- Negative test: publish blocked when mapping is missing + audit event written.
+
+**Exit gate**
+- Two-number E2E publish test passes with distinct CMS targets.
+- Missing-mapping publish flow returns the exact blocked message.
+
+### Stage 2 — Creative Flow Optimization (System Memory + Draft Memory)
+
+**Goal:** improve generation quality while preserving clear data boundaries.
+
+**Scope**
+- System memory (persists across ads): `store_type` (free text), preferred language, global creative guidance, logo.
+- Draft memory (ad-specific only): product name, optional product brand, price/currency, product photo.
+- Keep current generation rule: product name is required; price remains optional for first generation.
+- After first generation, send short nudges to collect more context (for example store type).
+
+**Test obligations**
+- System memory persists across new drafts.
+- Draft product fields do not leak between ads.
+- Logo image routing remains separate from product photo routing.
+- Generation input integration test verifies merged system + draft context.
+- Regression tests for create/regenerate/publish paths.
+
+**Exit gate**
+- End-to-end flow proves: first generation with product name only, then follow-up prompts for quality improvements.
+
+### Stage 3 — MVP QA and Release
+
+**Goal:** validate publish-ready MVP behavior.
+
+**Scope**
+- Full regression run (`pytest`, `ruff`).
+- Manual WhatsApp E2E validation for:
+  - connected operator publish,
+  - unconnected operator publish block,
+  - logo upload,
+  - product image upload,
+  - new ad without product-field inheritance.
+
+**Exit gate**
+- Regression suite green and manual checklist completed in staging.
+
+### Next Sprint Backlog Additions (March 6, 2026)
+
+**Requested carry-over items**
+- Publish CTA must always be present immediately after any successful preview generation response.
+- Admin operator lookup should present user data in a structured view (table/card) for faster support usage.
+
+**Validation targets**
+1. Automated tests confirm publish buttons are present for preview success + follow-up paths.
+2. Manual WhatsApp E2E confirms button visibility in real conversation flow.
+3. Admin UI lookup renders a structured operator profile view from phone lookup.
 
 ---
 
@@ -334,8 +407,26 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 
 ---
 
+## Current Repository Status (as of March 5, 2026)
+
+Based on the current codebase and automated test coverage:
+
+- **Implemented and test-covered:** Phase 0 through Phase 7.
+- **Gate A / Gate B evidence:** present in the current test suite (`tests/test_ingress_pipeline.py`, `tests/test_tasks_auth.py`, `tests/test_phase4_llm_boundary.py`, `tests/test_phase5_enrichment.py`, `tests/test_phase6_media.py`, `tests/test_phase7_generation.py`).
+- **Phase 8 status:** publish flow is implemented and tested; `list_ads` / `delete_all` side effects are still pending.
+- **Pending operational/compliance work:** Phase 5 compliance checklist sign-off remains open (`docs/phase5-compliance-checklist.md` is not yet completed).
+- **Not yet implemented:** Phase 9 Admin control plane (full scope), Phase 10 hardening, and Phase 11 launch verification.
+- **MVP execution order:** prioritize per-operator CMS mapping + basic admin first, then memory-driven creative optimization.
+
+---
+
 ## Immediate Next Actions
 
 1. Complete `T1` documentation updates for the V1 conversation flow and state contract.
 2. Complete `T2` schema migration and model updates for conversation-flow state foundations.
 3. Execute a migration/test proof (`alembic upgrade head` + `pytest`) before starting `T3`.
+1. Implement Stage 1 MVP scope: per-operator CMS mapping and minimal admin API/UI with basic auth.
+2. Wire publish routing strictly to operator CMS mapping and block publishing when mapping is missing with the approved message.
+3. Implement Stage 2 MVP scope: system memory vs draft memory separation and post-generation quality follow-ups.
+4. Complete Stage 3 MVP QA: full regression and manual WhatsApp staging checklist.
+5. Keep Phase 5 compliance sign-off as required before production enablement of enrichment sources.

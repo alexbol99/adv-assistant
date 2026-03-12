@@ -42,6 +42,36 @@ async def test_crud_repositories(db_session: AsyncSession) -> None:
     assert fetched_operator is not None
     assert fetched_operator.active is True
 
+    updated_branding = await operator_repo.update_branding(
+        operator.phone,
+        business_name="Super Market",
+        logo_url="https://example.com/logo.png",
+        brand_colors=["#FF0000", "#00FF00"],
+        store_type="grocery",
+        creative_guidance="Clean layout with large readable price",
+        language="en",
+    )
+    assert updated_branding is True
+    refreshed_operator = await operator_repo.get_by_phone(operator.phone)
+    assert refreshed_operator is not None
+    assert refreshed_operator.business_name == "Super Market"
+    assert refreshed_operator.logo_url == "https://example.com/logo.png"
+    assert refreshed_operator.brand_colors == ["#FF0000", "#00FF00"]
+    assert refreshed_operator.store_type == "grocery"
+    assert refreshed_operator.creative_guidance == "Clean layout with large readable price"
+    assert refreshed_operator.language == "en"
+
+    updated_mapping = await operator_repo.update_cms_mapping(
+        operator.phone,
+        cms_campaign_id=157,
+        cms_playlist_id=139,
+    )
+    assert updated_mapping is True
+    refreshed_operator = await operator_repo.get_by_phone(operator.phone)
+    assert refreshed_operator is not None
+    assert refreshed_operator.cms_campaign_id == 157
+    assert refreshed_operator.cms_playlist_id == 139
+
     active_operators = await operator_repo.list_active()
     assert len(active_operators) == 1
 
@@ -129,6 +159,76 @@ async def test_processed_message_purge_uses_expires_at(db_session: AsyncSession)
     assert deleted == 1
     assert await processed_repo.exists("purge-keep") is True
     assert await processed_repo.exists("purge-delete") is False
+
+
+async def test_session_repository_can_clear_nullable_fields(db_session: AsyncSession) -> None:
+    operator_repo = OperatorRepository(db_session)
+    session_repo = ConversationSessionRepository(db_session)
+    draft_repo = AdDraftRepository(db_session)
+
+    operator = await operator_repo.create(phone="+972500000555")
+    draft = await draft_repo.create(
+        operator_phone=operator.phone,
+        status=AdDraftStatus.DRAFT,
+    )
+    initial_expiry = utcnow() + timedelta(days=1)
+
+    created = await session_repo.create_or_update(
+        operator_phone=operator.phone,
+        history=[{"role": "user", "text": "hello"}],
+        current_draft_id=draft.id,
+        pending_upload_type="logo",
+        pending_followup_question="price",
+        expires_at=initial_expiry,
+    )
+    assert created.current_draft_id == draft.id
+    assert created.pending_upload_type == "logo"
+    assert created.pending_followup_question == "price"
+    assert created.expires_at == initial_expiry
+
+    cleared = await session_repo.create_or_update(
+        operator_phone=operator.phone,
+        current_draft_id=None,
+        pending_upload_type=None,
+        pending_followup_question=None,
+        expires_at=None,
+    )
+    assert cleared.current_draft_id is None
+    assert cleared.pending_upload_type is None
+    assert cleared.pending_followup_question is None
+    assert cleared.expires_at is None
+
+
+async def test_audit_repository_lists_recent_operator_actions(db_session: AsyncSession) -> None:
+    audit_repo = AuditEventRepository(db_session)
+
+    await audit_repo.log(
+        actor="system",
+        action="openai_request_debug",
+        operator_phone="+972500000888",
+        metadata={"wamid": "w-1"},
+    )
+    await audit_repo.log(
+        actor="system",
+        action="gemini_request_debug",
+        operator_phone="+972500000888",
+        metadata={"wamid": "w-2"},
+    )
+    await audit_repo.log(
+        actor="system",
+        action="inbound_message_processed",
+        operator_phone="+972500000888",
+        metadata={"wamid": "w-3"},
+    )
+
+    rows = await audit_repo.list_recent_for_operator_actions(
+        operator_phone="+972500000888",
+        actions=["openai_request_debug", "gemini_request_debug"],
+        limit=10,
+    )
+
+    assert len(rows) == 2
+    assert {row.action for row in rows} == {"openai_request_debug", "gemini_request_debug"}
 
 
 async def test_retention_jobs(db_session: AsyncSession) -> None:
@@ -251,3 +351,10 @@ async def test_retention_jobs(db_session: AsyncSession) -> None:
 
     draft_rows = await db_session.execute(select(AdDraft))
     assert len(list(draft_rows.scalars().all())) == 1
+
+
+def test_retention_policy_defaults_align_with_product_retention() -> None:
+    policy = RetentionPolicy()
+    assert policy.processed_message_days == 30
+    assert policy.draft_days == 30
+    assert policy.audit_months == 13
