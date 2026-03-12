@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.db.base import Base
@@ -12,6 +13,7 @@ from adv_assistant.db.session import create_engine, create_session_factory, sess
 from adv_assistant.llm_gateway import (
     BUTTON_CONFIRM_DELETE_ALL,
     ExtractedAdFields,
+    ExtractedBrandingFields,
     Intent,
     IntentClassification,
     LLMGatewayError,
@@ -215,6 +217,46 @@ def test_extracted_price_is_decimal_and_quantized() -> None:
     assert fields.price == Decimal("20.00")
 
 
+def test_extracted_fields_normalize_dirty_inputs() -> None:
+    fields = ExtractedAdFields(
+        product_brand="  מותג   פרטי  ",
+        price="₪ 1,234.5",
+        currency=" ils ",
+    )
+    assert fields.product_brand == "מותג פרטי"
+    assert fields.price == Decimal("1234.50")
+    assert fields.currency == "ILS"
+
+
+def test_extracted_fields_price_defaults_currency_to_ils() -> None:
+    fields = ExtractedAdFields(price="19.9")
+    update_fields = fields.to_draft_update_fields()
+    assert update_fields["price"] == Decimal("19.90")
+    assert update_fields["currency"] == "ILS"
+
+
+def test_extracted_fields_reject_invalid_currency_code() -> None:
+    with pytest.raises(ValidationError):
+        ExtractedAdFields(price="19.9", currency="12$")
+
+
+def test_extracted_branding_fields_normalize_system_memory_inputs() -> None:
+    fields = ExtractedBrandingFields(
+        store_type="  סופרמרקט שכונתי  ",
+        creative_guidance="  מינימליסטי   ונקי  ",
+        preferred_language=" עברית ",
+    )
+    update_fields = fields.to_update_kwargs()
+    assert update_fields["store_type"] == "סופרמרקט שכונתי"
+    assert update_fields["creative_guidance"] == "מינימליסטי ונקי"
+    assert update_fields["language"] == "he"
+
+
+def test_extracted_branding_fields_reject_invalid_language_hint() -> None:
+    with pytest.raises(ValidationError):
+        ExtractedBrandingFields(preferred_language="not-a-language")
+
+
 async def test_openai_gateway_retries_on_schema_mismatch(monkeypatch: Any) -> None:
     gateway = OpenAILLMGateway(
         api_key="test-key",
@@ -227,7 +269,13 @@ async def test_openai_gateway_retries_on_schema_mismatch(monkeypatch: Any) -> No
     )
     calls = {"n": 0}
 
-    async def fake_chat_json(*, model_name: str, system_prompt: str, user_prompt: str) -> str:
+    async def fake_chat_json(
+        *,
+        model_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        operation: str,
+    ) -> str:
         calls["n"] += 1
         if calls["n"] == 1:
             return '{"invalid":"shape"}'
@@ -237,3 +285,102 @@ async def test_openai_gateway_retries_on_schema_mismatch(monkeypatch: Any) -> No
     result = await gateway.classify_intent(message_text="help", language="he", history=[])
     assert result.intent == Intent.HELP
     assert calls["n"] == 2
+
+
+async def test_openai_gateway_retries_without_temperature_when_model_rejects_it(
+    monkeypatch: Any,
+) -> None:
+    gateway = OpenAILLMGateway(
+        api_key="test-key",
+        classification_model="gpt-5-mini",
+        extraction_model="gpt-5-mini",
+        reply_model="gpt-5-mini",
+        max_retries=0,
+        timeout_seconds=5,
+        max_input_chars=2000,
+    )
+    calls: list[dict[str, Any]] = []
+
+    class _FakeMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class _FakeChoice:
+        def __init__(self, content: str) -> None:
+            self.message = _FakeMessage(content)
+
+    class _FakeResponse:
+        def __init__(self, content: str) -> None:
+            self.choices = [_FakeChoice(content)]
+
+    async def fake_create(**kwargs: Any) -> _FakeResponse:
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise RuntimeError(
+                "Unsupported value: 'temperature' does not support 0 with this model. "
+                "Only the default (1) value is supported."
+            )
+        return _FakeResponse('{"intent":"help"}')
+
+    monkeypatch.setattr(gateway._client.chat.completions, "create", fake_create)
+    result = await gateway.classify_intent(message_text="help", language="he", history=[])
+
+    assert result.intent == Intent.HELP
+    assert len(calls) == 2
+    assert calls[0]["temperature"] == 0
+    assert "temperature" not in calls[1]
+
+
+async def test_openai_gateway_emits_trace_event_when_enabled(monkeypatch: Any) -> None:
+    gateway = OpenAILLMGateway(
+        api_key="test-key",
+        classification_model="gpt-5-mini",
+        extraction_model="gpt-5-mini",
+        reply_model="gpt-5-mini",
+        max_retries=0,
+        timeout_seconds=5,
+        max_input_chars=2000,
+        trace_enabled=True,
+        trace_max_chars=2000,
+    )
+
+    class _FakeMessage:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class _FakeChoice:
+        def __init__(self, content: str) -> None:
+            self.message = _FakeMessage(content)
+
+    class _FakeResponse:
+        def __init__(self, content: str) -> None:
+            self.choices = [_FakeChoice(content)]
+
+    async def fake_create(**_: Any) -> _FakeResponse:
+        return _FakeResponse('{"intent":"help"}')
+
+    events: list[tuple[str, str | None, dict[str, Any]]] = []
+
+    async def trace_sink(
+        action: str,
+        operator_phone: str | None,
+        metadata: dict[str, Any],
+    ) -> None:
+        events.append((action, operator_phone, metadata))
+
+    gateway.set_trace_context(
+        operator_phone="+972500000999",
+        wamid="wamid-trace-1",
+        trace_sink=trace_sink,
+    )
+    monkeypatch.setattr(gateway._client.chat.completions, "create", fake_create)
+    result = await gateway.classify_intent(message_text="help", language="he", history=[])
+    gateway.clear_trace_context()
+
+    assert result.intent == Intent.HELP
+    assert len(events) == 1
+    action, operator_phone, metadata = events[0]
+    assert action == "openai_request_debug"
+    assert operator_phone == "+972500000999"
+    assert metadata["wamid"] == "wamid-trace-1"
+    assert metadata["provider"] == "openai"

@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main, "codex/**"]
+    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -34,15 +35,137 @@ jobs:
   docker-build:
     runs-on: ubuntu-latest
     needs: lint-test
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main')
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker image
         run: docker build -t adv-assistant:ci .
 
+  publish-image:
+    runs-on: ubuntu-latest
+    needs: lint-test
+    if: (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != ''
+    outputs:
+      image_digest: ${{ steps.publish.outputs.image_digest }}
+      image_tag: ${{ steps.publish.outputs.image_tag }}
+      staging_image: ${{ steps.publish.outputs.staging_image }}
+      prod_image: ${{ steps.publish.outputs.prod_image }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth for Artifact Registry
+        env:
+          AR_REGION: ${{ vars.ARTIFACT_REGISTRY_REGION }}
+        run: gcloud auth configure-docker "$AR_REGION-docker.pkg.dev" --quiet
+
+      - name: Build once and push immutable image tags
+        id: publish
+        env:
+          AR_REGION: ${{ vars.ARTIFACT_REGISTRY_REGION }}
+          AR_REPOSITORY: ${{ vars.ARTIFACT_REGISTRY_REPOSITORY }}
+          STAGING_PROJECT: ${{ vars.STAGING_GCP_PROJECT_ID }}
+          PROD_PROJECT: ${{ vars.PROD_GCP_PROJECT_ID }}
+        run: |
+          set -euo pipefail
+
+          IMAGE_NAME="adv-assistant"
+          IMAGE_TAG="${GITHUB_SHA}"
+
+          STAGING_TAG="$AR_REGION-docker.pkg.dev/$STAGING_PROJECT/$AR_REPOSITORY/$IMAGE_NAME:$IMAGE_TAG"
+          PROD_TAG="$AR_REGION-docker.pkg.dev/$PROD_PROJECT/$AR_REPOSITORY/$IMAGE_NAME:$IMAGE_TAG"
+
+          docker build -t "$STAGING_TAG" .
+          docker tag "$STAGING_TAG" "$PROD_TAG"
+
+          docker push "$STAGING_TAG"
+          docker push "$PROD_TAG"
+
+          STAGING_DIGEST="$(gcloud artifacts docker images describe "$STAGING_TAG" --project "$STAGING_PROJECT" --format='value(image_summary.digest)')"
+          PROD_DIGEST="$(gcloud artifacts docker images describe "$PROD_TAG" --project "$PROD_PROJECT" --format='value(image_summary.digest)')"
+
+          if [ -z "$STAGING_DIGEST" ] || [ -z "$PROD_DIGEST" ]; then
+            echo "Failed to resolve pushed image digest."
+            exit 1
+          fi
+
+          if [ "$STAGING_DIGEST" != "$PROD_DIGEST" ]; then
+            echo "Digest mismatch between staging and prod pushes."
+            echo "staging=$STAGING_DIGEST"
+            echo "prod=$PROD_DIGEST"
+            exit 1
+          fi
+
+          STAGING_IMAGE="$AR_REGION-docker.pkg.dev/$STAGING_PROJECT/$AR_REPOSITORY/$IMAGE_NAME@$STAGING_DIGEST"
+          PROD_IMAGE="$AR_REGION-docker.pkg.dev/$PROD_PROJECT/$AR_REPOSITORY/$IMAGE_NAME@$PROD_DIGEST"
+
+          {
+            echo "image_digest=$STAGING_DIGEST"
+            echo "image_tag=$IMAGE_TAG"
+            echo "staging_image=$STAGING_IMAGE"
+            echo "prod_image=$PROD_IMAGE"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "tag=$IMAGE_TAG"
+            echo "digest=$STAGING_DIGEST"
+            echo "staging_image=$STAGING_IMAGE"
+            echo "prod_image=$PROD_IMAGE"
+          } > image-digests.txt
+
+      - name: Upload digest manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digests
+          path: image-digests.txt
+
+  migrate-staging:
+    runs-on: ubuntu-latest
+    needs: publish-image
+    if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_GCP_PROJECT_ID != '' && vars.STAGING_CLOUD_SQL_CONNECTION_NAME != '' && vars.STAGING_DB_NAME != '' && vars.STAGING_DB_MIGRATOR_USER != '' && vars.STAGING_DB_MIGRATOR_PASS_SECRET != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run Alembic migrations (staging)
+        env:
+          GCP_PROJECT_ID: ${{ vars.STAGING_GCP_PROJECT_ID }}
+          CLOUD_SQL_CONNECTION_NAME: ${{ vars.STAGING_CLOUD_SQL_CONNECTION_NAME }}
+          DB_NAME: ${{ vars.STAGING_DB_NAME }}
+          DB_MIGRATOR_USER: ${{ vars.STAGING_DB_MIGRATOR_USER }}
+          DB_MIGRATOR_PASS_SECRET: ${{ vars.STAGING_DB_MIGRATOR_PASS_SECRET }}
+        run: |
+          scripts/run_cloudsql_migration.sh
+
   deploy-staging:
     runs-on: ubuntu-latest
-    needs: docker-build
-    if: github.ref == 'refs/heads/main' && vars.GCP_PROJECT_ID != '' && vars.GCP_REGION != '' && vars.CLOUD_RUN_SERVICE != ''
+    needs: [publish-image, migrate-staging]
+    if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.STAGING_GCP_REGION != '' && vars.STAGING_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.STAGING_CLOUD_RUN_WORKER_SERVICE != '' && vars.STAGING_TASKS_REGION != '' && vars.STAGING_TASKS_QUEUE != '' && vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL != '' && vars.STAGING_CLOUD_SQL_CONNECTION_NAME != '' && vars.STAGING_DB_NAME != '' && vars.STAGING_DB_MIGRATOR_USER != '' && vars.STAGING_DB_MIGRATOR_PASS_SECRET != '' && vars.STAGING_SECRET_DATABASE_URL != '' && vars.STAGING_SECRET_WHATSAPP_ACCESS_TOKEN != ''
     steps:
       - uses: actions/checkout@v4
 
@@ -56,18 +179,463 @@ jobs:
 
       - name: Deploy to Cloud Run (staging)
         env:
-          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-          GCP_REGION: ${{ vars.GCP_REGION }}
-          CLOUD_RUN_SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
-          CLOUD_RUN_ALLOW_UNAUTHENTICATED: ${{ vars.CLOUD_RUN_ALLOW_UNAUTHENTICATED }}
+          STAGING_GCP_PROJECT_ID: ${{ vars.STAGING_GCP_PROJECT_ID }}
+          STAGING_GCP_REGION: ${{ vars.STAGING_GCP_REGION }}
+          STAGING_CLOUD_RUN_WEBHOOK_SERVICE: ${{ vars.STAGING_CLOUD_RUN_WEBHOOK_SERVICE }}
+          STAGING_CLOUD_RUN_WORKER_SERVICE: ${{ vars.STAGING_CLOUD_RUN_WORKER_SERVICE }}
+          STAGING_TASKS_REGION: ${{ vars.STAGING_TASKS_REGION }}
+          STAGING_TASKS_QUEUE: ${{ vars.STAGING_TASKS_QUEUE }}
+          STAGING_TASKS_SERVICE_ACCOUNT_EMAIL: ${{ vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL }}
+          STAGING_CLOUD_SQL_CONNECTION_NAME: ${{ vars.STAGING_CLOUD_SQL_CONNECTION_NAME }}
+          STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED: ${{ vars.STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED }}
+          STAGING_SECRET_DATABASE_URL: ${{ vars.STAGING_SECRET_DATABASE_URL }}
+          STAGING_SECRET_VERIFY_TOKEN: ${{ vars.STAGING_SECRET_VERIFY_TOKEN }}
+          STAGING_SECRET_META_APP_SECRET: ${{ vars.STAGING_SECRET_META_APP_SECRET }}
+          STAGING_SECRET_WHATSAPP_ACCESS_TOKEN: ${{ vars.STAGING_SECRET_WHATSAPP_ACCESS_TOKEN }}
+          STAGING_SECRET_ADMIN_BASIC_USERNAME: ${{ vars.STAGING_SECRET_ADMIN_BASIC_USERNAME }}
+          STAGING_SECRET_ADMIN_BASIC_PASSWORD: ${{ vars.STAGING_SECRET_ADMIN_BASIC_PASSWORD }}
+          STAGING_SECRET_OPENAI_API_KEY: ${{ vars.STAGING_SECRET_OPENAI_API_KEY }}
+          STAGING_SECRET_GEMINI_API_KEY: ${{ vars.STAGING_SECRET_GEMINI_API_KEY }}
+          STAGING_SECRET_NANA_BANANA_API_KEY: ${{ vars.STAGING_SECRET_NANA_BANANA_API_KEY }}
+          STAGING_SECRET_CMS_CITYSCREEN_APP_TOKEN: ${{ vars.STAGING_SECRET_CMS_CITYSCREEN_APP_TOKEN }}
+          IMAGE_REF: ${{ needs.publish-image.outputs.staging_image }}
         run: |
+          set -euo pipefail
+
+          if [ -z "${STAGING_SECRET_DATABASE_URL:-}" ]; then
+            echo "ERROR: STAGING_SECRET_DATABASE_URL is not set; refusing to deploy without persistent DATABASE_URL." >&2
+            exit 1
+          fi
+
+          build_secret_bindings() {
+            local service_role="$1"
+            local bindings=()
+
+            add_binding() {
+              local env_name="$1"
+              local secret_name="$2"
+              if [ -n "$secret_name" ]; then
+                bindings+=("${env_name}=${secret_name}:latest")
+              fi
+            }
+
+            add_binding "DATABASE_URL" "${STAGING_SECRET_DATABASE_URL:-}"
+            add_binding "ADMIN_BASIC_USERNAME" "${STAGING_SECRET_ADMIN_BASIC_USERNAME:-}"
+            add_binding "ADMIN_BASIC_PASSWORD" "${STAGING_SECRET_ADMIN_BASIC_PASSWORD:-}"
+
+            if [ "$service_role" = "webhook" ]; then
+              add_binding "VERIFY_TOKEN" "${STAGING_SECRET_VERIFY_TOKEN:-}"
+              add_binding "META_APP_SECRET" "${STAGING_SECRET_META_APP_SECRET:-}"
+              add_binding "WHATSAPP_ACCESS_TOKEN" "${STAGING_SECRET_WHATSAPP_ACCESS_TOKEN:-}"
+            fi
+
+            if [ "$service_role" = "worker" ]; then
+              add_binding "WHATSAPP_ACCESS_TOKEN" "${STAGING_SECRET_WHATSAPP_ACCESS_TOKEN:-}"
+              add_binding "OPENAI_API_KEY" "${STAGING_SECRET_OPENAI_API_KEY:-}"
+              add_binding "GEMINI_API_KEY" "${STAGING_SECRET_GEMINI_API_KEY:-}"
+              add_binding "NANA_BANANA_API_KEY" "${STAGING_SECRET_NANA_BANANA_API_KEY:-}"
+              add_binding "CMS_CITYSCREEN_APP_TOKEN" "${STAGING_SECRET_CMS_CITYSCREEN_APP_TOKEN:-}"
+            fi
+
+            if [ ${#bindings[@]} -eq 0 ]; then
+              echo ""
+              return
+            fi
+
+            local IFS=,
+            echo "${bindings[*]}"
+          }
+
+          WORKER_SECRET_BINDINGS="$(build_secret_bindings worker)"
+          WEBHOOK_SECRET_BINDINGS="$(build_secret_bindings webhook)"
+          CLOUDSQL_FLAG="--add-cloudsql-instances=$STAGING_CLOUD_SQL_CONNECTION_NAME"
+
+          WORKER_BASE_URL="$(gcloud run services describe "$STAGING_CLOUD_RUN_WORKER_SERVICE" \
+            --project "$STAGING_GCP_PROJECT_ID" \
+            --region "$STAGING_GCP_REGION" \
+            --format='value(status.url)' 2>/dev/null || true)"
+
+          if [ -z "$WORKER_BASE_URL" ]; then
+            INIT_WORKER_ARGS=(
+              --quiet \
+              --project "$STAGING_GCP_PROJECT_ID" \
+              --region "$STAGING_GCP_REGION" \
+              --image "$IMAGE_REF" \
+              "$CLOUDSQL_FLAG" \
+              --no-allow-unauthenticated \
+              --update-env-vars "APP_SERVICE_ROLE=worker,TASKS_MODE=cloud"
+            )
+            if [ -n "$WORKER_SECRET_BINDINGS" ]; then
+              INIT_WORKER_ARGS+=(--update-secrets "$WORKER_SECRET_BINDINGS")
+            fi
+            gcloud run deploy "$STAGING_CLOUD_RUN_WORKER_SERVICE" "${INIT_WORKER_ARGS[@]}"
+
+            WORKER_BASE_URL="$(gcloud run services describe "$STAGING_CLOUD_RUN_WORKER_SERVICE" \
+              --project "$STAGING_GCP_PROJECT_ID" \
+              --region "$STAGING_GCP_REGION" \
+              --format='value(status.url)')"
+          fi
+
+          TASKS_HANDLER_URL="${WORKER_BASE_URL}/tasks/process-message"
+
+          WORKER_DEPLOY_ARGS=(
+            --quiet \
+            --project "$STAGING_GCP_PROJECT_ID" \
+            --region "$STAGING_GCP_REGION" \
+            --image "$IMAGE_REF" \
+            "$CLOUDSQL_FLAG" \
+            --no-allow-unauthenticated \
+            --update-env-vars "APP_SERVICE_ROLE=worker,TASKS_MODE=cloud,TASKS_HANDLER_URL=$TASKS_HANDLER_URL,TASKS_OIDC_AUDIENCE=$TASKS_HANDLER_URL,TASKS_ALLOWED_SERVICE_ACCOUNT_EMAIL=$STAGING_TASKS_SERVICE_ACCOUNT_EMAIL"
+          )
+          if [ -n "$WORKER_SECRET_BINDINGS" ]; then
+            WORKER_DEPLOY_ARGS+=(--update-secrets "$WORKER_SECRET_BINDINGS")
+          fi
+          gcloud run deploy "$STAGING_CLOUD_RUN_WORKER_SERVICE" "${WORKER_DEPLOY_ARGS[@]}"
+
           ALLOW_FLAG=""
-          if [ "$CLOUD_RUN_ALLOW_UNAUTHENTICATED" = "true" ]; then
+          if [ "$STAGING_CLOUD_RUN_ALLOW_UNAUTHENTICATED" = "true" ]; then
             ALLOW_FLAG="--allow-unauthenticated"
           fi
 
-          gcloud run deploy "$CLOUD_RUN_SERVICE" \
-            --project "$GCP_PROJECT_ID" \
-            --region "$GCP_REGION" \
-            --source . \
-            $ALLOW_FLAG
+          WEBHOOK_DEPLOY_ARGS=(
+            --quiet \
+            --project "$STAGING_GCP_PROJECT_ID" \
+            --region "$STAGING_GCP_REGION" \
+            --image "$IMAGE_REF" \
+            "$CLOUDSQL_FLAG" \
+            --update-env-vars "APP_SERVICE_ROLE=webhook,TASKS_MODE=cloud,GCP_PROJECT_ID=$STAGING_GCP_PROJECT_ID,TASKS_REGION=$STAGING_TASKS_REGION,TASKS_QUEUE=$STAGING_TASKS_QUEUE,TASKS_SERVICE_ACCOUNT_EMAIL=$STAGING_TASKS_SERVICE_ACCOUNT_EMAIL,TASKS_HANDLER_URL=$TASKS_HANDLER_URL,TASKS_OIDC_AUDIENCE=$TASKS_HANDLER_URL" \
+          )
+          if [ -n "$WEBHOOK_SECRET_BINDINGS" ]; then
+            WEBHOOK_DEPLOY_ARGS+=(--update-secrets "$WEBHOOK_SECRET_BINDINGS")
+          fi
+          if [ -n "$ALLOW_FLAG" ]; then
+            WEBHOOK_DEPLOY_ARGS+=("$ALLOW_FLAG")
+          fi
+          gcloud run deploy "$STAGING_CLOUD_RUN_WEBHOOK_SERVICE" "${WEBHOOK_DEPLOY_ARGS[@]}"
+
+  smoke-staging:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main' && vars.STAGING_DEPLOY_ENABLED == 'true' && vars.STAGING_GCP_PROJECT_ID != '' && vars.STAGING_GCP_REGION != '' && vars.STAGING_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.STAGING_CLOUD_RUN_WORKER_SERVICE != '' && vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL != '' && vars.STAGING_SECRET_VERIFY_TOKEN != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Smoke tests (staging)
+        env:
+          STAGING_GCP_PROJECT_ID: ${{ vars.STAGING_GCP_PROJECT_ID }}
+          STAGING_GCP_REGION: ${{ vars.STAGING_GCP_REGION }}
+          STAGING_CLOUD_RUN_WEBHOOK_SERVICE: ${{ vars.STAGING_CLOUD_RUN_WEBHOOK_SERVICE }}
+          STAGING_CLOUD_RUN_WORKER_SERVICE: ${{ vars.STAGING_CLOUD_RUN_WORKER_SERVICE }}
+          STAGING_TASKS_SERVICE_ACCOUNT_EMAIL: ${{ vars.STAGING_TASKS_SERVICE_ACCOUNT_EMAIL }}
+          STAGING_SECRET_VERIFY_TOKEN: ${{ vars.STAGING_SECRET_VERIFY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          WEBHOOK_URL="$(gcloud run services describe "$STAGING_CLOUD_RUN_WEBHOOK_SERVICE" \
+            --project "$STAGING_GCP_PROJECT_ID" \
+            --region "$STAGING_GCP_REGION" \
+            --format='value(status.url)')"
+          WORKER_URL="$(gcloud run services describe "$STAGING_CLOUD_RUN_WORKER_SERVICE" \
+            --project "$STAGING_GCP_PROJECT_ID" \
+            --region "$STAGING_GCP_REGION" \
+            --format='value(status.url)')"
+
+          if [ -z "$WEBHOOK_URL" ] || [ -z "$WORKER_URL" ]; then
+            echo "Smoke test failed: could not resolve Cloud Run service URLs." >&2
+            exit 1
+          fi
+
+          curl -fsS "$WEBHOOK_URL/health" >/tmp/webhook-health.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/webhook-health.json").read_text())
+          if payload.get("status") != "ok":
+              raise SystemExit(f"Unexpected /health payload: {payload}")
+          PY
+
+          VERIFY_TOKEN="$(gcloud secrets versions access latest \
+            --project "$STAGING_GCP_PROJECT_ID" \
+            --secret "$STAGING_SECRET_VERIFY_TOKEN")"
+          CHALLENGE="smoke-$(date +%s)"
+          VERIFY_RESPONSE="$(curl -fsS -G "$WEBHOOK_URL/webhook" \
+            --data-urlencode "hub.mode=subscribe" \
+            --data-urlencode "hub.verify_token=$VERIFY_TOKEN" \
+            --data-urlencode "hub.challenge=$CHALLENGE")"
+          if [ "$VERIFY_RESPONSE" != "$CHALLENGE" ]; then
+            echo "Webhook verification smoke failed: challenge mismatch." >&2
+            exit 1
+          fi
+
+          TASKS_URL="${WORKER_URL}/tasks/process-message"
+          UNAUTH_STATUS_CODE="$(curl -sS -o /tmp/worker-unauth-body.txt -w '%{http_code}' \
+            -X POST "$TASKS_URL" \
+            -H 'Content-Type: application/json' \
+            -d '{"wamid":"smoke-unauth","operator_phone":"+19990000001","raw_message":{"type":"text","text":{"body":"smoke unauth"}}}')"
+          if [ "$UNAUTH_STATUS_CODE" != "401" ] && [ "$UNAUTH_STATUS_CODE" != "403" ]; then
+            echo "Worker unauth smoke failed: expected 401/403, got $UNAUTH_STATUS_CODE." >&2
+            cat /tmp/worker-unauth-body.txt >&2 || true
+            exit 1
+          fi
+
+          TASKS_ID_TOKEN="$(gcloud auth print-identity-token \
+            --impersonate-service-account="$STAGING_TASKS_SERVICE_ACCOUNT_EMAIL" \
+            --include-email \
+            --audiences="$TASKS_URL")"
+          if [ -z "$TASKS_ID_TOKEN" ]; then
+            echo "Worker auth smoke failed: could not mint OIDC token for tasks service account." >&2
+            exit 1
+          fi
+
+          WAMID="smoke-wamid-$(date +%s)-$RANDOM"
+          OPERATOR_PHONE="+1999$(date +%s)"
+          PAYLOAD="$(cat <<EOF
+          {"wamid":"$WAMID","operator_phone":"$OPERATOR_PHONE","raw_message":{"type":"text","text":{"body":"smoke worker auth"}}}
+          EOF
+          )"
+
+          AUTH_STATUS_CODE="$(curl -sS -o /tmp/worker-auth-body.json -w '%{http_code}' \
+            -X POST "$TASKS_URL" \
+            -H "Authorization: Bearer $TASKS_ID_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD")"
+          if [ "$AUTH_STATUS_CODE" != "200" ]; then
+            echo "Worker auth smoke failed: expected 200, got $AUTH_STATUS_CODE." >&2
+            cat /tmp/worker-auth-body.json >&2 || true
+            exit 1
+          fi
+
+          FIRST_STATUS="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/worker-auth-body.json").read_text())
+          print(payload.get("status", ""))
+          PY
+          )"
+          if [ "$FIRST_STATUS" != "unauthorized_operator" ] && [ "$FIRST_STATUS" != "duplicate_skipped" ] && [ "$FIRST_STATUS" != "processed" ]; then
+            echo "Worker auth smoke failed: unexpected status '$FIRST_STATUS'." >&2
+            cat /tmp/worker-auth-body.json >&2 || true
+            exit 1
+          fi
+
+          DEDUP_STATUS_CODE="$(curl -sS -o /tmp/worker-dedup-body.json -w '%{http_code}' \
+            -X POST "$TASKS_URL" \
+            -H "Authorization: Bearer $TASKS_ID_TOKEN" \
+            -H 'Content-Type: application/json' \
+            -d "$PAYLOAD")"
+          if [ "$DEDUP_STATUS_CODE" != "200" ]; then
+            echo "Worker dedup smoke failed: expected 200, got $DEDUP_STATUS_CODE." >&2
+            cat /tmp/worker-dedup-body.json >&2 || true
+            exit 1
+          fi
+
+          DEDUP_STATUS="$(python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(Path("/tmp/worker-dedup-body.json").read_text())
+          print(payload.get("status", ""))
+          PY
+          )"
+          if [ "$DEDUP_STATUS" != "duplicate_skipped" ]; then
+            echo "Worker dedup smoke failed: expected duplicate_skipped, got '$DEDUP_STATUS'." >&2
+            cat /tmp/worker-dedup-body.json >&2 || true
+            exit 1
+          fi
+
+  migrate-production:
+    runs-on: ubuntu-latest
+    needs: publish-image
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PROD_GCP_PROJECT_ID != '' && vars.PROD_CLOUD_SQL_CONNECTION_NAME != '' && vars.PROD_DB_NAME != '' && vars.PROD_DB_MIGRATOR_USER != '' && vars.PROD_DB_MIGRATOR_PASS_SECRET != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: uv sync --all-groups
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run Alembic migrations (production)
+        env:
+          GCP_PROJECT_ID: ${{ vars.PROD_GCP_PROJECT_ID }}
+          CLOUD_SQL_CONNECTION_NAME: ${{ vars.PROD_CLOUD_SQL_CONNECTION_NAME }}
+          DB_NAME: ${{ vars.PROD_DB_NAME }}
+          DB_MIGRATOR_USER: ${{ vars.PROD_DB_MIGRATOR_USER }}
+          DB_MIGRATOR_PASS_SECRET: ${{ vars.PROD_DB_MIGRATOR_PASS_SECRET }}
+        run: |
+          scripts/run_cloudsql_migration.sh
+
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: [publish-image, migrate-production]
+    if: startsWith(github.ref, 'refs/tags/v') && vars.STAGING_GCP_PROJECT_ID != '' && vars.PROD_GCP_PROJECT_ID != '' && vars.ARTIFACT_REGISTRY_REGION != '' && vars.ARTIFACT_REGISTRY_REPOSITORY != '' && vars.PROD_GCP_REGION != '' && vars.PROD_CLOUD_RUN_WEBHOOK_SERVICE != '' && vars.PROD_CLOUD_RUN_WORKER_SERVICE != '' && vars.PROD_TASKS_REGION != '' && vars.PROD_TASKS_QUEUE != '' && vars.PROD_TASKS_SERVICE_ACCOUNT_EMAIL != '' && vars.PROD_CLOUD_SQL_CONNECTION_NAME != '' && vars.PROD_DB_NAME != '' && vars.PROD_DB_MIGRATOR_USER != '' && vars.PROD_DB_MIGRATOR_PASS_SECRET != '' && vars.PROD_SECRET_DATABASE_URL != ''
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy to Cloud Run (production)
+        env:
+          PROD_GCP_PROJECT_ID: ${{ vars.PROD_GCP_PROJECT_ID }}
+          PROD_GCP_REGION: ${{ vars.PROD_GCP_REGION }}
+          PROD_CLOUD_RUN_WEBHOOK_SERVICE: ${{ vars.PROD_CLOUD_RUN_WEBHOOK_SERVICE }}
+          PROD_CLOUD_RUN_WORKER_SERVICE: ${{ vars.PROD_CLOUD_RUN_WORKER_SERVICE }}
+          PROD_TASKS_REGION: ${{ vars.PROD_TASKS_REGION }}
+          PROD_TASKS_QUEUE: ${{ vars.PROD_TASKS_QUEUE }}
+          PROD_TASKS_SERVICE_ACCOUNT_EMAIL: ${{ vars.PROD_TASKS_SERVICE_ACCOUNT_EMAIL }}
+          PROD_CLOUD_SQL_CONNECTION_NAME: ${{ vars.PROD_CLOUD_SQL_CONNECTION_NAME }}
+          PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED: ${{ vars.PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED }}
+          PROD_SECRET_DATABASE_URL: ${{ vars.PROD_SECRET_DATABASE_URL }}
+          PROD_SECRET_VERIFY_TOKEN: ${{ vars.PROD_SECRET_VERIFY_TOKEN }}
+          PROD_SECRET_META_APP_SECRET: ${{ vars.PROD_SECRET_META_APP_SECRET }}
+          PROD_SECRET_WHATSAPP_ACCESS_TOKEN: ${{ vars.PROD_SECRET_WHATSAPP_ACCESS_TOKEN }}
+          PROD_SECRET_ADMIN_BASIC_USERNAME: ${{ vars.PROD_SECRET_ADMIN_BASIC_USERNAME }}
+          PROD_SECRET_ADMIN_BASIC_PASSWORD: ${{ vars.PROD_SECRET_ADMIN_BASIC_PASSWORD }}
+          PROD_SECRET_OPENAI_API_KEY: ${{ vars.PROD_SECRET_OPENAI_API_KEY }}
+          PROD_SECRET_GEMINI_API_KEY: ${{ vars.PROD_SECRET_GEMINI_API_KEY }}
+          PROD_SECRET_NANA_BANANA_API_KEY: ${{ vars.PROD_SECRET_NANA_BANANA_API_KEY }}
+          PROD_SECRET_CMS_CITYSCREEN_APP_TOKEN: ${{ vars.PROD_SECRET_CMS_CITYSCREEN_APP_TOKEN }}
+          IMAGE_REF: ${{ needs.publish-image.outputs.prod_image }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${PROD_SECRET_DATABASE_URL:-}" ]; then
+            echo "ERROR: PROD_SECRET_DATABASE_URL is not set; refusing to deploy without persistent DATABASE_URL." >&2
+            exit 1
+          fi
+
+          build_secret_bindings() {
+            local service_role="$1"
+            local bindings=()
+
+            add_binding() {
+              local env_name="$1"
+              local secret_name="$2"
+              if [ -n "$secret_name" ]; then
+                bindings+=("${env_name}=${secret_name}:latest")
+              fi
+            }
+
+            add_binding "DATABASE_URL" "${PROD_SECRET_DATABASE_URL:-}"
+            add_binding "ADMIN_BASIC_USERNAME" "${PROD_SECRET_ADMIN_BASIC_USERNAME:-}"
+            add_binding "ADMIN_BASIC_PASSWORD" "${PROD_SECRET_ADMIN_BASIC_PASSWORD:-}"
+
+            if [ "$service_role" = "webhook" ]; then
+              add_binding "VERIFY_TOKEN" "${PROD_SECRET_VERIFY_TOKEN:-}"
+              add_binding "META_APP_SECRET" "${PROD_SECRET_META_APP_SECRET:-}"
+              add_binding "WHATSAPP_ACCESS_TOKEN" "${PROD_SECRET_WHATSAPP_ACCESS_TOKEN:-}"
+            fi
+
+            if [ "$service_role" = "worker" ]; then
+              add_binding "WHATSAPP_ACCESS_TOKEN" "${PROD_SECRET_WHATSAPP_ACCESS_TOKEN:-}"
+              add_binding "OPENAI_API_KEY" "${PROD_SECRET_OPENAI_API_KEY:-}"
+              add_binding "GEMINI_API_KEY" "${PROD_SECRET_GEMINI_API_KEY:-}"
+              add_binding "NANA_BANANA_API_KEY" "${PROD_SECRET_NANA_BANANA_API_KEY:-}"
+              add_binding "CMS_CITYSCREEN_APP_TOKEN" "${PROD_SECRET_CMS_CITYSCREEN_APP_TOKEN:-}"
+            fi
+
+            if [ ${#bindings[@]} -eq 0 ]; then
+              echo ""
+              return
+            fi
+
+            local IFS=,
+            echo "${bindings[*]}"
+          }
+
+          WORKER_SECRET_BINDINGS="$(build_secret_bindings worker)"
+          WEBHOOK_SECRET_BINDINGS="$(build_secret_bindings webhook)"
+          CLOUDSQL_FLAG="--add-cloudsql-instances=$PROD_CLOUD_SQL_CONNECTION_NAME"
+
+          WORKER_BASE_URL="$(gcloud run services describe "$PROD_CLOUD_RUN_WORKER_SERVICE" \
+            --project "$PROD_GCP_PROJECT_ID" \
+            --region "$PROD_GCP_REGION" \
+            --format='value(status.url)' 2>/dev/null || true)"
+
+          if [ -z "$WORKER_BASE_URL" ]; then
+            INIT_WORKER_ARGS=(
+              --quiet \
+              --project "$PROD_GCP_PROJECT_ID" \
+              --region "$PROD_GCP_REGION" \
+              --image "$IMAGE_REF" \
+              "$CLOUDSQL_FLAG" \
+              --no-allow-unauthenticated \
+              --update-env-vars "APP_SERVICE_ROLE=worker,TASKS_MODE=cloud"
+            )
+            if [ -n "$WORKER_SECRET_BINDINGS" ]; then
+              INIT_WORKER_ARGS+=(--update-secrets "$WORKER_SECRET_BINDINGS")
+            fi
+            gcloud run deploy "$PROD_CLOUD_RUN_WORKER_SERVICE" "${INIT_WORKER_ARGS[@]}"
+
+            WORKER_BASE_URL="$(gcloud run services describe "$PROD_CLOUD_RUN_WORKER_SERVICE" \
+              --project "$PROD_GCP_PROJECT_ID" \
+              --region "$PROD_GCP_REGION" \
+              --format='value(status.url)')"
+          fi
+
+          TASKS_HANDLER_URL="${WORKER_BASE_URL}/tasks/process-message"
+
+          WORKER_DEPLOY_ARGS=(
+            --quiet \
+            --project "$PROD_GCP_PROJECT_ID" \
+            --region "$PROD_GCP_REGION" \
+            --image "$IMAGE_REF" \
+            "$CLOUDSQL_FLAG" \
+            --no-allow-unauthenticated \
+            --update-env-vars "APP_SERVICE_ROLE=worker,TASKS_MODE=cloud,TASKS_HANDLER_URL=$TASKS_HANDLER_URL,TASKS_OIDC_AUDIENCE=$TASKS_HANDLER_URL,TASKS_ALLOWED_SERVICE_ACCOUNT_EMAIL=$PROD_TASKS_SERVICE_ACCOUNT_EMAIL"
+          )
+          if [ -n "$WORKER_SECRET_BINDINGS" ]; then
+            WORKER_DEPLOY_ARGS+=(--update-secrets "$WORKER_SECRET_BINDINGS")
+          fi
+          gcloud run deploy "$PROD_CLOUD_RUN_WORKER_SERVICE" "${WORKER_DEPLOY_ARGS[@]}"
+
+          ALLOW_FLAG=""
+          if [ "$PROD_CLOUD_RUN_ALLOW_UNAUTHENTICATED" = "true" ]; then
+            ALLOW_FLAG="--allow-unauthenticated"
+          fi
+
+          WEBHOOK_DEPLOY_ARGS=(
+            --quiet \
+            --project "$PROD_GCP_PROJECT_ID" \
+            --region "$PROD_GCP_REGION" \
+            --image "$IMAGE_REF" \
+            "$CLOUDSQL_FLAG" \
+            --update-env-vars "APP_SERVICE_ROLE=webhook,TASKS_MODE=cloud,GCP_PROJECT_ID=$PROD_GCP_PROJECT_ID,TASKS_REGION=$PROD_TASKS_REGION,TASKS_QUEUE=$PROD_TASKS_QUEUE,TASKS_SERVICE_ACCOUNT_EMAIL=$PROD_TASKS_SERVICE_ACCOUNT_EMAIL,TASKS_HANDLER_URL=$TASKS_HANDLER_URL,TASKS_OIDC_AUDIENCE=$TASKS_HANDLER_URL" \
+          )
+          if [ -n "$WEBHOOK_SECRET_BINDINGS" ]; then
+            WEBHOOK_DEPLOY_ARGS+=(--update-secrets "$WEBHOOK_SECRET_BINDINGS")
+          fi
+          if [ -n "$ALLOW_FLAG" ]; then
+            WEBHOOK_DEPLOY_ARGS+=("$ALLOW_FLAG")
+          fi
+          gcloud run deploy "$PROD_CLOUD_RUN_WEBHOOK_SERVICE" "${WEBHOOK_DEPLOY_ARGS[@]}"
