@@ -10,17 +10,65 @@ from sqlalchemy import (
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from adv_assistant.db.base import Base, TimestampMixin, utcnow
-from adv_assistant.db.enums import AdDraftStatus, Language
+from adv_assistant.db.enums import (
+    AdDraftStatus,
+    AdRequestType,
+    AdVariantRoundStatus,
+    AdVariantStatus,
+    ClassificationStatus,
+    DraftProductStatus,
+    Language,
+    PendingQuestionType,
+)
+
+
+class BusinessProfile(TimestampMixin, Base):
+    __tablename__ = "business_profile"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    business_scope: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="default",
+        index=True,
+        unique=True,
+    )
+    business_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    logo_url: Mapped[str] = mapped_column(Text, nullable=False)
+    brand_colors: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    screen_type: Mapped[str] = mapped_column(String(32), nullable=False, default="tv")
+    screen_aspect_ratio: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="16:9",
+    )
+    screen_orientation: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="landscape",
+    )
+    screen_placement: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="indoor",
+    )
+    screen_location: Mapped[str] = mapped_column(
+        String(255),
+        nullable=False,
+        default="unspecified",
+    )
 
 
 class Operator(TimestampMixin, Base):
@@ -85,12 +133,136 @@ class AdDraft(TimestampMixin, Base):
         nullable=False,
         default=AdDraftStatus.DRAFT,
     )
+    request_type: Mapped[AdRequestType] = mapped_column(
+        Enum(AdRequestType, name="ad_request_type", native_enum=False),
+        nullable=False,
+        default=AdRequestType.UNSET,
+    )
+    classification_status: Mapped[ClassificationStatus] = mapped_column(
+        Enum(ClassificationStatus, name="classification_status", native_enum=False),
+        nullable=False,
+        default=ClassificationStatus.PENDING,
+    )
+    is_classification_resolved: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    awaiting_product_confirmation: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    generation_ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    selected_round_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
+    selected_variant_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True, index=True)
 
     operator: Mapped[Operator] = relationship(back_populates="drafts")
     published_ads: Mapped[list["PublishedAd"]] = relationship(
         back_populates="ad_draft",
         passive_deletes=True,
     )
+    identified_products: Mapped[list["DraftProduct"]] = relationship(
+        back_populates="draft",
+        passive_deletes=True,
+    )
+    variant_rounds: Mapped[list["AdVariantRound"]] = relationship(
+        back_populates="draft",
+        passive_deletes=True,
+    )
+
+
+class DraftProduct(TimestampMixin, Base):
+    __tablename__ = "draft_product"
+    __table_args__ = (
+        CheckConstraint(
+            "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)",
+            name="ck_draft_product_confidence_range",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    draft_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("ad_draft.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
+    status: Mapped[DraftProductStatus] = mapped_column(
+        Enum(DraftProductStatus, name="draft_product_status", native_enum=False),
+        nullable=False,
+        default=DraftProductStatus.CANDIDATE,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    external_ref: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    draft: Mapped[AdDraft] = relationship(back_populates="identified_products")
+
+
+class AdVariantRound(TimestampMixin, Base):
+    __tablename__ = "ad_variant_round"
+    __table_args__ = (
+        Index(
+            "uq_ad_variant_round_active_per_draft",
+            "draft_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    draft_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("ad_draft.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[AdVariantRoundStatus] = mapped_column(
+        Enum(AdVariantRoundStatus, name="ad_variant_round_status", native_enum=False),
+        nullable=False,
+        default=AdVariantRoundStatus.ACTIVE,
+    )
+    attempt_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    draft: Mapped[AdDraft] = relationship(back_populates="variant_rounds")
+    variants: Mapped[list["AdVariant"]] = relationship(
+        back_populates="round",
+        passive_deletes=True,
+    )
+
+
+class AdVariant(TimestampMixin, Base):
+    __tablename__ = "ad_variant"
+    __table_args__ = (
+        UniqueConstraint("round_id", "slot_no", name="uq_ad_variant_round_slot"),
+        CheckConstraint("slot_no IN (1, 2)", name="ck_ad_variant_slot_no"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    round_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("ad_variant_round.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    slot_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[AdVariantStatus] = mapped_column(
+        Enum(AdVariantStatus, name="ad_variant_status", native_enum=False),
+        nullable=False,
+        default=AdVariantStatus.FAILED,
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    round: Mapped[AdVariantRound] = relationship(back_populates="variants")
 
 
 class ConversationSession(TimestampMixin, Base):
@@ -108,6 +280,17 @@ class ConversationSession(TimestampMixin, Base):
     )
     language: Mapped[str] = mapped_column(String(2), nullable=False, default=Language.HE.value)
     history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    pending_question_type: Mapped[PendingQuestionType] = mapped_column(
+        Enum(PendingQuestionType, name="pending_question_type", native_enum=False),
+        nullable=False,
+        default=PendingQuestionType.NONE,
+    )
+    pending_question_context: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    last_user_intent_hint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     current_draft_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid,
         ForeignKey("ad_draft.id", ondelete="SET NULL"),

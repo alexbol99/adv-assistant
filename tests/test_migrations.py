@@ -22,9 +22,13 @@ def test_alembic_upgrade_creates_phase1_tables(tmp_path: Path, monkeypatch) -> N
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     expected_tables = {
+        "business_profile",
         "operator",
         "conversation_session",
         "ad_draft",
+        "draft_product",
+        "ad_variant_round",
+        "ad_variant",
         "published_ad",
         "system_config",
         "audit_event",
@@ -34,6 +38,14 @@ def test_alembic_upgrade_creates_phase1_tables(tmp_path: Path, monkeypatch) -> N
 
     ad_draft_columns = {column["name"] for column in inspector.get_columns("ad_draft")}
     assert "enrichment_source" in ad_draft_columns
+    assert "request_type" in ad_draft_columns
+    assert "generation_ready" in ad_draft_columns
+
+    conversation_columns = {
+        column["name"] for column in inspector.get_columns("conversation_session")
+    }
+    assert "pending_question_type" in conversation_columns
+    assert "pending_question_context" in conversation_columns
     assert "product_brand" in ad_draft_columns
 
     operator_columns = {column["name"] for column in inspector.get_columns("operator")}

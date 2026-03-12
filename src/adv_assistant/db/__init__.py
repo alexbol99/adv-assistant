@@ -3,8 +3,12 @@
 from adv_assistant.db.base import Base
 from adv_assistant.db.models import (
     AdDraft,
+    AdVariant,
+    AdVariantRound,
     AuditEvent,
+    BusinessProfile,
     ConversationSession,
+    DraftProduct,
     Operator,
     ProcessedInboundMessage,
     PublishedAd,
@@ -13,9 +17,13 @@ from adv_assistant.db.models import (
 
 __all__ = [
     "AdDraft",
+    "AdVariant",
+    "AdVariantRound",
     "AuditEvent",
     "Base",
+    "BusinessProfile",
     "ConversationSession",
+    "DraftProduct",
     "Operator",
     "ProcessedInboundMessage",
     "PublishedAd",
