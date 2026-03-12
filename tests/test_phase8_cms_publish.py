@@ -79,6 +79,8 @@ async def _seed_operator(
         await OperatorRepository(session).create(
             phone=phone,
             active=True,
+            business_name="Test Biz",
+            logo_url="https://example.com/logo.png",
             cms_campaign_id=campaign_id if with_mapping else None,
             cms_playlist_id=playlist_id if with_mapping else None,
         )

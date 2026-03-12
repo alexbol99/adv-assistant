@@ -147,6 +147,8 @@ async def _seed_operator(
             phone=phone,
             language=language,
             active=True,
+            business_name="Test Biz",
+            logo_url="https://example.com/logo.png",
             store_type=store_type,
             creative_guidance=creative_guidance,
         )

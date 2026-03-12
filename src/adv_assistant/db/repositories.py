@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from adv_assistant.db.base import utcnow
 from adv_assistant.db.enums import (
+    AdDraftStatus,
     AdVariantRoundStatus,
     DraftProductStatus,
     PendingQuestionType,
