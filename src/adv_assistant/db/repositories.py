@@ -7,10 +7,19 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from adv_assistant.db.base import utcnow
+from adv_assistant.db.enums import (
+    AdVariantRoundStatus,
+    DraftProductStatus,
+    PendingQuestionType,
+)
 from adv_assistant.db.models import (
     AdDraft,
+    AdVariant,
+    AdVariantRound,
     AuditEvent,
+    BusinessProfile,
     ConversationSession,
+    DraftProduct,
     Operator,
     ProcessedInboundMessage,
     PublishedAd,
@@ -107,12 +116,68 @@ class ConversationSessionRepository:
         await self.session.flush()
         return session_obj
 
+    async def set_pending_question(
+        self,
+        *,
+        operator_phone: str,
+        pending_question_type: PendingQuestionType,
+        pending_question_context: dict[str, Any] | None = None,
+        last_active_at: datetime | None = None,
+    ) -> ConversationSession | None:
+        session_obj = await self.get_by_operator_phone(operator_phone)
+        if session_obj is None:
+            return None
+
+        session_obj.pending_question_type = pending_question_type
+        session_obj.pending_question_context = pending_question_context or {}
+        if last_active_at is not None:
+            session_obj.last_active_at = last_active_at
+        session_obj.updated_at = utcnow()
+        await self.session.flush()
+        return session_obj
+
+    async def clear_pending_question(
+        self,
+        *,
+        operator_phone: str,
+        last_active_at: datetime | None = None,
+    ) -> ConversationSession | None:
+        return await self.set_pending_question(
+            operator_phone=operator_phone,
+            pending_question_type=PendingQuestionType.NONE,
+            pending_question_context={},
+            last_active_at=last_active_at,
+        )
+
     async def delete_by_operator_phone(self, operator_phone: str) -> int:
         result = await self.session.execute(
             delete(ConversationSession).where(ConversationSession.operator_phone == operator_phone)
         )
         await self.session.flush()
         return result.rowcount or 0
+
+
+class BusinessProfileRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def get_by_scope(self, business_scope: str = "default") -> BusinessProfile | None:
+        result = await self.session.execute(
+            select(BusinessProfile).where(BusinessProfile.business_scope == business_scope)
+        )
+        return result.scalar_one_or_none()
+
+    async def upsert(self, *, business_scope: str = "default", **fields: Any) -> BusinessProfile:
+        profile = await self.get_by_scope(business_scope)
+        if profile is None:
+            profile = BusinessProfile(business_scope=business_scope, **fields)
+            self.session.add(profile)
+        else:
+            for key, value in fields.items():
+                setattr(profile, key, value)
+            profile.updated_at = utcnow()
+        await self.session.flush()
+        return profile
 
 
 class AdDraftRepository:
@@ -196,6 +261,176 @@ class AdDraftRepository:
             return None
         await self.session.flush()
         return await self.get_by_id(draft_id)
+
+
+class DraftProductRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(self, *, draft_id: uuid.UUID, **fields: Any) -> DraftProduct:
+        candidate = DraftProduct(draft_id=draft_id, **fields)
+        self.session.add(candidate)
+        await self.session.flush()
+        return candidate
+
+    async def list_by_draft_id(self, draft_id: uuid.UUID) -> list[DraftProduct]:
+        result = await self.session.execute(
+            select(DraftProduct)
+            .where(DraftProduct.draft_id == draft_id)
+            .order_by(DraftProduct.position.asc(), DraftProduct.created_at.asc())
+        )
+        return list(result.scalars().all())
+
+    async def get_by_id(self, candidate_id: uuid.UUID) -> DraftProduct | None:
+        result = await self.session.execute(
+            select(DraftProduct).where(DraftProduct.id == candidate_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def replace_candidates(
+        self,
+        *,
+        draft_id: uuid.UUID,
+        candidates: list[dict[str, Any]],
+    ) -> list[DraftProduct]:
+        await self.session.execute(delete(DraftProduct).where(DraftProduct.draft_id == draft_id))
+
+        for idx, candidate_fields in enumerate(candidates):
+            create_fields = dict(candidate_fields)
+            create_fields.setdefault("status", DraftProductStatus.CANDIDATE)
+            create_fields.setdefault("position", idx)
+            self.session.add(DraftProduct(draft_id=draft_id, **create_fields))
+
+        await self.session.flush()
+        return await self.list_by_draft_id(draft_id)
+
+    async def set_status(
+        self,
+        *,
+        candidate_id: uuid.UUID,
+        draft_id: uuid.UUID,
+        status: DraftProductStatus,
+    ) -> bool:
+        result = await self.session.execute(
+            update(DraftProduct)
+            .where(DraftProduct.id == candidate_id, DraftProduct.draft_id == draft_id)
+            .values(status=status, updated_at=utcnow())
+        )
+        await self.session.flush()
+        return (result.rowcount or 0) > 0
+
+    async def confirm_candidate(self, *, draft_id: uuid.UUID, candidate_id: uuid.UUID) -> bool:
+        confirmed_result = await self.session.execute(
+            update(DraftProduct)
+            .where(DraftProduct.id == candidate_id, DraftProduct.draft_id == draft_id)
+            .values(status=DraftProductStatus.CONFIRMED, updated_at=utcnow())
+        )
+        if (confirmed_result.rowcount or 0) == 0:
+            return False
+
+        await self.session.execute(
+            update(DraftProduct)
+            .where(DraftProduct.draft_id == draft_id, DraftProduct.id != candidate_id)
+            .values(status=DraftProductStatus.REJECTED, updated_at=utcnow())
+        )
+        await self.session.flush()
+        return True
+
+
+class AdVariantRoundRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def get_by_id(self, round_id: uuid.UUID) -> AdVariantRound | None:
+        result = await self.session.execute(
+            select(AdVariantRound).where(AdVariantRound.id == round_id)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_active_by_draft_id(self, draft_id: uuid.UUID) -> AdVariantRound | None:
+        result = await self.session.execute(
+            select(AdVariantRound).where(
+                AdVariantRound.draft_id == draft_id,
+                AdVariantRound.status == AdVariantRoundStatus.ACTIVE,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_by_draft_id(self, draft_id: uuid.UUID) -> list[AdVariantRound]:
+        result = await self.session.execute(
+            select(AdVariantRound)
+            .where(AdVariantRound.draft_id == draft_id)
+            .order_by(AdVariantRound.attempt_no.desc(), AdVariantRound.created_at.desc())
+        )
+        return list(result.scalars().all())
+
+    async def create(
+        self,
+        *,
+        draft_id: uuid.UUID,
+        attempt_no: int,
+        status: AdVariantRoundStatus = AdVariantRoundStatus.ACTIVE,
+        failure_reason: str | None = None,
+        variants: list[dict[str, Any]] | None = None,
+    ) -> AdVariantRound:
+        round_obj = AdVariantRound(
+            draft_id=draft_id,
+            attempt_no=attempt_no,
+            status=status,
+            failure_reason=failure_reason,
+        )
+        self.session.add(round_obj)
+        await self.session.flush()
+
+        if variants:
+            for idx, variant_fields in enumerate(variants, start=1):
+                create_fields = dict(variant_fields)
+                slot_no = int(create_fields.pop("slot_no", idx))
+                self.session.add(AdVariant(round_id=round_obj.id, slot_no=slot_no, **create_fields))
+            await self.session.flush()
+
+        return round_obj
+
+    async def replace_active_round(
+        self,
+        *,
+        draft_id: uuid.UUID,
+        attempt_no: int,
+        variants: list[dict[str, Any]] | None = None,
+    ) -> AdVariantRound:
+        await self.session.execute(
+            update(AdVariantRound)
+            .where(
+                AdVariantRound.draft_id == draft_id,
+                AdVariantRound.status == AdVariantRoundStatus.ACTIVE,
+            )
+            .values(status=AdVariantRoundStatus.SUPERSEDED, updated_at=utcnow())
+        )
+        return await self.create(
+            draft_id=draft_id,
+            attempt_no=attempt_no,
+            status=AdVariantRoundStatus.ACTIVE,
+            variants=variants,
+        )
+
+
+class AdVariantRepository:
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def create(self, *, round_id: uuid.UUID, slot_no: int, **fields: Any) -> AdVariant:
+        variant = AdVariant(round_id=round_id, slot_no=slot_no, **fields)
+        self.session.add(variant)
+        await self.session.flush()
+        return variant
+
+    async def list_by_round_id(self, round_id: uuid.UUID) -> list[AdVariant]:
+        result = await self.session.execute(
+            select(AdVariant)
+            .where(AdVariant.round_id == round_id)
+            .order_by(AdVariant.slot_no.asc())
+        )
+        return list(result.scalars().all())
 
 
 class PublishedAdRepository:

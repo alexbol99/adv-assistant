@@ -5,7 +5,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from adv_assistant.db.base import utcnow
-from adv_assistant.db.enums import AdDraftStatus
+from adv_assistant.db.enums import (
+    AdDraftStatus,
+    AdVariantRoundStatus,
+    AdVariantStatus,
+    DraftProductStatus,
+    PendingQuestionType,
+)
 from adv_assistant.db.models import (
     AdDraft,
     AuditEvent,
@@ -14,8 +20,12 @@ from adv_assistant.db.models import (
 )
 from adv_assistant.db.repositories import (
     AdDraftRepository,
+    AdVariantRepository,
+    AdVariantRoundRepository,
     AuditEventRepository,
+    BusinessProfileRepository,
     ConversationSessionRepository,
+    DraftProductRepository,
     OperatorRepository,
     ProcessedInboundMessageRepository,
     PublishedAdRepository,
@@ -100,6 +110,138 @@ async def test_crud_repositories(db_session: AsyncSession) -> None:
     assert await processed_repo.exists("wamid-1") is True
 
     await db_session.commit()
+
+
+async def test_pending_question_updates(db_session: AsyncSession) -> None:
+    operator = await OperatorRepository(db_session).create(phone="+972500000010")
+    session_repo = ConversationSessionRepository(db_session)
+
+    session_obj = await session_repo.create_or_update(operator_phone=operator.phone, history=[])
+    assert session_obj.pending_question_type == PendingQuestionType.NONE
+    assert session_obj.pending_question_context == {}
+
+    updated_session = await session_repo.set_pending_question(
+        operator_phone=operator.phone,
+        pending_question_type=PendingQuestionType.CLASSIFICATION,
+        pending_question_context={"reason": "ambiguous_request"},
+    )
+    assert updated_session is not None
+    assert updated_session.pending_question_type == PendingQuestionType.CLASSIFICATION
+    assert updated_session.pending_question_context == {"reason": "ambiguous_request"}
+
+    cleared_session = await session_repo.clear_pending_question(operator_phone=operator.phone)
+    assert cleared_session is not None
+    assert cleared_session.pending_question_type == PendingQuestionType.NONE
+    assert cleared_session.pending_question_context == {}
+
+
+async def test_business_profile_upsert_by_scope(db_session: AsyncSession) -> None:
+    profile_repo = BusinessProfileRepository(db_session)
+
+    created = await profile_repo.upsert(
+        business_scope="default",
+        business_name="Fresh Market",
+        logo_url="https://cdn.example/logo.png",
+    )
+    assert created.business_scope == "default"
+    assert created.business_name == "Fresh Market"
+    assert created.brand_colors == []
+
+    updated = await profile_repo.upsert(
+        business_scope="default",
+        business_name="Fresh Market TLV",
+        brand_colors=["#11aa22", "#ffffff"],
+    )
+    assert updated.id == created.id
+    assert updated.business_name == "Fresh Market TLV"
+    assert updated.brand_colors == ["#11aa22", "#ffffff"]
+
+    fetched = await profile_repo.get_by_scope("default")
+    assert fetched is not None
+    assert fetched.id == created.id
+
+
+async def test_draft_product_candidate_tracking(db_session: AsyncSession) -> None:
+    operator = await OperatorRepository(db_session).create(phone="+972500000011")
+    draft = await AdDraftRepository(db_session).create(operator_phone=operator.phone)
+    product_repo = DraftProductRepository(db_session)
+
+    candidates = await product_repo.replace_candidates(
+        draft_id=draft.id,
+        candidates=[
+            {"name": "Coca Cola 1.5L", "source": "image_lookup", "confidence": 0.82},
+            {"name": "Pepsi 1.5L", "source": "image_lookup", "confidence": 0.77},
+        ],
+    )
+    assert len(candidates) == 2
+    assert [candidate.position for candidate in candidates] == [0, 1]
+    assert all(candidate.status == DraftProductStatus.CANDIDATE for candidate in candidates)
+
+    confirmed = await product_repo.confirm_candidate(
+        draft_id=draft.id,
+        candidate_id=candidates[1].id,
+    )
+    assert confirmed is True
+
+    persisted = await product_repo.list_by_draft_id(draft.id)
+    assert len(persisted) == 2
+    first_status = {candidate.id: candidate.status for candidate in persisted}
+    assert first_status[candidates[1].id] == DraftProductStatus.CONFIRMED
+    assert first_status[candidates[0].id] == DraftProductStatus.REJECTED
+
+    changed = await product_repo.set_status(
+        draft_id=draft.id,
+        candidate_id=candidates[0].id,
+        status=DraftProductStatus.CANDIDATE,
+    )
+    assert changed is True
+    refreshed = await product_repo.get_by_id(candidates[0].id)
+    assert refreshed is not None
+    assert refreshed.status == DraftProductStatus.CANDIDATE
+
+
+async def test_variant_round_replacement_supersedes_previous_active(
+    db_session: AsyncSession,
+) -> None:
+    operator = await OperatorRepository(db_session).create(phone="+972500000012")
+    draft = await AdDraftRepository(db_session).create(operator_phone=operator.phone)
+    round_repo = AdVariantRoundRepository(db_session)
+    variant_repo = AdVariantRepository(db_session)
+
+    first_round = await round_repo.create(
+        draft_id=draft.id,
+        attempt_no=1,
+        variants=[
+            {"slot_no": 1, "status": AdVariantStatus.VALID, "image_url": "https://img/1a.jpg"},
+            {"slot_no": 2, "status": AdVariantStatus.VALID, "image_url": "https://img/1b.jpg"},
+        ],
+    )
+    assert first_round.status == AdVariantRoundStatus.ACTIVE
+
+    replaced_round = await round_repo.replace_active_round(
+        draft_id=draft.id,
+        attempt_no=2,
+        variants=[
+            {"slot_no": 1, "status": AdVariantStatus.VALID, "image_url": "https://img/2a.jpg"},
+            {"slot_no": 2, "status": AdVariantStatus.FAILED, "error_code": "GEN_TIMEOUT"},
+        ],
+    )
+
+    active = await round_repo.get_active_by_draft_id(draft.id)
+    assert active is not None
+    assert active.id == replaced_round.id
+    assert active.status == AdVariantRoundStatus.ACTIVE
+
+    all_rounds = await round_repo.list_by_draft_id(draft.id)
+    round_status_by_id = {round_obj.id: round_obj.status for round_obj in all_rounds}
+    assert round_status_by_id[first_round.id] == AdVariantRoundStatus.SUPERSEDED
+    assert round_status_by_id[replaced_round.id] == AdVariantRoundStatus.ACTIVE
+
+    variants = await variant_repo.list_by_round_id(replaced_round.id)
+    assert len(variants) == 2
+    assert [variant.slot_no for variant in variants] == [1, 2]
+    assert variants[0].status == AdVariantStatus.VALID
+    assert variants[1].status == AdVariantStatus.FAILED
 
 
 async def test_processed_message_purge_uses_expires_at(db_session: AsyncSession) -> None:
