@@ -27,6 +27,7 @@ from adv_assistant.db.repositories import (
     AdDraftRepository,
     AuditEventRepository,
     ConversationSessionRepository,
+    DraftProductRepository,
     OperatorRepository,
     ProcessedInboundMessageRepository,
     PublishedAdRepository,
@@ -57,6 +58,12 @@ from adv_assistant.media_ingest import (
     MediaIngestError,
     NoopOperatorPhotoIngestor,
     OperatorPhotoIngestor,
+)
+from adv_assistant.product_discovery import (
+    NoopProductDiscoveryService,
+    ProductDiscoveryCandidate,
+    ProductDiscoveryService,
+    ProductDiscoveryStatus,
 )
 from adv_assistant.tasks_queue import InboundTaskPayload
 from adv_assistant.whatsapp import NoopWhatsAppClient, WhatsAppClient
@@ -238,6 +245,7 @@ class InboundTaskProcessor:
         *,
         llm_gateway: LLMGateway | None = None,
         enrichment_service: EnrichmentService | None = None,
+        product_discovery_service: ProductDiscoveryService | None = None,
         ad_generation_service: AdGenerationService | None = None,
         render_width: int = 1920,
         render_height: int = 1080,
@@ -248,6 +256,7 @@ class InboundTaskProcessor:
         self._session_factory = session_factory
         self._llm_gateway = llm_gateway or NoopLLMGateway()
         self._enrichment_service = enrichment_service or NoopEnrichmentService()
+        self._product_discovery_service = product_discovery_service or NoopProductDiscoveryService()
         self._ad_generation_service = ad_generation_service or NoopAdGenerationService()
         self._render_width = render_width
         self._render_height = render_height
@@ -260,6 +269,7 @@ class InboundTaskProcessor:
             operator_repo = OperatorRepository(session)
             session_repo = ConversationSessionRepository(session)
             draft_repo = AdDraftRepository(session)
+            product_repo = DraftProductRepository(session)
             published_repo = PublishedAdRepository(session)
             processed_repo = ProcessedInboundMessageRepository(session)
             audit_repo = AuditEventRepository(session)
@@ -441,6 +451,17 @@ class InboundTaskProcessor:
                     reply_text = _classification_prompt(operator.language)
                     deterministic_action = "classification_reprompt"
                     intent_value = last_user_intent_hint
+                elif pending_question_type in {
+                    PendingQuestionType.PRODUCT_CONFIRMATION,
+                    PendingQuestionType.CANDIDATE_SELECTION,
+                }:
+                    reply_text = _product_discovery_pending_prompt(
+                        language=operator.language,
+                        pending_question_type=pending_question_type,
+                        pending_question_context=pending_question_context,
+                    )
+                    deterministic_action = "product_discovery_reprompt"
+                    intent_value = last_user_intent_hint
                 elif button_payload_id == BUTTON_CONFIRM_PUBLISH:
                     deterministic_action = "confirm_publish"
                     intent_value = deterministic_action
@@ -473,6 +494,17 @@ class InboundTaskProcessor:
                 if pending_question_type == PendingQuestionType.CLASSIFICATION:
                     reply_text = _classification_prompt(operator.language)
                     deterministic_action = "classification_reprompt"
+                    intent_value = last_user_intent_hint
+                elif pending_question_type in {
+                    PendingQuestionType.PRODUCT_CONFIRMATION,
+                    PendingQuestionType.CANDIDATE_SELECTION,
+                }:
+                    reply_text = _product_discovery_pending_prompt(
+                        language=operator.language,
+                        pending_question_type=pending_question_type,
+                        pending_question_context=pending_question_context,
+                    )
+                    deterministic_action = "product_discovery_reprompt"
                     intent_value = last_user_intent_hint
                 elif pending_upload_type == _PENDING_UPLOAD_LOGO:
                     deterministic_action = "operator_logo_upload"
@@ -537,6 +569,28 @@ class InboundTaskProcessor:
                         classification = IntentClassification(intent=Intent.SET_BRANDING)
 
                     forced_intent: Intent | None = None
+                    if reply_text is None and pending_question_type in {
+                        PendingQuestionType.PRODUCT_CONFIRMATION,
+                        PendingQuestionType.CANDIDATE_SELECTION,
+                    }:
+                        (
+                            current_draft,
+                            pending_question_type,
+                            pending_question_context,
+                            reply_text,
+                            deterministic_action,
+                        ) = await self._handle_product_discovery_pending_reply(
+                            payload=payload,
+                            draft_repo=draft_repo,
+                            product_repo=product_repo,
+                            audit_repo=audit_repo,
+                            current_draft=current_draft,
+                            language=operator.language,
+                            pending_question_type=pending_question_type,
+                            pending_question_context=pending_question_context,
+                            message_text=sanitized_text,
+                        )
+                        intent_value = last_user_intent_hint
                     if (
                         reply_text is None
                         and pending_question_type == PendingQuestionType.CLASSIFICATION
@@ -630,24 +684,46 @@ class InboundTaskProcessor:
                             # For a new ad request, create a fresh draft so
                             # previous ad edits cannot leak into this flow.
                             if not draft_created:
-                                previous_draft_id = current_draft.id
-                                created_draft = await draft_repo.create(
-                                    operator_phone=payload.operator_phone,
-                                    status=AdDraftStatus.DRAFT,
-                                    currency=operator.currency,
-                                )
-                                current_draft = created_draft
-                                draft_created = True
-                                await audit_repo.log(
-                                    actor="system",
-                                    action="draft_created_for_new_ad",
-                                    operator_phone=payload.operator_phone,
-                                    metadata={
-                                        "wamid": payload.wamid,
-                                        "previous_draft_id": str(previous_draft_id),
-                                        "new_draft_id": str(current_draft.id),
-                                    },
-                                )
+                                if not _should_reuse_current_draft_for_create_ad(current_draft):
+                                    previous_draft_id = current_draft.id
+                                    created_draft = await draft_repo.create(
+                                        operator_phone=payload.operator_phone,
+                                        status=AdDraftStatus.DRAFT,
+                                        currency=operator.currency,
+                                    )
+                                    current_draft = created_draft
+                                    draft_created = True
+                                    await audit_repo.log(
+                                        actor="system",
+                                        action="draft_created_for_new_ad",
+                                        operator_phone=payload.operator_phone,
+                                        metadata={
+                                            "wamid": payload.wamid,
+                                            "previous_draft_id": str(previous_draft_id),
+                                            "new_draft_id": str(current_draft.id),
+                                        },
+                                    )
+                                else:
+                                    # Brand-new session already has an empty draft.
+                                    refreshed = await draft_repo.reset_product_fields(
+                                        draft_id=current_draft.id,
+                                        operator_phone=payload.operator_phone,
+                                        expected_version=current_draft.version,
+                                        currency=operator.currency,
+                                        photo_url=current_draft.photo_url,
+                                        ean=current_draft.ean,
+                                    )
+                                    if refreshed is not None:
+                                        current_draft = refreshed
+                                    await audit_repo.log(
+                                        actor="system",
+                                        action="draft_reused_for_new_ad",
+                                        operator_phone=payload.operator_phone,
+                                        metadata={
+                                            "wamid": payload.wamid,
+                                            "draft_id": str(current_draft.id),
+                                        },
+                                    )
                             else:
                                 # Brand-new session already has an empty draft.
                                 refreshed = await draft_repo.reset_product_fields(
@@ -655,6 +731,8 @@ class InboundTaskProcessor:
                                     operator_phone=payload.operator_phone,
                                     expected_version=current_draft.version,
                                     currency=operator.currency,
+                                    photo_url=current_draft.photo_url,
+                                    ean=current_draft.ean,
                                 )
                                 if refreshed is not None:
                                     current_draft = refreshed
@@ -811,6 +889,23 @@ class InboundTaskProcessor:
                                         "enriched_brand": current_draft.enriched_brand,
                                     },
                                 )
+                            (
+                                current_draft,
+                                pending_question_type,
+                                pending_question_context,
+                                discovery_reply_text,
+                            ) = await self._run_single_product_discovery(
+                                payload=payload,
+                                draft_repo=draft_repo,
+                                product_repo=product_repo,
+                                audit_repo=audit_repo,
+                                current_draft=current_draft,
+                                language=operator.language,
+                                message_text=sanitized_text,
+                                pending_question_type=pending_question_type,
+                            )
+                            if discovery_reply_text is not None:
+                                reply_text = discovery_reply_text
                     elif classification.intent == Intent.UNKNOWN and detected_ean is not None:
                         current_draft, enrichment_notice = await self._enrich_current_draft(
                             payload=payload,
@@ -1157,6 +1252,13 @@ class InboundTaskProcessor:
                         "wamid": payload.wamid,
                     }
                 )
+
+            current_draft = await self._sync_generation_ready(
+                payload=payload,
+                draft_repo=draft_repo,
+                audit_repo=audit_repo,
+                current_draft=current_draft,
+            )
 
             await session_repo.create_or_update(
                 operator_phone=payload.operator_phone,
@@ -1613,6 +1715,362 @@ class InboundTaskProcessor:
         if enrichment_notice:
             reply_text = f"{reply_text}\n\n{enrichment_notice}"
         return current_draft, reply_text
+
+    async def _run_single_product_discovery(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        product_repo: DraftProductRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        language: str,
+        message_text: str,
+        pending_question_type: PendingQuestionType,
+    ) -> tuple[AdDraft, PendingQuestionType, dict[str, Any], str | None]:
+        if current_draft.request_type != AdRequestType.SINGLE_PRODUCT:
+            return current_draft, pending_question_type, {}, None
+        if pending_question_type in {
+            PendingQuestionType.PRODUCT_CONFIRMATION,
+            PendingQuestionType.CANDIDATE_SELECTION,
+        }:
+            return current_draft, pending_question_type, {}, None
+        if current_draft.generation_ready:
+            return current_draft, PendingQuestionType.NONE, {}, None
+        if current_draft.awaiting_product_confirmation:
+            return (
+                current_draft,
+                PendingQuestionType.PRODUCT_CONFIRMATION,
+                {},
+                None,
+            )
+        if (
+            current_draft.product_name is None
+            and current_draft.photo_url is None
+            and current_draft.ean is None
+        ):
+            return current_draft, PendingQuestionType.NONE, {}, None
+
+        discovery = await self._product_discovery_service.discover(
+            language=language,
+            message_text=message_text,
+            product_name=current_draft.product_name,
+            photo_url=current_draft.photo_url,
+            ean=current_draft.ean,
+        )
+        await audit_repo.log(
+            actor="system",
+            action="product_discovery_completed",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "draft_id": str(current_draft.id),
+                "status": discovery.status.value,
+                "candidate_count": len(discovery.candidates),
+                "reason": discovery.reason,
+            },
+        )
+
+        if discovery.status in {
+            ProductDiscoveryStatus.NO_MATCH,
+            ProductDiscoveryStatus.UNAVAILABLE,
+        }:
+            current_draft = await self._clear_product_confirmation_state(
+                payload=payload,
+                draft_repo=draft_repo,
+                product_repo=product_repo,
+                audit_repo=audit_repo,
+                current_draft=current_draft,
+            )
+            return current_draft, PendingQuestionType.NONE, {}, None
+
+        candidates = await product_repo.replace_candidates(
+            draft_id=current_draft.id,
+            candidates=[
+                _product_candidate_to_repo_fields(candidate) for candidate in discovery.candidates
+            ],
+        )
+        updated_draft = await draft_repo.update_for_operator_with_version(
+            draft_id=current_draft.id,
+            operator_phone=payload.operator_phone,
+            expected_version=current_draft.version,
+            awaiting_product_confirmation=True,
+        )
+        if updated_draft is not None:
+            current_draft = updated_draft
+
+        if discovery.status == ProductDiscoveryStatus.SINGLE_MATCH and candidates:
+            candidate = candidates[0]
+            return (
+                current_draft,
+                PendingQuestionType.PRODUCT_CONFIRMATION,
+                {
+                    "draft_id": str(current_draft.id),
+                    "candidate_id": str(candidate.id),
+                    "candidate_name": candidate.name,
+                },
+                _product_confirmation_prompt(
+                    language=language,
+                    candidate_name=candidate.name,
+                ),
+            )
+
+        return (
+            current_draft,
+            PendingQuestionType.CANDIDATE_SELECTION,
+            {
+                "draft_id": str(current_draft.id),
+                "candidates": [
+                    {
+                        "id": str(candidate.id),
+                        "position": candidate.position,
+                        "name": candidate.name,
+                    }
+                    for candidate in candidates
+                ],
+            },
+            _candidate_selection_prompt(language=language, candidates=candidates),
+        )
+
+    async def _handle_product_discovery_pending_reply(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        product_repo: DraftProductRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        language: str,
+        pending_question_type: PendingQuestionType,
+        pending_question_context: dict[str, Any],
+        message_text: str,
+    ) -> tuple[AdDraft, PendingQuestionType, dict[str, Any], str, str]:
+        if pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION:
+            yes_no = _parse_yes_no_answer(message_text=message_text, language=language)
+            if yes_no is True:
+                candidate_id = _parse_uuid(
+                    pending_question_context.get("candidate_id"),
+                )
+                if candidate_id is None:
+                    current_draft = await self._clear_product_confirmation_state(
+                        payload=payload,
+                        draft_repo=draft_repo,
+                        product_repo=product_repo,
+                        audit_repo=audit_repo,
+                        current_draft=current_draft,
+                    )
+                    return (
+                        current_draft,
+                        PendingQuestionType.NONE,
+                        {},
+                        _product_discovery_fallback_reply(language),
+                        "product_discovery_fallback",
+                    )
+                confirmed = await self._confirm_discovered_candidate(
+                    payload=payload,
+                    draft_repo=draft_repo,
+                    product_repo=product_repo,
+                    audit_repo=audit_repo,
+                    current_draft=current_draft,
+                    candidate_id=candidate_id,
+                )
+                return (
+                    confirmed,
+                    PendingQuestionType.NONE,
+                    {},
+                    _product_confirmation_saved_reply(
+                        language=language,
+                        product_name=confirmed.product_name,
+                    ),
+                    "product_confirmation_accepted",
+                )
+            if yes_no is False or _is_discovery_fallback_answer(message_text):
+                current_draft = await self._clear_product_confirmation_state(
+                    payload=payload,
+                    draft_repo=draft_repo,
+                    product_repo=product_repo,
+                    audit_repo=audit_repo,
+                    current_draft=current_draft,
+                )
+                return (
+                    current_draft,
+                    PendingQuestionType.NONE,
+                    {},
+                    _product_discovery_fallback_reply(language),
+                    "product_discovery_fallback",
+                )
+            return (
+                current_draft,
+                pending_question_type,
+                pending_question_context,
+                _product_confirmation_reprompt(
+                    language=language,
+                    candidate_name=str(pending_question_context.get("candidate_name") or ""),
+                ),
+                "product_confirmation_reprompt",
+            )
+
+        selected_candidate_id = _select_candidate_id_from_message(
+            message_text=message_text,
+            pending_question_context=pending_question_context,
+        )
+        if selected_candidate_id is not None:
+            confirmed = await self._confirm_discovered_candidate(
+                payload=payload,
+                draft_repo=draft_repo,
+                product_repo=product_repo,
+                audit_repo=audit_repo,
+                current_draft=current_draft,
+                candidate_id=selected_candidate_id,
+            )
+            return (
+                confirmed,
+                PendingQuestionType.NONE,
+                {},
+                _product_confirmation_saved_reply(
+                    language=language,
+                    product_name=confirmed.product_name,
+                ),
+                "candidate_selection_accepted",
+            )
+        if _is_discovery_fallback_answer(message_text):
+            current_draft = await self._clear_product_confirmation_state(
+                payload=payload,
+                draft_repo=draft_repo,
+                product_repo=product_repo,
+                audit_repo=audit_repo,
+                current_draft=current_draft,
+            )
+            return (
+                current_draft,
+                PendingQuestionType.NONE,
+                {},
+                _product_discovery_fallback_reply(language),
+                "product_discovery_fallback",
+            )
+        return (
+            current_draft,
+            pending_question_type,
+            pending_question_context,
+            _product_discovery_pending_prompt(
+                language=language,
+                pending_question_type=pending_question_type,
+                pending_question_context=pending_question_context,
+            ),
+            "candidate_selection_reprompt",
+        )
+
+    async def _confirm_discovered_candidate(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        product_repo: DraftProductRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        candidate_id: uuid.UUID,
+    ) -> AdDraft:
+        candidate = await product_repo.get_by_id(candidate_id)
+        if candidate is None or candidate.draft_id != current_draft.id:
+            return await self._clear_product_confirmation_state(
+                payload=payload,
+                draft_repo=draft_repo,
+                product_repo=product_repo,
+                audit_repo=audit_repo,
+                current_draft=current_draft,
+            )
+
+        await product_repo.confirm_candidate(draft_id=current_draft.id, candidate_id=candidate_id)
+        update_fields: dict[str, Any] = {
+            "awaiting_product_confirmation": False,
+        }
+        candidate_name = _truncate(candidate.name, 120)
+        if candidate_name is not None:
+            update_fields["product_name"] = candidate_name
+        if current_draft.photo_url is None and candidate.image_url is not None:
+            update_fields["photo_url"] = _truncate(candidate.image_url, 2000)
+
+        updated_draft = await draft_repo.update_for_operator_with_version(
+            draft_id=current_draft.id,
+            operator_phone=payload.operator_phone,
+            expected_version=current_draft.version,
+            **update_fields,
+        )
+        if updated_draft is not None:
+            current_draft = updated_draft
+
+        await audit_repo.log(
+            actor="system",
+            action="product_candidate_confirmed",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "draft_id": str(current_draft.id),
+                "candidate_id": str(candidate_id),
+                "candidate_name": candidate.name,
+            },
+        )
+        return current_draft
+
+    async def _clear_product_confirmation_state(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        product_repo: DraftProductRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+    ) -> AdDraft:
+        await product_repo.replace_candidates(draft_id=current_draft.id, candidates=[])
+        updated_draft = await draft_repo.update_for_operator_with_version(
+            draft_id=current_draft.id,
+            operator_phone=payload.operator_phone,
+            expected_version=current_draft.version,
+            awaiting_product_confirmation=False,
+        )
+        if updated_draft is not None:
+            current_draft = updated_draft
+        await audit_repo.log(
+            actor="system",
+            action="product_discovery_fallback_enabled",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "draft_id": str(current_draft.id),
+            },
+        )
+        return current_draft
+
+    async def _sync_generation_ready(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+    ) -> AdDraft:
+        generation_ready = _is_ready_for_generation(current_draft)
+        if current_draft.generation_ready == generation_ready:
+            return current_draft
+        updated_draft = await draft_repo.update_for_operator_with_version(
+            draft_id=current_draft.id,
+            operator_phone=payload.operator_phone,
+            expected_version=current_draft.version,
+            generation_ready=generation_ready,
+        )
+        if updated_draft is not None:
+            current_draft = updated_draft
+            await audit_repo.log(
+                actor="system",
+                action="generation_ready_updated",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "generation_ready": generation_ready,
+                },
+            )
+        return current_draft
 
     async def _handle_onboarding(
         self,
@@ -2091,6 +2549,107 @@ def _build_barcode_lookup_reply(
     return f"I received barcode {ean}, but I could not find product details yet."
 
 
+def _product_candidate_to_repo_fields(
+    candidate: ProductDiscoveryCandidate,
+) -> dict[str, Any]:
+    return {
+        "name": candidate.name,
+        "image_url": candidate.image_url,
+        "source": candidate.source,
+        "confidence": candidate.confidence,
+        "external_ref": candidate.external_ref,
+    }
+
+
+def _product_confirmation_prompt(*, language: str, candidate_name: str) -> str:
+    if language.lower() == "he":
+        return (
+            f'מצאתי התאמה למוצר: "{candidate_name}". '
+            "כתוב כן כדי להשתמש בזה, או לא כדי להמשיך עם הטקסט/התמונה שסיפקת."
+        )
+    return (
+        f'I found a product match: "{candidate_name}". '
+        "Reply yes to use it, or no to continue with your own text/photo."
+    )
+
+
+def _product_confirmation_reprompt(*, language: str, candidate_name: str) -> str:
+    if language.lower() == "he":
+        return (
+            f'לא זיהיתי תשובה ברורה לגבי "{candidate_name}". '
+            "כתוב כן כדי לאשר, או לא כדי להמשיך עם המידע שסיפקת."
+        )
+    return (
+        f'I could not detect a clear answer for "{candidate_name}". '
+        "Reply yes to confirm, or no to continue with your provided info."
+    )
+
+
+def _candidate_selection_prompt(*, language: str, candidates: list[Any]) -> str:
+    options = "\n".join(f"{candidate.position + 1}. {candidate.name}" for candidate in candidates)
+    if language.lower() == "he":
+        return (
+            "מצאתי כמה התאמות אפשריות:\n"
+            f"{options}\n"
+            "כתוב את מספר האפשרות הנכונה, או כתוב המשך כדי להתקדם עם הטקסט/התמונה שסיפקת."
+        )
+    return (
+        "I found multiple possible matches:\n"
+        f"{options}\n"
+        "Reply with the correct option number, or reply continue to use your own text/photo."
+    )
+
+
+def _product_confirmation_saved_reply(*, language: str, product_name: str | None) -> str:
+    resolved_name = product_name or "your product"
+    if language.lower() == "he":
+        return f'שמרתי את המוצר "{resolved_name}". אפשר להמשיך ליצירת מודעה.'
+    return f'I saved "{resolved_name}" as the product. We can continue to ad creation.'
+
+
+def _product_discovery_fallback_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "ממשיך עם הטקסט או התמונה שסיפקת, בלי להיתקע על חיפוש חיצוני."
+    return "Continuing with your provided text/photo without blocking on external lookup."
+
+
+def _product_discovery_pending_prompt(
+    *,
+    language: str,
+    pending_question_type: PendingQuestionType,
+    pending_question_context: dict[str, Any],
+) -> str:
+    if pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION:
+        return _product_confirmation_reprompt(
+            language=language,
+            candidate_name=str(pending_question_context.get("candidate_name") or "the product"),
+        )
+    candidates = list(pending_question_context.get("candidates") or [])
+    if language.lower() == "he":
+        if not candidates:
+            return "כתוב את מספר האפשרות הנכונה, או המשך כדי להשתמש במידע שסיפקת."
+        options = "\n".join(
+            f"{int(candidate.get('position', 0)) + 1}. {candidate.get('name', '')}"
+            for candidate in candidates
+        )
+        return (
+            "עדיין צריך לבחור מוצר אחד:\n"
+            f"{options}\n"
+            "כתוב את המספר, או המשך כדי להתקדם בלי החיפוש החיצוני."
+        )
+    if not candidates:
+        return "Reply with the correct option number, or continue to use your provided info."
+    options = "\n".join(
+        f"{int(candidate.get('position', 0)) + 1}. {candidate.get('name', '')}"
+        for candidate in candidates
+    )
+    return (
+        "I still need one selection:\n"
+        f"{options}\n"
+        "Reply with the number, or continue to proceed without external lookup."
+    )
+
+
 def _generation_mode_for_intent(intent: Intent) -> GenerationMode:
     if intent == Intent.REGENERATE_WITH_REFERENCE:
         return GenerationMode.REFERENCE
@@ -2098,7 +2657,19 @@ def _generation_mode_for_intent(intent: Intent) -> GenerationMode:
 
 
 def _is_ready_for_generation(draft: AdDraft) -> bool:
-    return draft.product_name is not None
+    if draft.awaiting_product_confirmation:
+        return False
+    return draft.product_name is not None or draft.photo_url is not None or draft.ean is not None
+
+
+def _should_reuse_current_draft_for_create_ad(draft: AdDraft) -> bool:
+    return (
+        draft.status == AdDraftStatus.DRAFT
+        and draft.request_type == AdRequestType.UNSET
+        and draft.preview_reference_url is None
+        and draft.rendered_image_url is None
+        and draft.generation_job_id is None
+    )
 
 
 def _to_generation_draft_input(
@@ -2280,6 +2851,47 @@ def _parse_yes_no_answer(*, message_text: str, language: str) -> bool | None:
     return None
 
 
+def _is_discovery_fallback_answer(message_text: str) -> bool:
+    normalized = _normalize_brand_value(message_text)
+    if normalized is None:
+        return False
+    if normalized in {"continue", "use mine", "skip", "המשך", "תמשיך", "שלי", "דלג"}:
+        return True
+    return normalized.startswith("continue") or normalized.startswith("המשך")
+
+
+def _select_candidate_id_from_message(
+    *,
+    message_text: str,
+    pending_question_context: dict[str, Any],
+) -> uuid.UUID | None:
+    normalized = _normalize_brand_value(message_text)
+    if normalized is None:
+        return None
+
+    candidates = list(pending_question_context.get("candidates") or [])
+    if normalized.isdigit():
+        requested_position = int(normalized) - 1
+        for candidate in candidates:
+            if int(candidate.get("position", -1)) == requested_position:
+                return _parse_uuid(candidate.get("id"))
+
+    for candidate in candidates:
+        name = _normalize_brand_value(str(candidate.get("name") or ""))
+        if name == normalized:
+            return _parse_uuid(candidate.get("id"))
+    return None
+
+
+def _parse_uuid(value: Any) -> uuid.UUID | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        return None
+
+
 def _parse_operator_clear_request(message_text: str) -> list[str]:
     normalized = _normalize_brand_value(message_text)
     if normalized is None:
@@ -2351,8 +2963,8 @@ def _branding_cleared_reply(*, language: str, cleared_fields: list[str]) -> str:
 
 def _missing_product_name_reply(language: str) -> str:
     if language.lower() == "he":
-        return "כדי לייצר מודעה אני צריך לפחות שם מוצר. כתוב לי את שם המוצר ונמשיך."
-    return "To generate an ad I need at least a product name. Please send the product name."
+        return "כדי לייצר מודעה אני צריך לפחות שם מוצר, ברקוד או תמונת מוצר. שלח אחד מהם ונמשיך."
+    return "To generate an ad I need at least a product name, barcode, or product photo."
 
 
 def _publish_confirmation_prompt(language: str) -> str:

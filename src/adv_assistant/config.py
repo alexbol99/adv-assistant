@@ -92,6 +92,7 @@ class Settings:
     enrichment_http_timeout_seconds: int = 8
     enrichment_max_attempts: int = 2
     enrichment_retry_base_seconds: float = 0.5
+    product_discovery_enabled: bool = True
 
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.1-flash-image-preview"
@@ -179,6 +180,7 @@ class Settings:
             enrichment_http_timeout_seconds=_int_env("ENRICHMENT_HTTP_TIMEOUT_SECONDS", 8),
             enrichment_max_attempts=_int_env("ENRICHMENT_MAX_ATTEMPTS", 2),
             enrichment_retry_base_seconds=_float_env("ENRICHMENT_RETRY_BASE_SECONDS", 0.5),
+            product_discovery_enabled=_bool_env("PRODUCT_DISCOVERY_ENABLED", True),
             gemini_api_key=_optional_env("GEMINI_API_KEY"),
             gemini_model=_env_with_default("GEMINI_MODEL", "gemini-3.1-flash-image-preview"),
             gemini_base_url=_env_with_default(

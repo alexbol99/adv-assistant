@@ -373,6 +373,8 @@ class AdDraftRepository:
         operator_phone: str,
         expected_version: int,
         currency: str = "ILS",
+        photo_url: str | None = None,
+        ean: str | None = None,
     ) -> AdDraft | None:
         """Clear all product-specific fields for a fresh ad creation."""
         return await self.update_for_operator_with_version(
@@ -384,8 +386,8 @@ class AdDraftRepository:
             price=None,
             currency=currency,
             promo_text=None,
-            ean=None,
-            photo_url=None,
+            ean=ean,
+            photo_url=photo_url,
             enriched_brand=None,
             enriched_category=None,
             enriched_description=None,
