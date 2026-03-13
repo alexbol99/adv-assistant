@@ -6,6 +6,7 @@ import sys
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
 
 from alembic import context
 
@@ -26,11 +27,25 @@ target_metadata = Base.metadata
 
 
 def get_url() -> str:
-    return (
+    raw_url = (
         os.getenv("ALEMBIC_DATABASE_URL")
         or os.getenv("DATABASE_URL")
         or config.get_main_option("sqlalchemy.url")
     )
+    return normalize_sync_migration_url(raw_url)
+
+
+def normalize_sync_migration_url(url: str) -> str:
+    parsed_url = make_url(url)
+    drivername = parsed_url.drivername
+    replacements = {
+        "sqlite+aiosqlite": "sqlite",
+        "postgresql+asyncpg": "postgresql+psycopg",
+    }
+    replacement = replacements.get(drivername)
+    if replacement is None:
+        return url
+    return str(parsed_url.set(drivername=replacement))
 
 
 def run_migrations_offline() -> None:

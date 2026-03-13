@@ -34,6 +34,10 @@ from adv_assistant.db.enums import (
 )
 
 
+def _enum_values(enum_cls):
+    return [member.value for member in enum_cls]
+
+
 class BusinessProfile(TimestampMixin, Base):
     __tablename__ = "business_profile"
 
@@ -134,12 +138,22 @@ class AdDraft(TimestampMixin, Base):
         default=AdDraftStatus.DRAFT,
     )
     request_type: Mapped[AdRequestType] = mapped_column(
-        Enum(AdRequestType, name="ad_request_type", native_enum=False),
+        Enum(
+            AdRequestType,
+            name="ad_request_type",
+            native_enum=False,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         default=AdRequestType.UNSET,
     )
     classification_status: Mapped[ClassificationStatus] = mapped_column(
-        Enum(ClassificationStatus, name="classification_status", native_enum=False),
+        Enum(
+            ClassificationStatus,
+            name="classification_status",
+            native_enum=False,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         default=ClassificationStatus.PENDING,
     )
@@ -193,7 +207,12 @@ class DraftProduct(TimestampMixin, Base):
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
     confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
     status: Mapped[DraftProductStatus] = mapped_column(
-        Enum(DraftProductStatus, name="draft_product_status", native_enum=False),
+        Enum(
+            DraftProductStatus,
+            name="draft_product_status",
+            native_enum=False,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         default=DraftProductStatus.CANDIDATE,
     )
@@ -223,7 +242,12 @@ class AdVariantRound(TimestampMixin, Base):
         index=True,
     )
     status: Mapped[AdVariantRoundStatus] = mapped_column(
-        Enum(AdVariantRoundStatus, name="ad_variant_round_status", native_enum=False),
+        Enum(
+            AdVariantRoundStatus,
+            name="ad_variant_round_status",
+            native_enum=False,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         default=AdVariantRoundStatus.ACTIVE,
     )
@@ -255,7 +279,12 @@ class AdVariant(TimestampMixin, Base):
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[AdVariantStatus] = mapped_column(
-        Enum(AdVariantStatus, name="ad_variant_status", native_enum=False),
+        Enum(
+            AdVariantStatus,
+            name="ad_variant_status",
+            native_enum=False,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         default=AdVariantStatus.FAILED,
     )
@@ -281,7 +310,12 @@ class ConversationSession(TimestampMixin, Base):
     language: Mapped[str] = mapped_column(String(2), nullable=False, default=Language.HE.value)
     history: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
     pending_question_type: Mapped[PendingQuestionType] = mapped_column(
-        Enum(PendingQuestionType, name="pending_question_type", native_enum=False),
+        Enum(
+            PendingQuestionType,
+            name="pending_question_type",
+            native_enum=False,
+            values_callable=_enum_values,
+        ),
         nullable=False,
         default=PendingQuestionType.NONE,
     )
