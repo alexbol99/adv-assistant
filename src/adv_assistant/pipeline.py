@@ -16,7 +16,12 @@ from adv_assistant.ad_generation import (
 )
 from adv_assistant.cms_cityscreen import CMSPublisher, CMSPublishError, NoopCMSPublisher
 from adv_assistant.db.base import utcnow
-from adv_assistant.db.enums import AdDraftStatus, PendingQuestionType
+from adv_assistant.db.enums import (
+    AdDraftStatus,
+    AdRequestType,
+    ClassificationStatus,
+    PendingQuestionType,
+)
 from adv_assistant.db.models import AdDraft, ConversationSession, Operator
 from adv_assistant.db.repositories import (
     AdDraftRepository,
@@ -38,6 +43,7 @@ from adv_assistant.llm_gateway import (
     BUTTON_CANCEL_PUBLISH,
     BUTTON_CONFIRM_DELETE_ALL,
     BUTTON_CONFIRM_PUBLISH,
+    ExtractedAdFields,
     Intent,
     IntentClassification,
     LLMGateway,
@@ -83,6 +89,53 @@ _FOLLOWUP_INTERRUPT_INTENTS = {
     Intent.LIST_ADS,
     Intent.HELP,
 }
+_AD_INTENTS = {
+    Intent.CREATE_AD,
+    Intent.REGENERATE_WITH_REFERENCE,
+    Intent.REGENERATE_FROM_SCRATCH,
+}
+_REQUEST_TYPE_SINGLE_KEYWORDS = {
+    "single",
+    "single product",
+    "one product",
+    "מוצר אחד",
+    "מוצר בודד",
+    "פריט אחד",
+}
+_REQUEST_TYPE_MULTI_KEYWORDS = {
+    "multi",
+    "multi product",
+    "multiple products",
+    "several products",
+    "catalog",
+    "כמה מוצרים",
+    "מספר מוצרים",
+    "כמה פריטים",
+    "כמה מוצרים יחד",
+    "קטלוג",
+}
+_REQUEST_TYPE_STORE_GENERAL_KEYWORDS = {
+    "store general",
+    "general store",
+    "shop wide",
+    "whole store",
+    "entire store",
+    "business ad",
+    "store ad",
+    "חנות",
+    "החנות",
+    "העסק",
+    "מודעה לחנות",
+    "מודעה כללית",
+    "מבצעי החנות",
+}
+
+
+@dataclass(slots=True)
+class RequestTypeDecision:
+    request_type: AdRequestType
+    resolved: bool
+    extracted_fields: ExtractedAdFields | None = None
 
 
 @dataclass(slots=True)
@@ -141,6 +194,41 @@ def _extract_image_media_id(raw_message: dict[str, Any]) -> str | None:
         return None
     stripped = media_id.strip()
     return stripped or None
+
+
+def _normalized_casefold_text(value: str) -> str:
+    return " ".join(value.split()).strip().casefold()
+
+
+def _contains_any_keyword(message_text: str, keywords: set[str]) -> bool:
+    normalized = _normalized_casefold_text(message_text)
+    return any(keyword in normalized for keyword in keywords)
+
+
+def _classification_prompt(language: str) -> str:
+    if language.lower() == "he":
+        return (
+            "כדי להמשיך צריך להבין איזה סוג מודעה אתה רוצה: "
+            "מוצר אחד, כמה מוצרים, או מודעה כללית לחנות? "
+            "כתוב רק אחת מהאפשרויות."
+        )
+    return (
+        "To continue, tell me which ad type you want: "
+        "single product, multiple products, or a general store ad. "
+        "Reply with one option only."
+    )
+
+
+def _request_type_resolved_reply(*, request_type: AdRequestType, language: str) -> str | None:
+    if request_type == AdRequestType.MULTI_PRODUCT:
+        if language.lower() == "he":
+            return "הבנתי שמדובר במודעה לכמה מוצרים. הסיווג נשמר."
+        return "Understood. This is a multi-product ad request. The classification was saved."
+    if request_type == AdRequestType.STORE_GENERAL:
+        if language.lower() == "he":
+            return "הבנתי שמדובר במודעה כללית לחנות. הסיווג נשמר."
+        return "Understood. This is a general store ad request. The classification was saved."
+    return None
 
 
 class InboundTaskProcessor:
@@ -218,11 +306,17 @@ class InboundTaskProcessor:
             current_draft_id: uuid.UUID | None = None
             pending_upload_type: str | None = None
             pending_followup_question: str | None = None
+            pending_question_type = PendingQuestionType.NONE
+            pending_question_context: dict[str, Any] = {}
+            last_user_intent_hint: str | None = None
             if session_obj is not None:
                 history = list(session_obj.history)
                 current_draft_id = session_obj.current_draft_id
                 pending_upload_type = session_obj.pending_upload_type
                 pending_followup_question = session_obj.pending_followup_question
+                pending_question_type = session_obj.pending_question_type
+                pending_question_context = dict(session_obj.pending_question_context or {})
+                last_user_intent_hint = session_obj.last_user_intent_hint
 
             # --- ONBOARDING GATE ---
             if _operator_needs_onboarding(operator):
@@ -240,21 +334,15 @@ class InboundTaskProcessor:
                     incoming_image_media_id=ob_image_id,
                 )
 
-                user_text = (
-                    ob_text
-                    or ("[image]" if ob_image_id else "[unsupported]")
-                )
-                history.append(
-                    {"role": "user", "text": user_text, "wamid": payload.wamid}
-                )
-                history.append(
-                    {"role": "assistant", "text": reply_text, "wamid": payload.wamid}
-                )
+                user_text = ob_text or ("[image]" if ob_image_id else "[unsupported]")
+                history.append({"role": "user", "text": user_text, "wamid": payload.wamid})
+                history.append({"role": "assistant", "text": reply_text, "wamid": payload.wamid})
 
                 await session_repo.create_or_update(
                     operator_phone=payload.operator_phone,
                     language=operator.language,
                     history=history,
+                    last_user_intent_hint="onboarding",
                     last_active_at=now,
                 )
 
@@ -349,7 +437,11 @@ class InboundTaskProcessor:
                         "wamid": payload.wamid,
                     }
                 )
-                if button_payload_id == BUTTON_CONFIRM_PUBLISH:
+                if pending_question_type == PendingQuestionType.CLASSIFICATION:
+                    reply_text = _classification_prompt(operator.language)
+                    deterministic_action = "classification_reprompt"
+                    intent_value = last_user_intent_hint
+                elif button_payload_id == BUTTON_CONFIRM_PUBLISH:
                     deterministic_action = "confirm_publish"
                     intent_value = deterministic_action
                     current_draft, reply_text = await self._confirm_publish_to_cms(
@@ -378,7 +470,11 @@ class InboundTaskProcessor:
                         "wamid": payload.wamid,
                     }
                 )
-                if pending_upload_type == _PENDING_UPLOAD_LOGO:
+                if pending_question_type == PendingQuestionType.CLASSIFICATION:
+                    reply_text = _classification_prompt(operator.language)
+                    deterministic_action = "classification_reprompt"
+                    intent_value = last_user_intent_hint
+                elif pending_upload_type == _PENDING_UPLOAD_LOGO:
                     deterministic_action = "operator_logo_upload"
                     intent_value = deterministic_action
                     reply_text = await self._process_logo_upload(
@@ -400,7 +496,8 @@ class InboundTaskProcessor:
                         media_id=incoming_image_media_id,
                     )
                 # Upload intent is one-shot; consume it after the first image.
-                pending_upload_type = None
+                if pending_question_type != PendingQuestionType.CLASSIFICATION:
+                    pending_upload_type = None
             elif incoming_text is not None:
                 sanitized_text = sanitize_user_text(incoming_text, max_chars=2000)
                 history.append(
@@ -440,6 +537,18 @@ class InboundTaskProcessor:
                         classification = IntentClassification(intent=Intent.SET_BRANDING)
 
                     forced_intent: Intent | None = None
+                    if (
+                        reply_text is None
+                        and pending_question_type == PendingQuestionType.CLASSIFICATION
+                    ):
+                        try:
+                            forced_intent = (
+                                Intent(last_user_intent_hint)
+                                if last_user_intent_hint is not None
+                                else Intent.CREATE_AD
+                            )
+                        except ValueError:
+                            forced_intent = Intent.CREATE_AD
                     regenerate_confirmation_unresolved = False
                     if pending_followup_question == _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION:
                         yes_no = _parse_yes_no_answer(
@@ -513,12 +622,11 @@ class InboundTaskProcessor:
                     enrichment_notice: str | None = None
                     brand_conflict_followup: str | None = None
                     detected_ean = extract_ean_from_text(sanitized_text)
-                    if classification.intent in {
-                        Intent.CREATE_AD,
-                        Intent.REGENERATE_WITH_REFERENCE,
-                        Intent.REGENERATE_FROM_SCRATCH,
-                    }:
-                        if classification.intent == Intent.CREATE_AD:
+                    if classification.intent in _AD_INTENTS:
+                        if (
+                            classification.intent == Intent.CREATE_AD
+                            and pending_question_type != PendingQuestionType.CLASSIFICATION
+                        ):
                             # For a new ad request, create a fresh draft so
                             # previous ad edits cannot leak into this flow.
                             if not draft_created:
@@ -560,97 +668,149 @@ class InboundTaskProcessor:
                                     },
                                 )
 
-                        extracted_fields = await self._llm_gateway.extract_ad_fields(
+                        request_type_decision = await self._decide_request_type(
+                            current_draft=current_draft,
                             message_text=sanitized_text,
                             language=operator.language,
                             history=history,
+                            pending_classification=(
+                                pending_question_type == PendingQuestionType.CLASSIFICATION
+                            ),
                         )
                         llm_used = self._llm_gateway.uses_external_llm or llm_used
-                        update_fields = extracted_fields.to_draft_update_fields()
+                        current_draft = await self._persist_request_type_state(
+                            payload=payload,
+                            draft_repo=draft_repo,
+                            session_repo=session_repo,
+                            audit_repo=audit_repo,
+                            current_draft=current_draft,
+                            request_type=request_type_decision.request_type,
+                            resolved=request_type_decision.resolved,
+                            last_active_at=now,
+                            source_intent=classification.intent.value,
+                        )
+                        if not request_type_decision.resolved:
+                            pending_question_type = PendingQuestionType.CLASSIFICATION
+                            pending_question_context = {
+                                "draft_id": str(current_draft.id),
+                                "allowed_request_types": [
+                                    AdRequestType.SINGLE_PRODUCT.value,
+                                    AdRequestType.MULTI_PRODUCT.value,
+                                    AdRequestType.STORE_GENERAL.value,
+                                ],
+                            }
+                            reply_text = _classification_prompt(operator.language)
+                        else:
+                            pending_question_type = PendingQuestionType.NONE
+                            pending_question_context = {}
+                            extracted_fields = request_type_decision.extracted_fields
+
                         if (
-                            "currency" not in update_fields
-                            and current_draft.currency != operator.currency
+                            reply_text is None
+                            and request_type_decision.request_type != AdRequestType.SINGLE_PRODUCT
                         ):
-                            update_fields["currency"] = operator.currency
-                        if update_fields:
-                            updated_draft = await draft_repo.update_for_operator_with_version(
-                                draft_id=current_draft.id,
-                                operator_phone=payload.operator_phone,
-                                expected_version=current_draft.version,
-                                **update_fields,
-                            )
-                            if updated_draft is None:
-                                reply_text = (
-                                    "This draft was already changed. Please refresh and try again."
-                                )
-                                await audit_repo.log(
-                                    actor="system",
-                                    action="draft_stale_write_detected",
-                                    operator_phone=payload.operator_phone,
-                                    metadata={"wamid": payload.wamid},
-                                )
-                            else:
-                                current_draft = updated_draft
-                        if followup_regen_requested:
-                            branding = await self._llm_gateway.extract_branding_fields(
-                                message_text=sanitized_text,
+                            reply_text = _request_type_resolved_reply(
+                                request_type=request_type_decision.request_type,
                                 language=operator.language,
                             )
-                            llm_used = self._llm_gateway.uses_external_llm or llm_used
-                            branding_update_fields = branding.to_update_kwargs()
-                            if branding_update_fields:
-                                await operator_repo.update_branding(
-                                    payload.operator_phone,
-                                    **branding_update_fields,
+                        if reply_text is None:
+                            if extracted_fields is None:
+                                extracted_fields = await self._llm_gateway.extract_ad_fields(
+                                    message_text=sanitized_text,
+                                    language=operator.language,
+                                    history=history,
                                 )
-                                if "language" in branding_update_fields:
-                                    operator.language = str(branding_update_fields["language"])
-                                    session_language_override = operator.language
-                                if "store_type" in branding_update_fields:
-                                    operator.store_type = branding_update_fields["store_type"]
-                                if "creative_guidance" in branding_update_fields:
-                                    operator.creative_guidance = branding_update_fields[
-                                        "creative_guidance"
-                                    ]
-                                if "business_name" in branding_update_fields:
-                                    operator.business_name = branding_update_fields["business_name"]
-                                if "brand_colors" in branding_update_fields:
-                                    operator.brand_colors = branding_update_fields["brand_colors"]
+                                llm_used = self._llm_gateway.uses_external_llm or llm_used
+                            update_fields = extracted_fields.to_draft_update_fields()
+                            if (
+                                "currency" not in update_fields
+                                and current_draft.currency != operator.currency
+                            ):
+                                update_fields["currency"] = operator.currency
+                            if update_fields:
+                                updated_draft = await draft_repo.update_for_operator_with_version(
+                                    draft_id=current_draft.id,
+                                    operator_phone=payload.operator_phone,
+                                    expected_version=current_draft.version,
+                                    **update_fields,
+                                )
+                                if updated_draft is None:
+                                    reply_text = (
+                                        "This draft was already changed. "
+                                        "Please refresh and try again."
+                                    )
+                                    await audit_repo.log(
+                                        actor="system",
+                                        action="draft_stale_write_detected",
+                                        operator_phone=payload.operator_phone,
+                                        metadata={"wamid": payload.wamid},
+                                    )
+                                else:
+                                    current_draft = updated_draft
+                            if followup_regen_requested:
+                                branding = await self._llm_gateway.extract_branding_fields(
+                                    message_text=sanitized_text,
+                                    language=operator.language,
+                                )
+                                llm_used = self._llm_gateway.uses_external_llm or llm_used
+                                branding_update_fields = branding.to_update_kwargs()
+                                if branding_update_fields:
+                                    await operator_repo.update_branding(
+                                        payload.operator_phone,
+                                        **branding_update_fields,
+                                    )
+                                    if "language" in branding_update_fields:
+                                        operator.language = str(branding_update_fields["language"])
+                                        session_language_override = operator.language
+                                    if "store_type" in branding_update_fields:
+                                        operator.store_type = branding_update_fields["store_type"]
+                                    if "creative_guidance" in branding_update_fields:
+                                        operator.creative_guidance = branding_update_fields[
+                                            "creative_guidance"
+                                        ]
+                                    if "business_name" in branding_update_fields:
+                                        operator.business_name = branding_update_fields[
+                                            "business_name"
+                                        ]
+                                    if "brand_colors" in branding_update_fields:
+                                        operator.brand_colors = branding_update_fields[
+                                            "brand_colors"
+                                        ]
+                                    await audit_repo.log(
+                                        actor="system",
+                                        action="operator_branding_updated",
+                                        operator_phone=payload.operator_phone,
+                                        metadata={
+                                            "wamid": payload.wamid,
+                                            "updated_fields": sorted(branding_update_fields.keys()),
+                                            "source": "followup_regenerate_confirmation",
+                                        },
+                                    )
+                            current_draft, enrichment_notice = await self._enrich_current_draft(
+                                payload=payload,
+                                draft_repo=draft_repo,
+                                audit_repo=audit_repo,
+                                current_draft=current_draft,
+                                language=operator.language,
+                                detected_ean=detected_ean,
+                                allow_existing_draft_ean=True,
+                            )
+                            brand_conflict_followup = _build_brand_conflict_followup(
+                                draft=current_draft,
+                                language=operator.language,
+                            )
+                            if brand_conflict_followup is not None:
                                 await audit_repo.log(
                                     actor="system",
-                                    action="operator_branding_updated",
+                                    action="product_brand_conflict_detected",
                                     operator_phone=payload.operator_phone,
                                     metadata={
                                         "wamid": payload.wamid,
-                                        "updated_fields": sorted(branding_update_fields.keys()),
-                                        "source": "followup_regenerate_confirmation",
+                                        "draft_id": str(current_draft.id),
+                                        "product_brand": current_draft.product_brand,
+                                        "enriched_brand": current_draft.enriched_brand,
                                     },
                                 )
-                        current_draft, enrichment_notice = await self._enrich_current_draft(
-                            payload=payload,
-                            draft_repo=draft_repo,
-                            audit_repo=audit_repo,
-                            current_draft=current_draft,
-                            language=operator.language,
-                            detected_ean=detected_ean,
-                            allow_existing_draft_ean=True,
-                        )
-                        brand_conflict_followup = _build_brand_conflict_followup(
-                            draft=current_draft,
-                            language=operator.language,
-                        )
-                        if brand_conflict_followup is not None:
-                            await audit_repo.log(
-                                actor="system",
-                                action="product_brand_conflict_detected",
-                                operator_phone=payload.operator_phone,
-                                metadata={
-                                    "wamid": payload.wamid,
-                                    "draft_id": str(current_draft.id),
-                                    "product_brand": current_draft.product_brand,
-                                    "enriched_brand": current_draft.enriched_brand,
-                                },
-                            )
                     elif classification.intent == Intent.UNKNOWN and detected_ean is not None:
                         current_draft, enrichment_notice = await self._enrich_current_draft(
                             payload=payload,
@@ -1006,6 +1166,9 @@ class InboundTaskProcessor:
                     else (operator.language if session_created else None)
                 ),
                 history=history,
+                pending_question_type=pending_question_type,
+                pending_question_context=pending_question_context,
+                last_user_intent_hint=intent_value,
                 current_draft_id=current_draft.id,
                 pending_upload_type=pending_upload_type,
                 pending_followup_question=pending_followup_question,
@@ -1086,6 +1249,141 @@ class InboundTaskProcessor:
         clearer = getattr(provider, "clear_trace_context", None)
         if callable(clearer):
             clearer()
+
+    async def _decide_request_type(
+        self,
+        *,
+        current_draft: AdDraft,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+        pending_classification: bool,
+    ) -> RequestTypeDecision:
+        if (
+            current_draft.is_classification_resolved
+            and current_draft.request_type != AdRequestType.UNSET
+        ):
+            return RequestTypeDecision(
+                request_type=current_draft.request_type,
+                resolved=True,
+            )
+
+        if _contains_any_keyword(message_text, _REQUEST_TYPE_STORE_GENERAL_KEYWORDS):
+            return RequestTypeDecision(
+                request_type=AdRequestType.STORE_GENERAL,
+                resolved=True,
+            )
+        if _contains_any_keyword(message_text, _REQUEST_TYPE_MULTI_KEYWORDS):
+            return RequestTypeDecision(
+                request_type=AdRequestType.MULTI_PRODUCT,
+                resolved=True,
+            )
+        if _contains_any_keyword(message_text, _REQUEST_TYPE_SINGLE_KEYWORDS):
+            return RequestTypeDecision(
+                request_type=AdRequestType.SINGLE_PRODUCT,
+                resolved=True,
+            )
+
+        extracted_fields = await self._llm_gateway.extract_ad_fields(
+            message_text=message_text,
+            language=language,
+            history=history,
+        )
+        detected_ean = extract_ean_from_text(message_text)
+        if extracted_fields.product_name is not None or detected_ean is not None:
+            return RequestTypeDecision(
+                request_type=AdRequestType.SINGLE_PRODUCT,
+                resolved=True,
+                extracted_fields=extracted_fields,
+            )
+
+        if pending_classification:
+            return RequestTypeDecision(
+                request_type=AdRequestType.UNSET,
+                resolved=False,
+                extracted_fields=extracted_fields,
+            )
+
+        return RequestTypeDecision(
+            request_type=AdRequestType.UNSET,
+            resolved=False,
+            extracted_fields=extracted_fields,
+        )
+
+    async def _persist_request_type_state(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        session_repo: ConversationSessionRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        request_type: AdRequestType,
+        resolved: bool,
+        last_active_at: Any,
+        source_intent: str | None,
+    ) -> AdDraft:
+        updated_draft = await draft_repo.update_for_operator_with_version(
+            draft_id=current_draft.id,
+            operator_phone=payload.operator_phone,
+            expected_version=current_draft.version,
+            request_type=request_type,
+            classification_status=(
+                ClassificationStatus.RESOLVED if resolved else ClassificationStatus.PENDING
+            ),
+            is_classification_resolved=resolved,
+        )
+        if updated_draft is not None:
+            current_draft = updated_draft
+
+        if resolved:
+            await session_repo.clear_pending_question(
+                operator_phone=payload.operator_phone,
+                last_active_at=last_active_at,
+            )
+            await session_repo.create_or_update(
+                operator_phone=payload.operator_phone,
+                last_user_intent_hint=source_intent,
+            )
+            await audit_repo.log(
+                actor="system",
+                action="request_type_classification_resolved",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "request_type": request_type.value,
+                },
+            )
+            return current_draft
+
+        await session_repo.set_pending_question(
+            operator_phone=payload.operator_phone,
+            pending_question_type=PendingQuestionType.CLASSIFICATION,
+            pending_question_context={
+                "draft_id": str(current_draft.id),
+                "allowed_request_types": [
+                    AdRequestType.SINGLE_PRODUCT.value,
+                    AdRequestType.MULTI_PRODUCT.value,
+                    AdRequestType.STORE_GENERAL.value,
+                ],
+            },
+            last_active_at=last_active_at,
+        )
+        await session_repo.create_or_update(
+            operator_phone=payload.operator_phone,
+            last_user_intent_hint=source_intent,
+        )
+        await audit_repo.log(
+            actor="system",
+            action="request_type_classification_ambiguous",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "draft_id": str(current_draft.id),
+            },
+        )
+        return current_draft
 
     async def _confirm_publish_to_cms(
         self,
@@ -1389,7 +1687,8 @@ class InboundTaskProcessor:
             return _onboarding_welcome_reply(language)
 
         await operator_repo.update_branding(
-            payload.operator_phone, business_name=business_name,
+            payload.operator_phone,
+            business_name=business_name,
         )
         operator.business_name = business_name
 
@@ -1441,7 +1740,8 @@ class InboundTaskProcessor:
             return _onboarding_logo_upload_failed_reply(language)
 
         await operator_repo.update_branding(
-            payload.operator_phone, logo_url=ingested_photo.public_url,
+            payload.operator_phone,
+            logo_url=ingested_photo.public_url,
         )
         operator.logo_url = ingested_photo.public_url
 
@@ -2157,16 +2457,16 @@ def _onboarding_name_expected_text_reply(language: str) -> str:
 
 def _onboarding_name_saved_ask_logo_reply(language: str, business_name: str) -> str:
     if language.lower() == "he":
-        return f"תודה! שם העסק \"{business_name}\" נשמר.\n\nעכשיו שלח לי את הלוגו של העסק כתמונה."
+        return f'תודה! שם העסק "{business_name}" נשמר.\n\nעכשיו שלח לי את הלוגו של העסק כתמונה.'
     if language.lower() == "ar":
-        return f"شكرًا! تم حفظ اسم العمل \"{business_name}\".\n\nالآن أرسل لي شعار العمل كصورة."
+        return f'شكرًا! تم حفظ اسم العمل "{business_name}".\n\nالآن أرسل لي شعار العمل كصورة.'
     if language.lower() == "ru":
         return (
-            f"Спасибо! Название бизнеса \"{business_name}\" сохранено.\n\n"
+            f'Спасибо! Название бизнеса "{business_name}" сохранено.\n\n'
             f"Теперь отправьте мне логотип вашего бизнеса как изображение."
         )
     return (
-        f"Thanks! Business name \"{business_name}\" saved.\n\n"
+        f'Thanks! Business name "{business_name}" saved.\n\n'
         f"Now send me your business logo as an image."
     )
 

@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from adv_assistant.db.base import utcnow
 from adv_assistant.db.enums import (
     AdDraftStatus,
+    AdRequestType,
     AdVariantRoundStatus,
+    ClassificationStatus,
     DraftProductStatus,
     PendingQuestionType,
 )
@@ -155,6 +157,9 @@ class ConversationSessionRepository:
         operator_phone: str,
         language: str | None = None,
         history: list[dict[str, Any]] | None = None,
+        pending_question_type: PendingQuestionType | object = _UNSET,
+        pending_question_context: dict[str, Any] | None | object = _UNSET,
+        last_user_intent_hint: str | None | object = _UNSET,
         current_draft_id: uuid.UUID | None | object = _UNSET,
         pending_upload_type: str | None | object = _UNSET,
         pending_followup_question: str | None | object = _UNSET,
@@ -167,6 +172,17 @@ class ConversationSessionRepository:
                 operator_phone=operator_phone,
                 language=language or "he",
                 history=history or [],
+                pending_question_type=(
+                    PendingQuestionType.NONE
+                    if pending_question_type is _UNSET
+                    else pending_question_type
+                ),
+                pending_question_context=(
+                    {} if pending_question_context is _UNSET else (pending_question_context or {})
+                ),
+                last_user_intent_hint=(
+                    None if last_user_intent_hint is _UNSET else last_user_intent_hint
+                ),
                 current_draft_id=(None if current_draft_id is _UNSET else current_draft_id),
                 pending_upload_type=(
                     None if pending_upload_type is _UNSET else pending_upload_type
@@ -183,6 +199,12 @@ class ConversationSessionRepository:
                 session_obj.language = language
             if history is not None:
                 session_obj.history = history
+            if pending_question_type is not _UNSET:
+                session_obj.pending_question_type = pending_question_type
+            if pending_question_context is not _UNSET:
+                session_obj.pending_question_context = pending_question_context or {}
+            if last_user_intent_hint is not _UNSET:
+                session_obj.last_user_intent_hint = last_user_intent_hint
             if current_draft_id is not _UNSET:
                 session_obj.current_draft_id = current_draft_id
             if pending_upload_type is not _UNSET:
@@ -374,6 +396,11 @@ class AdDraftRepository:
             preview_reference_url=None,
             rendered_image_url=None,
             status=AdDraftStatus.DRAFT,
+            request_type=AdRequestType.UNSET,
+            classification_status=ClassificationStatus.PENDING,
+            is_classification_resolved=False,
+            awaiting_product_confirmation=False,
+            generation_ready=False,
         )
 
 

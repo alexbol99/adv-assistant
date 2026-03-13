@@ -7,8 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from adv_assistant.db.base import utcnow
 from adv_assistant.db.enums import (
     AdDraftStatus,
+    AdRequestType,
     AdVariantRoundStatus,
     AdVariantStatus,
+    ClassificationStatus,
     DraftProductStatus,
     PendingQuestionType,
 )
@@ -150,6 +152,12 @@ async def test_pending_question_updates(db_session: AsyncSession) -> None:
     assert session_obj.pending_question_type == PendingQuestionType.NONE
     assert session_obj.pending_question_context == {}
 
+    updated_session = await session_repo.create_or_update(
+        operator_phone=operator.phone,
+        last_user_intent_hint="create_ad",
+    )
+    assert updated_session.last_user_intent_hint == "create_ad"
+
     updated_session = await session_repo.set_pending_question(
         operator_phone=operator.phone,
         pending_question_type=PendingQuestionType.CLASSIFICATION,
@@ -228,6 +236,35 @@ async def test_draft_product_candidate_tracking(db_session: AsyncSession) -> Non
     refreshed = await product_repo.get_by_id(candidates[0].id)
     assert refreshed is not None
     assert refreshed.status == DraftProductStatus.CANDIDATE
+
+
+async def test_reset_product_fields_clears_v1_classification_state(
+    db_session: AsyncSession,
+) -> None:
+    operator = await OperatorRepository(db_session).create(phone="+972500000013")
+    draft_repo = AdDraftRepository(db_session)
+    draft = await draft_repo.create(
+        operator_phone=operator.phone,
+        product_name="Milk",
+        request_type=AdRequestType.SINGLE_PRODUCT,
+        classification_status=ClassificationStatus.RESOLVED,
+        is_classification_resolved=True,
+        awaiting_product_confirmation=True,
+        generation_ready=True,
+    )
+
+    reset_draft = await draft_repo.reset_product_fields(
+        draft_id=draft.id,
+        operator_phone=operator.phone,
+        expected_version=draft.version,
+    )
+
+    assert reset_draft is not None
+    assert reset_draft.request_type == AdRequestType.UNSET
+    assert reset_draft.classification_status == ClassificationStatus.PENDING
+    assert reset_draft.is_classification_resolved is False
+    assert reset_draft.awaiting_product_confirmation is False
+    assert reset_draft.generation_ready is False
 
 
 async def test_variant_round_replacement_supersedes_previous_active(
