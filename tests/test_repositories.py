@@ -238,7 +238,9 @@ async def test_draft_product_candidate_tracking(db_session: AsyncSession) -> Non
     assert refreshed.status == DraftProductStatus.CANDIDATE
 
 
-async def test_reset_product_fields_clears_v1_classification_state(db_session: AsyncSession) -> None:
+async def test_reset_product_fields_clears_v1_classification_state(
+    db_session: AsyncSession,
+) -> None:
     operator = await OperatorRepository(db_session).create(phone="+972500000013")
     draft_repo = AdDraftRepository(db_session)
     draft = await draft_repo.create(

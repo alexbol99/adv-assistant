@@ -743,7 +743,8 @@ class InboundTaskProcessor:
                                 )
                                 if updated_draft is None:
                                     reply_text = (
-                                        "This draft was already changed. Please refresh and try again."
+                                        "This draft was already changed. "
+                                        "Please refresh and try again."
                                     )
                                     await audit_repo.log(
                                         actor="system",
