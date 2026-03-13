@@ -334,16 +334,9 @@ class InboundTaskProcessor:
                     incoming_image_media_id=ob_image_id,
                 )
 
-                user_text = (
-                    ob_text
-                    or ("[image]" if ob_image_id else "[unsupported]")
-                )
-                history.append(
-                    {"role": "user", "text": user_text, "wamid": payload.wamid}
-                )
-                history.append(
-                    {"role": "assistant", "text": reply_text, "wamid": payload.wamid}
-                )
+                user_text = ob_text or ("[image]" if ob_image_id else "[unsupported]")
+                history.append({"role": "user", "text": user_text, "wamid": payload.wamid})
+                history.append({"role": "assistant", "text": reply_text, "wamid": payload.wamid})
 
                 await session_repo.create_or_update(
                     operator_phone=payload.operator_phone,
@@ -789,9 +782,7 @@ class InboundTaskProcessor:
                                         operator_phone=payload.operator_phone,
                                         metadata={
                                             "wamid": payload.wamid,
-                                            "updated_fields": sorted(
-                                                branding_update_fields.keys()
-                                            ),
+                                            "updated_fields": sorted(branding_update_fields.keys()),
                                             "source": "followup_regenerate_confirmation",
                                         },
                                     )
@@ -1696,7 +1687,8 @@ class InboundTaskProcessor:
             return _onboarding_welcome_reply(language)
 
         await operator_repo.update_branding(
-            payload.operator_phone, business_name=business_name,
+            payload.operator_phone,
+            business_name=business_name,
         )
         operator.business_name = business_name
 
@@ -1748,7 +1740,8 @@ class InboundTaskProcessor:
             return _onboarding_logo_upload_failed_reply(language)
 
         await operator_repo.update_branding(
-            payload.operator_phone, logo_url=ingested_photo.public_url,
+            payload.operator_phone,
+            logo_url=ingested_photo.public_url,
         )
         operator.logo_url = ingested_photo.public_url
 
@@ -2464,16 +2457,16 @@ def _onboarding_name_expected_text_reply(language: str) -> str:
 
 def _onboarding_name_saved_ask_logo_reply(language: str, business_name: str) -> str:
     if language.lower() == "he":
-        return f"תודה! שם העסק \"{business_name}\" נשמר.\n\nעכשיו שלח לי את הלוגו של העסק כתמונה."
+        return f'תודה! שם העסק "{business_name}" נשמר.\n\nעכשיו שלח לי את הלוגו של העסק כתמונה.'
     if language.lower() == "ar":
-        return f"شكرًا! تم حفظ اسم العمل \"{business_name}\".\n\nالآن أرسل لي شعار العمل كصورة."
+        return f'شكرًا! تم حفظ اسم العمل "{business_name}".\n\nالآن أرسل لي شعار العمل كصورة.'
     if language.lower() == "ru":
         return (
-            f"Спасибо! Название бизнеса \"{business_name}\" сохранено.\n\n"
+            f'Спасибо! Название бизнеса "{business_name}" сохранено.\n\n'
             f"Теперь отправьте мне логотип вашего бизнеса как изображение."
         )
     return (
-        f"Thanks! Business name \"{business_name}\" saved.\n\n"
+        f'Thanks! Business name "{business_name}" saved.\n\n'
         f"Now send me your business logo as an image."
     )
 

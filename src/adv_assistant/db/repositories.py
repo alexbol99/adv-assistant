@@ -178,9 +178,7 @@ class ConversationSessionRepository:
                     else pending_question_type
                 ),
                 pending_question_context=(
-                    {}
-                    if pending_question_context is _UNSET
-                    else (pending_question_context or {})
+                    {} if pending_question_context is _UNSET else (pending_question_context or {})
                 ),
                 last_user_intent_hint=(
                     None if last_user_intent_hint is _UNSET else last_user_intent_hint

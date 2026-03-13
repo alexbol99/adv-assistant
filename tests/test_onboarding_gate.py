@@ -59,9 +59,7 @@ async def _seed_operator(
         )
 
 
-async def _get_operator(
-    factory: async_sessionmaker[AsyncSession], phone: str
-) -> Operator:
+async def _get_operator(factory: async_sessionmaker[AsyncSession], phone: str) -> Operator:
     async with session_scope(factory) as session:
         op = await OperatorRepository(session).get_by_phone(phone)
         assert op is not None
@@ -73,9 +71,7 @@ async def _get_session(
 ) -> ConversationSession | None:
     async with session_scope(factory) as session:
         result = await session.execute(
-            select(ConversationSession).where(
-                ConversationSession.operator_phone == phone
-            )
+            select(ConversationSession).where(ConversationSession.operator_phone == phone)
         )
         return result.scalar_one_or_none()
 
@@ -94,9 +90,7 @@ def _text_payload(*, wamid: str, phone: str, text: str) -> InboundTaskPayload:
     )
 
 
-def _image_payload(
-    *, wamid: str, phone: str, media_id: str = "media-123"
-) -> InboundTaskPayload:
+def _image_payload(*, wamid: str, phone: str, media_id: str = "media-123") -> InboundTaskPayload:
     return InboundTaskPayload(
         wamid=wamid,
         operator_phone=phone,
@@ -144,9 +138,7 @@ async def test_first_message_triggers_onboarding_welcome(
     await _seed_operator(session_factory, phone)
     processor = InboundTaskProcessor(session_factory)
 
-    result = await processor.process(
-        _text_payload(wamid="wamid-ob-1", phone=phone, text="shalom")
-    )
+    result = await processor.process(_text_payload(wamid="wamid-ob-1", phone=phone, text="shalom"))
 
     assert result.status == "processed"
     assert result.deterministic_action == "onboarding"
@@ -165,9 +157,7 @@ async def test_first_message_image_triggers_welcome(
     await _seed_operator(session_factory, phone)
     processor = InboundTaskProcessor(session_factory)
 
-    result = await processor.process(
-        _image_payload(wamid="wamid-ob-2", phone=phone)
-    )
+    result = await processor.process(_image_payload(wamid="wamid-ob-2", phone=phone))
 
     assert result.deterministic_action == "onboarding"
     assert result.draft_created is False
@@ -187,9 +177,7 @@ async def test_name_step_accepts_text_and_advances_to_logo(
     processor = InboundTaskProcessor(session_factory)
 
     # First message: welcome
-    await processor.process(
-        _text_payload(wamid="wamid-ob-3a", phone=phone, text="hello")
-    )
+    await processor.process(_text_payload(wamid="wamid-ob-3a", phone=phone, text="hello"))
 
     # Second message: business name
     result = await processor.process(
@@ -214,13 +202,9 @@ async def test_name_step_rejects_image(
     processor = InboundTaskProcessor(session_factory)
 
     # Trigger welcome first
-    await processor.process(
-        _text_payload(wamid="wamid-ob-4a", phone=phone, text="hi")
-    )
+    await processor.process(_text_payload(wamid="wamid-ob-4a", phone=phone, text="hi"))
     # Send image when name expected
-    result = await processor.process(
-        _image_payload(wamid="wamid-ob-4b", phone=phone)
-    )
+    result = await processor.process(_image_payload(wamid="wamid-ob-4b", phone=phone))
 
     assert result.deterministic_action == "onboarding"
     assert "טקסט" in result.reply_text
@@ -239,16 +223,12 @@ async def test_logo_step_accepts_image_and_completes(
 ) -> None:
     phone = "+972500001005"
     logo_url = "https://cdn.example.com/onboarding-logo.png"
-    await _seed_operator(
-        session_factory, phone, business_name="Super Market"
-    )
+    await _seed_operator(session_factory, phone, business_name="Super Market")
     processor = InboundTaskProcessor(
         session_factory, operator_photo_ingestor=FakePhotoIngestor(logo_url)
     )
 
-    result = await processor.process(
-        _image_payload(wamid="wamid-ob-5", phone=phone)
-    )
+    result = await processor.process(_image_payload(wamid="wamid-ob-5", phone=phone))
 
     assert result.deterministic_action == "onboarding"
     assert "הושלמה" in result.reply_text
@@ -265,9 +245,7 @@ async def test_logo_step_rejects_text(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     phone = "+972500001006"
-    await _seed_operator(
-        session_factory, phone, business_name="Super Market"
-    )
+    await _seed_operator(session_factory, phone, business_name="Super Market")
     processor = InboundTaskProcessor(session_factory)
 
     result = await processor.process(
@@ -286,16 +264,12 @@ async def test_logo_upload_failure_retains_state(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     phone = "+972500001007"
-    await _seed_operator(
-        session_factory, phone, business_name="Super Market"
-    )
+    await _seed_operator(session_factory, phone, business_name="Super Market")
     processor = InboundTaskProcessor(
         session_factory, operator_photo_ingestor=FailingPhotoIngestor()
     )
 
-    result = await processor.process(
-        _image_payload(wamid="wamid-ob-7", phone=phone)
-    )
+    result = await processor.process(_image_payload(wamid="wamid-ob-7", phone=phone))
 
     assert result.deterministic_action == "onboarding"
     assert "לא הצלחתי" in result.reply_text
@@ -320,24 +294,18 @@ async def test_full_onboarding_flow(
     )
 
     # Step 1: first message -> welcome
-    r1 = await processor.process(
-        _text_payload(wamid="wamid-full-1", phone=phone, text="hello")
-    )
+    r1 = await processor.process(_text_payload(wamid="wamid-full-1", phone=phone, text="hello"))
     assert r1.deterministic_action == "onboarding"
     assert "שם העסק" in r1.reply_text
 
     # Step 2: provide name -> ask for logo
-    r2 = await processor.process(
-        _text_payload(wamid="wamid-full-2", phone=phone, text="My Shop")
-    )
+    r2 = await processor.process(_text_payload(wamid="wamid-full-2", phone=phone, text="My Shop"))
     assert r2.deterministic_action == "onboarding"
     assert "My Shop" in r2.reply_text
     assert "לוגו" in r2.reply_text
 
     # Step 3: provide logo -> onboarding complete
-    r3 = await processor.process(
-        _image_payload(wamid="wamid-full-3", phone=phone)
-    )
+    r3 = await processor.process(_image_payload(wamid="wamid-full-3", phone=phone))
     assert r3.deterministic_action == "onboarding"
     assert "הושלמה" in r3.reply_text
 
@@ -354,20 +322,12 @@ async def test_no_drafts_created_during_onboarding(
 ) -> None:
     phone = "+972500001009"
     await _seed_operator(session_factory, phone)
-    processor = InboundTaskProcessor(
-        session_factory, operator_photo_ingestor=FakePhotoIngestor()
-    )
+    processor = InboundTaskProcessor(session_factory, operator_photo_ingestor=FakePhotoIngestor())
 
     # Three onboarding messages
-    await processor.process(
-        _text_payload(wamid="wamid-nd-1", phone=phone, text="hi")
-    )
-    await processor.process(
-        _text_payload(wamid="wamid-nd-2", phone=phone, text="Test Biz")
-    )
-    await processor.process(
-        _image_payload(wamid="wamid-nd-3", phone=phone)
-    )
+    await processor.process(_text_payload(wamid="wamid-nd-1", phone=phone, text="hi"))
+    await processor.process(_text_payload(wamid="wamid-nd-2", phone=phone, text="Test Biz"))
+    await processor.process(_image_payload(wamid="wamid-nd-3", phone=phone))
 
     # No drafts should exist after onboarding messages
     # (the 3rd message completes onboarding but doesn't create a draft)
@@ -411,12 +371,8 @@ async def test_onboarding_history_preserved(
     await _seed_operator(session_factory, phone)
     processor = InboundTaskProcessor(session_factory)
 
-    await processor.process(
-        _text_payload(wamid="wamid-hist-1", phone=phone, text="hello")
-    )
-    await processor.process(
-        _text_payload(wamid="wamid-hist-2", phone=phone, text="My Biz")
-    )
+    await processor.process(_text_payload(wamid="wamid-hist-1", phone=phone, text="hello"))
+    await processor.process(_text_payload(wamid="wamid-hist-2", phone=phone, text="My Biz"))
 
     session_obj = await _get_session(session_factory, phone)
     assert session_obj is not None
@@ -439,9 +395,7 @@ async def test_admin_preset_name_skips_to_logo_step(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     phone = "+972500001012"
-    await _seed_operator(
-        session_factory, phone, business_name="Admin Set Name"
-    )
+    await _seed_operator(session_factory, phone, business_name="Admin Set Name")
     processor = InboundTaskProcessor(session_factory)
 
     # First message should ask for logo, not name
