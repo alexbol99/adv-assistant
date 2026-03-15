@@ -53,6 +53,13 @@ from adv_assistant.media_ingest import (
 )
 from adv_assistant.media_store import GCSMediaStore, MediaStore, NoopMediaStore, S3MediaStore
 from adv_assistant.pipeline import InboundTaskProcessor
+from adv_assistant.product_discovery import (
+    NoopProductDiscoveryService,
+    ProductDiscoveryService,
+    ProviderChainDiscoveryService,
+    SerperImageSearchProvider,
+    ShufersalSearchProvider,
+)
 from adv_assistant.tasks_auth import (
     OidcTaskRequestAuthorizer,
     RejectAllTaskRequestAuthorizer,
@@ -144,6 +151,31 @@ def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentServ
             NoopProductLookupProvider("web_search"),
         ]
     )
+
+
+def _build_product_discovery_service(settings: Settings) -> ProductDiscoveryService:
+    if not settings.discovery_enabled:
+        return NoopProductDiscoveryService(reason="disabled")
+
+    providers: list[ShufersalSearchProvider | SerperImageSearchProvider] = [
+        ShufersalSearchProvider(
+            base_url=settings.shufersal_base_url,
+            timeout_seconds=settings.discovery_http_timeout_seconds,
+            max_attempts=settings.discovery_max_attempts,
+            retry_base_seconds=settings.discovery_retry_base_seconds,
+        ),
+    ]
+    if settings.serper_api_key:
+        providers.append(
+            SerperImageSearchProvider(
+                api_key=settings.serper_api_key,
+                base_url=settings.serper_base_url,
+                timeout_seconds=settings.discovery_http_timeout_seconds,
+                max_attempts=settings.discovery_max_attempts,
+                retry_base_seconds=settings.discovery_retry_base_seconds,
+            ),
+        )
+    return ProviderChainDiscoveryService(providers=providers)  # type: ignore[arg-type]
 
 
 def _build_ad_generation_service(*, settings: Settings, media_store: MediaStore):
@@ -397,6 +429,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     whatsapp_client = _build_whatsapp_client(current_settings)
     whatsapp_media_client = _build_whatsapp_media_client(current_settings)
     enrichment_service = _build_enrichment_service(current_settings)
+    product_discovery_service = _build_product_discovery_service(current_settings)
     media_store = _build_media_store(current_settings)
     cms_publisher = _build_cms_publisher(current_settings)
     ad_generation_service = _build_ad_generation_service(
@@ -411,6 +444,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session_factory,
         llm_gateway=llm_gateway,
         enrichment_service=enrichment_service,
+        product_discovery_service=product_discovery_service,
         ad_generation_service=ad_generation_service,
         render_width=current_settings.ad_render_width,
         render_height=current_settings.ad_render_height,
@@ -506,6 +540,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await whatsapp_client.close()
             await whatsapp_media_client.close()
             await enrichment_service.close()
+            await product_discovery_service.close()
             await ad_generation_service.close()
             await cms_publisher.close()
             await media_store.close()
@@ -520,6 +555,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.task_enqueuer = task_enqueuer
     app.state.task_authorizer = task_authorizer
     app.state.whatsapp_client = whatsapp_client
+    app.state.product_discovery_service = product_discovery_service
     app.state.ad_generation_service = ad_generation_service
     app.state.whatsapp_media_client = whatsapp_media_client
     app.state.media_store = media_store
