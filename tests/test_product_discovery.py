@@ -175,9 +175,7 @@ async def test_shufersal_search_retries_on_503_then_succeeds() -> None:
         transport=httpx.MockTransport(handler),
         base_url="https://www.shufersal.co.il",
     )
-    provider = ShufersalSearchProvider(
-        client=client, max_attempts=2, retry_base_seconds=0.0
-    )
+    provider = ShufersalSearchProvider(client=client, max_attempts=2, retry_base_seconds=0.0)
     result = await provider.search(query="schweppes")
 
     assert result is not None

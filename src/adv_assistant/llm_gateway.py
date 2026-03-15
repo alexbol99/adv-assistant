@@ -268,11 +268,7 @@ class ExtractedProductQuery(BaseModel):
 
     def to_search_query(self) -> str:
         """Combine non-None fields into a single search string."""
-        parts = [
-            p
-            for p in [self.brand, self.product_query, self.flavor, self.volume]
-            if p
-        ]
+        parts = [p for p in [self.brand, self.product_query, self.flavor, self.volume] if p]
         return " ".join(parts) if parts else ""
 
 

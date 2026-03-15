@@ -254,9 +254,7 @@ class InboundTaskProcessor:
         self._session_factory = session_factory
         self._llm_gateway = llm_gateway or NoopLLMGateway()
         self._enrichment_service = enrichment_service or NoopEnrichmentService()
-        self._product_discovery_service = (
-            product_discovery_service or NoopProductDiscoveryService()
-        )
+        self._product_discovery_service = product_discovery_service or NoopProductDiscoveryService()
         self._ad_generation_service = ad_generation_service or NoopAdGenerationService()
         self._render_width = render_width
         self._render_height = render_height
@@ -2064,7 +2062,6 @@ class InboundTaskProcessor:
                 continue
             cleaned[key] = value
         return cleaned
-
 
     async def _discover_product_for_draft(
         self,

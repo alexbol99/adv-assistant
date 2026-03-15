@@ -195,9 +195,7 @@ class Settings:
             discovery_max_attempts=_int_env("DISCOVERY_MAX_ATTEMPTS", 2),
             discovery_retry_base_seconds=_float_env("DISCOVERY_RETRY_BASE_SECONDS", 0.5),
             serper_api_key=_optional_env("SERPER_API_KEY"),
-            serper_base_url=_env_with_default(
-                "SERPER_BASE_URL", "https://google.serper.dev"
-            ),
+            serper_base_url=_env_with_default("SERPER_BASE_URL", "https://google.serper.dev"),
             gemini_api_key=_optional_env("GEMINI_API_KEY"),
             gemini_model=_env_with_default("GEMINI_MODEL", "gemini-3.1-flash-image-preview"),
             gemini_base_url=_env_with_default(
