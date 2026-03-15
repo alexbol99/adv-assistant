@@ -58,6 +58,11 @@ from adv_assistant.media_ingest import (
     NoopOperatorPhotoIngestor,
     OperatorPhotoIngestor,
 )
+from adv_assistant.product_discovery import (
+    DiscoveryStatus,
+    NoopProductDiscoveryService,
+    ProductDiscoveryService,
+)
 from adv_assistant.tasks_queue import InboundTaskPayload
 from adv_assistant.whatsapp import NoopWhatsAppClient, WhatsAppClient
 
@@ -238,6 +243,7 @@ class InboundTaskProcessor:
         *,
         llm_gateway: LLMGateway | None = None,
         enrichment_service: EnrichmentService | None = None,
+        product_discovery_service: ProductDiscoveryService | None = None,
         ad_generation_service: AdGenerationService | None = None,
         render_width: int = 1920,
         render_height: int = 1080,
@@ -248,6 +254,9 @@ class InboundTaskProcessor:
         self._session_factory = session_factory
         self._llm_gateway = llm_gateway or NoopLLMGateway()
         self._enrichment_service = enrichment_service or NoopEnrichmentService()
+        self._product_discovery_service = (
+            product_discovery_service or NoopProductDiscoveryService()
+        )
         self._ad_generation_service = ad_generation_service or NoopAdGenerationService()
         self._render_width = render_width
         self._render_height = render_height
@@ -810,6 +819,23 @@ class InboundTaskProcessor:
                                         "product_brand": current_draft.product_brand,
                                         "enriched_brand": current_draft.enriched_brand,
                                     },
+                                )
+                            # --- Product discovery (text-based search) ---
+                            # After EAN enrichment, try text-based product discovery
+                            # if the draft still lacks a photo and we have info to search.
+                            if (
+                                reply_text is None
+                                and current_draft.photo_url is None
+                                and current_draft.request_type == AdRequestType.SINGLE_PRODUCT
+                            ):
+                                current_draft = await self._discover_product_for_draft(
+                                    payload=payload,
+                                    draft_repo=draft_repo,
+                                    audit_repo=audit_repo,
+                                    current_draft=current_draft,
+                                    language=operator.language,
+                                    message_text=sanitized_text,
+                                    extracted_fields=extracted_fields,
                                 )
                     elif classification.intent == Intent.UNKNOWN and detected_ean is not None:
                         current_draft, enrichment_notice = await self._enrich_current_draft(
@@ -2038,6 +2064,109 @@ class InboundTaskProcessor:
                 continue
             cleaned[key] = value
         return cleaned
+
+
+    async def _discover_product_for_draft(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        language: str,
+        message_text: str,
+        extracted_fields: ExtractedAdFields | None,
+    ) -> AdDraft:
+        """Search retailers + Serper for a product image. Returns updated draft."""
+        # Build search query from already-extracted fields when possible
+        # to avoid an extra LLM call.
+        search_query = _build_discovery_search_query(extracted_fields)
+        if not search_query:
+            # Fall back to lightweight LLM extraction.
+            try:
+                product_query = await self._llm_gateway.extract_product_query(
+                    message_text=message_text,
+                    language=language,
+                )
+                search_query = product_query.to_search_query()
+            except (LLMGatewayError, LLMSchemaError):
+                logger.warning(
+                    "Product query extraction failed (wamid=%s)",
+                    payload.wamid,
+                    exc_info=True,
+                )
+                return current_draft
+
+        if not search_query:
+            return current_draft
+
+        result = await self._product_discovery_service.discover(query=search_query)
+
+        if result.status == DiscoveryStatus.NOT_FOUND or result.product is None:
+            await audit_repo.log(
+                actor="system",
+                action="product_discovery_not_found",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "query": search_query,
+                },
+            )
+            return current_draft
+
+        # Build update fields — never overwrite an operator-uploaded photo.
+        update_fields: dict[str, Any] = {}
+        if result.product.title:
+            update_fields["enriched_description"] = _truncate(result.product.title, 500)
+        if result.product.image_url:
+            update_fields["enriched_image_url"] = _truncate(result.product.image_url, 2000)
+        if current_draft.product_name is None and result.product.title:
+            update_fields["product_name"] = _truncate(result.product.title, 120)
+        if current_draft.photo_url is None and result.product.image_url:
+            update_fields["photo_url"] = _truncate(result.product.image_url, 2000)
+        if result.product.source:
+            update_fields["enrichment_source"] = result.product.source
+
+        if not update_fields:
+            return current_draft
+
+        updated_draft = await draft_repo.update_for_operator_with_version(
+            draft_id=current_draft.id,
+            operator_phone=payload.operator_phone,
+            expected_version=current_draft.version,
+            **update_fields,
+        )
+        if updated_draft is not None:
+            current_draft = updated_draft
+            await audit_repo.log(
+                actor="system",
+                action="product_discovery_applied",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "query": search_query,
+                    "source": result.product.source,
+                    "search_method": result.search_method,
+                    "title": result.product.title,
+                },
+            )
+        return current_draft
+
+
+def _build_discovery_search_query(
+    extracted_fields: ExtractedAdFields | None,
+) -> str:
+    """Combine already-extracted ad fields into a search query string."""
+    if extracted_fields is None:
+        return ""
+    parts: list[str] = []
+    if extracted_fields.product_brand:
+        parts.append(extracted_fields.product_brand)
+    if extracted_fields.product_name:
+        parts.append(extracted_fields.product_name)
+    return " ".join(parts)
 
 
 def _resolve_button_action(button_id: str) -> tuple[str | None, str]:

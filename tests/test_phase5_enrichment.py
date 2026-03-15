@@ -20,6 +20,7 @@ from adv_assistant.enrichment import (
 )
 from adv_assistant.llm_gateway import (
     ExtractedAdFields,
+    ExtractedProductQuery,
     Intent,
     IntentClassification,
     ReplyGeneration,
@@ -71,6 +72,11 @@ class FakeGateway:
     ) -> ExtractedAdFields:
         return ExtractedAdFields(ean="7290001234567")
 
+    async def extract_product_query(
+        self, *, message_text: str, language: str
+    ) -> ExtractedProductQuery:
+        return ExtractedProductQuery()
+
     async def generate_reply(
         self,
         *,
@@ -94,6 +100,11 @@ class UnknownIntentGateway:
         self, *, message_text: str, language: str, history: list[dict[str, str]]
     ) -> ExtractedAdFields:
         return ExtractedAdFields()
+
+    async def extract_product_query(
+        self, *, message_text: str, language: str
+    ) -> ExtractedProductQuery:
+        return ExtractedProductQuery()
 
     async def generate_reply(
         self,
@@ -159,6 +170,11 @@ class TwoCreateAdGateway:
             currency="ILS",
         )
 
+    async def extract_product_query(
+        self, *, message_text: str, language: str
+    ) -> ExtractedProductQuery:
+        return ExtractedProductQuery()
+
     async def generate_reply(
         self,
         *,
@@ -196,6 +212,11 @@ class BrandConflictGateway:
             currency="ILS",
             ean="7290001234567",
         )
+
+    async def extract_product_query(
+        self, *, message_text: str, language: str
+    ) -> ExtractedProductQuery:
+        return ExtractedProductQuery()
 
     async def generate_reply(
         self,

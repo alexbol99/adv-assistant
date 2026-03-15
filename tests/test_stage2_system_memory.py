@@ -20,6 +20,7 @@ from adv_assistant.db.session import create_engine, create_session_factory, sess
 from adv_assistant.llm_gateway import (
     ExtractedAdFields,
     ExtractedBrandingFields,
+    ExtractedProductQuery,
     Intent,
     IntentClassification,
     ReplyGeneration,
@@ -76,6 +77,11 @@ class SequencedGateway:
         if self._branding_fields:
             return self._branding_fields.pop(0)
         return ExtractedBrandingFields()
+
+    async def extract_product_query(
+        self, *, message_text: str, language: str
+    ) -> ExtractedProductQuery:
+        return ExtractedProductQuery()
 
     async def generate_reply(
         self,

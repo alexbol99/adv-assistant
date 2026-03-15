@@ -14,6 +14,7 @@ from adv_assistant.llm_gateway import (
     BUTTON_CONFIRM_DELETE_ALL,
     ExtractedAdFields,
     ExtractedBrandingFields,
+    ExtractedProductQuery,
     Intent,
     IntentClassification,
     LLMGatewayError,
@@ -63,6 +64,11 @@ class FakeGateway:
     ) -> ExtractedAdFields:
         self.extract_calls += 1
         return self.extracted
+
+    async def extract_product_query(
+        self, *, message_text: str, language: str
+    ) -> ExtractedProductQuery:
+        return ExtractedProductQuery()
 
     async def generate_reply(
         self,

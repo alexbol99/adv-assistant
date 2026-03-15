@@ -30,6 +30,7 @@ from adv_assistant.db.session import create_engine, create_session_factory, sess
 from adv_assistant.enrichment import EnrichedProduct
 from adv_assistant.llm_gateway import (
     ExtractedAdFields,
+    ExtractedProductQuery,
     Intent,
     IntentClassification,
     ReplyGeneration,
@@ -69,6 +70,11 @@ class FakeGateway:
             currency="ILS",
             promo_text="Fresh and tasty",
         )
+
+    async def extract_product_query(
+        self, *, message_text: str, language: str
+    ) -> ExtractedProductQuery:
+        return ExtractedProductQuery()
 
     async def generate_reply(
         self,
