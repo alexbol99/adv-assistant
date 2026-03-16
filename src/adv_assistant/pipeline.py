@@ -41,8 +41,8 @@ from adv_assistant.enrichment import (
 from adv_assistant.llm_gateway import (
     BUTTON_CANCEL_DELETE_ALL,
     BUTTON_CANCEL_PUBLISH,
-    BUTTON_CONFIRM_PRODUCT_SELECTION,
     BUTTON_CONFIRM_DELETE_ALL,
+    BUTTON_CONFIRM_PRODUCT_SELECTION,
     BUTTON_CONFIRM_PUBLISH,
     BUTTON_REJECT_PRODUCT_SELECTION,
     ExtractedAdFields,
@@ -482,7 +482,9 @@ class InboundTaskProcessor:
                         )
                         if updated_draft is None:
                             deterministic_action = "product_confirmation_stale"
-                            reply_text = "This draft was already changed. Please refresh and try again."
+                            reply_text = (
+                                "This draft was already changed. Please refresh and try again."
+                            )
                             await audit_repo.log(
                                 actor="system",
                                 action="draft_stale_write_detected",
@@ -520,7 +522,8 @@ class InboundTaskProcessor:
                             pending_followup_question = generation_result.pending_followup_question
                             publish_buttons_prompt = generation_result.publish_buttons_prompt
                             deterministic_action = (
-                                generation_result.deterministic_action or "product_confirmation_approved"
+                                generation_result.deterministic_action
+                                or "product_confirmation_approved"
                             )
                     elif button_payload_id == BUTTON_REJECT_PRODUCT_SELECTION:
                         intent_value = button_payload_id
@@ -536,7 +539,9 @@ class InboundTaskProcessor:
                         )
                         if updated_draft is None:
                             deterministic_action = "product_confirmation_stale"
-                            reply_text = "This draft was already changed. Please refresh and try again."
+                            reply_text = (
+                                "This draft was already changed. Please refresh and try again."
+                            )
                             await audit_repo.log(
                                 actor="system",
                                 action="draft_stale_write_detected",
@@ -723,7 +728,9 @@ class InboundTaskProcessor:
                                 current_draft = generation_result.draft
                                 reply_text = generation_result.reply_text
                                 generated_image_url = generation_result.generated_image_url
-                                pending_followup_question = generation_result.pending_followup_question
+                                pending_followup_question = (
+                                    generation_result.pending_followup_question
+                                )
                                 publish_buttons_prompt = generation_result.publish_buttons_prompt
                                 deterministic_action = (
                                     generation_result.deterministic_action
@@ -1988,7 +1995,9 @@ class InboundTaskProcessor:
 
             # Commit now so the DB lock is released while we wait for generation.
             await session.commit()
-            poll_result = await self._ad_generation_service.wait_for_completion(job_id=submission.job_id)
+            poll_result = await self._ad_generation_service.wait_for_completion(
+                job_id=submission.job_id
+            )
 
             if poll_result.status == NanoBananaJobStatus.COMPLETED and poll_result.output_image_url:
                 completed_draft = await draft_repo.update_for_operator_with_version(
@@ -2127,8 +2136,7 @@ class InboundTaskProcessor:
                 },
             )
             logger.exception(
-                "Generation flow failed "
-                "(wamid=%s, operator_phone=%s, draft_id=%s, mode=%s)",
+                "Generation flow failed (wamid=%s, operator_phone=%s, draft_id=%s, mode=%s)",
                 payload.wamid,
                 payload.operator_phone,
                 current_draft.id,
@@ -2927,7 +2935,7 @@ def _product_confirmation_caption(language: str, product_name: str | None) -> st
     resolved_name = (product_name or "").strip()
     if language.lower() == "he":
         if resolved_name:
-            return f"מצאתי תמונה עבור \"{resolved_name}\". זה המוצר שהתכוונת אליו?"
+            return f'מצאתי תמונה עבור "{resolved_name}". זה המוצר שהתכוונת אליו?'
         return "מצאתי תמונה למוצר. זה המוצר שהתכוונת אליו?"
     if resolved_name:
         return f'I found an image for "{resolved_name}". Is this the product you meant?'
@@ -2961,7 +2969,10 @@ def _product_confirmation_use_buttons_reply(language: str) -> str:
 def _product_confirmation_rejected_reply(language: str) -> str:
     if language.lower() == "he":
         return "בסדר, לא אשתמש בתמונה הזאת. כתוב לי שם מוצר מדויק יותר ואחפש שוב."
-    return "Okay, I will not use this image. Send a more specific product name and I will search again."
+    return (
+        "Okay, I will not use this image. "
+        "Send a more specific product name and I will search again."
+    )
 
 
 def _product_confirmation_generation_instruction(language: str) -> str:
