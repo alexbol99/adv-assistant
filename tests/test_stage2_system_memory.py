@@ -109,15 +109,51 @@ class FakeGenerationService:
         wamid: str,
         width: int,
         height: int,
+        variant_slot: int | None = None,
     ) -> GenerationSubmission:
         self.submitted_drafts.append(draft)
         index = len(self.submitted_drafts)
+        slot_suffix = f"-slot{variant_slot}" if variant_slot is not None else ""
         return GenerationSubmission(
-            job_id=f"job-{index}",
-            idempotency_key=f"key-{index}",
+            job_id=f"job-{index}{slot_suffix}",
+            idempotency_key=f"key-{index}{slot_suffix}",
             mode=mode,
-            request_payload={"draft_id": str(draft.draft_id)},
+            request_payload={"draft_id": str(draft.draft_id), "prompt": "test-prompt"},
         )
+
+    async def submit_variant_pair(
+        self,
+        *,
+        draft: GenerationDraftInput,
+        mode: GenerationMode,
+        instruction_text: str,
+        wamid: str,
+        width: int,
+        height: int,
+    ) -> list[GenerationSubmission]:
+        submissions = []
+        for slot in (1, 2):
+            sub = await self.submit_for_draft(
+                draft=draft,
+                mode=mode,
+                instruction_text=instruction_text,
+                wamid=wamid,
+                width=width,
+                height=height,
+                variant_slot=slot,
+            )
+            submissions.append(sub)
+        return submissions
+
+    async def poll_variant_pair(
+        self,
+        *,
+        submissions: list[GenerationSubmission],
+    ) -> list[GenerationPollResult]:
+        results = []
+        for sub in submissions:
+            results.append(await self.wait_for_completion(job_id=sub.job_id))
+        return results
 
     async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult:
         return GenerationPollResult(
@@ -270,10 +306,10 @@ async def test_system_memory_persists_across_new_drafts_and_flows_to_generation(
 
     assert first.generated_image_url is not None
     assert second.generated_image_url is not None
-    assert len(generation.submitted_drafts) == 2
+    assert len(generation.submitted_drafts) == 4  # 2 generations × 2 variant slots
 
     first_draft = generation.submitted_drafts[0]
-    second_draft = generation.submitted_drafts[1]
+    second_draft = generation.submitted_drafts[2]  # second generation starts at index 2
 
     assert first_draft.draft_id != second_draft.draft_id
     assert first_draft.product_name == "פפריקה"
@@ -349,7 +385,7 @@ async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmat
     )
     assert first.reply_text is not None
     assert "מה סוג העסק שלך" in first.reply_text
-    assert len(generation.submitted_drafts) == 1
+    assert len(generation.submitted_drafts) == 2  # two variant slots per generation
 
     second = await processor.process(
         InboundTaskPayload(
@@ -360,7 +396,7 @@ async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmat
     )
     assert second.reply_text is not None
     assert "הנחיות כלליות לסגנון המודעות" in second.reply_text
-    assert len(generation.submitted_drafts) == 1
+    assert len(generation.submitted_drafts) == 2  # two variant slots per generation
 
     third = await processor.process(
         InboundTaskPayload(
@@ -371,7 +407,7 @@ async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmat
     )
     assert third.reply_text is not None
     assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in third.reply_text
-    assert len(generation.submitted_drafts) == 1
+    assert len(generation.submitted_drafts) == 2  # two variant slots per generation
 
     fourth = await processor.process(
         InboundTaskPayload(
@@ -383,8 +419,8 @@ async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmat
     assert fourth.reply_text is not None
     assert "התצוגה המקדימה מוכנה" in fourth.reply_text
     assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" not in fourth.reply_text
-    assert len(generation.submitted_drafts) == 2
-    assert generation.submitted_drafts[1].price == Decimal("7.90")
+    assert len(generation.submitted_drafts) == 4  # 2 generations × 2 variant slots
+    assert generation.submitted_drafts[2].price == Decimal("7.90")
 
     async with session_scope(session_factory) as session:
         operator = await OperatorRepository(session).get_by_phone(phone)
@@ -435,8 +471,8 @@ async def test_followup_interrupt_create_ad_skips_pending_question_and_generates
         )
     )
     assert second.generated_image_url is not None
-    assert len(generation.submitted_drafts) == 2
-    assert generation.submitted_drafts[1].product_name == "חלב"
+    assert len(generation.submitted_drafts) == 4  # 2 generations × 2 variant slots
+    assert generation.submitted_drafts[2].product_name == "חלב"
 
 
 async def test_regenerate_confirmation_unclear_answer_keeps_pending_state(
@@ -480,7 +516,7 @@ async def test_regenerate_confirmation_unclear_answer_keeps_pending_state(
     )
     assert second.reply_text is not None
     assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in second.reply_text
-    assert len(generation.submitted_drafts) == 1
+    assert len(generation.submitted_drafts) == 2  # two variant slots per generation
 
     async with session_scope(session_factory) as session:
         session_obj = await ConversationSessionRepository(session).get_by_operator_phone(phone)

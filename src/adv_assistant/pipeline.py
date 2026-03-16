@@ -21,12 +21,16 @@ from adv_assistant.db.base import utcnow
 from adv_assistant.db.enums import (
     AdDraftStatus,
     AdRequestType,
+    AdVariantRoundStatus,
+    AdVariantStatus,
     ClassificationStatus,
     PendingQuestionType,
 )
 from adv_assistant.db.models import AdDraft, ConversationSession, Operator
 from adv_assistant.db.repositories import (
     AdDraftRepository,
+    AdVariantRepository,
+    AdVariantRoundRepository,
     AuditEventRepository,
     ConversationSessionRepository,
     OperatorRepository,
@@ -156,6 +160,7 @@ class ProcessInboundResult:
     deterministic_action: str | None = None
     reply_text: str | None = None
     generated_image_url: str | None = None
+    variant_image_urls: list[str] | None = None
     publish_buttons_prompt: str | None = None
     action_buttons_prompt: str | None = None
     action_buttons: list[tuple[str, str]] | None = None
@@ -174,6 +179,7 @@ class _GenerationExecutionResult:
     draft: AdDraft
     reply_text: str | None
     generated_image_url: str | None
+    variant_image_urls: list[str] | None
     pending_question_type: PendingQuestionType
     pending_question_context: dict[str, Any]
     publish_buttons_prompt: str | None
@@ -446,6 +452,7 @@ class InboundTaskProcessor:
             deterministic_action: str | None = None
             reply_text: str | None = None
             generated_image_url: str | None = None
+            variant_image_urls: list[str] | None = None
             publish_buttons_prompt: str | None = None
             action_buttons_prompt: str | None = None
             action_buttons: list[tuple[str, str]] | None = None
@@ -510,6 +517,7 @@ class InboundTaskProcessor:
                             current_draft = generation_result.draft
                             reply_text = generation_result.reply_text
                             generated_image_url = generation_result.generated_image_url
+                            variant_image_urls = generation_result.variant_image_urls
                             pending_question_type = generation_result.pending_question_type
                             pending_question_context = generation_result.pending_question_context
                             publish_buttons_prompt = generation_result.publish_buttons_prompt
@@ -720,6 +728,7 @@ class InboundTaskProcessor:
                                 current_draft = generation_result.draft
                                 reply_text = generation_result.reply_text
                                 generated_image_url = generation_result.generated_image_url
+                                variant_image_urls = generation_result.variant_image_urls
                                 pending_question_type = generation_result.pending_question_type
                                 pending_question_context = (
                                     generation_result.pending_question_context
@@ -1242,6 +1251,7 @@ class InboundTaskProcessor:
                             current_draft = generation_result.draft
                             reply_text = generation_result.reply_text
                             generated_image_url = generation_result.generated_image_url
+                            variant_image_urls = generation_result.variant_image_urls
                             pending_question_type = generation_result.pending_question_type
                             pending_question_context = generation_result.pending_question_context
                             publish_buttons_prompt = generation_result.publish_buttons_prompt
@@ -1408,6 +1418,7 @@ class InboundTaskProcessor:
                 deterministic_action=deterministic_action,
                 reply_text=reply_text,
                 generated_image_url=generated_image_url,
+                variant_image_urls=variant_image_urls,
                 publish_buttons_prompt=publish_buttons_prompt,
                 action_buttons_prompt=action_buttons_prompt,
                 action_buttons=action_buttons,
@@ -2044,23 +2055,25 @@ class InboundTaskProcessor:
             language=operator.language,
         )
         try:
-            submission = await self._ad_generation_service.submit_for_draft(
-                draft=_to_generation_draft_input(
-                    draft=current_draft,
-                    operator=operator,
-                ),
+            draft_input = _to_generation_draft_input(
+                draft=current_draft,
+                operator=operator,
+            )
+            submissions = await self._ad_generation_service.submit_variant_pair(
+                draft=draft_input,
                 mode=mode,
                 instruction_text=instruction_text,
                 wamid=payload.wamid,
                 width=self._render_width,
                 height=self._render_height,
             )
+            primary_job_id = submissions[0].job_id
             updated_draft = await draft_repo.update_for_operator_with_version(
                 draft_id=current_draft.id,
                 operator_phone=payload.operator_phone,
                 expected_version=current_draft.version,
                 status=AdDraftStatus.GENERATING,
-                generation_job_id=submission.job_id,
+                generation_job_id=primary_job_id,
                 awaiting_product_confirmation=False,
             )
             if updated_draft is None:
@@ -2074,6 +2087,7 @@ class InboundTaskProcessor:
                     draft=current_draft,
                     reply_text="This draft was already changed. Please refresh and try again.",
                     generated_image_url=None,
+                    variant_image_urls=None,
                     pending_question_type=PendingQuestionType.NONE,
                     pending_question_context={},
                     publish_buttons_prompt=None,
@@ -2081,43 +2095,102 @@ class InboundTaskProcessor:
                 )
 
             current_draft = updated_draft
+
+            # Create variant round with two pending variant slots.
+            # Use replace_active_round to supersede any existing active round.
+            round_repo = AdVariantRoundRepository(session)
+            existing_rounds = await round_repo.list_by_draft_id(current_draft.id)
+            attempt_no = (existing_rounds[0].attempt_no + 1) if existing_rounds else 1
+            variant_defs = [
+                {
+                    "slot_no": slot + 1,
+                    "status": AdVariantStatus.FAILED,
+                    "prompt_snapshot": submissions[slot].request_payload.get("prompt", ""),
+                }
+                for slot in range(2)
+            ]
+            if existing_rounds:
+                variant_round = await round_repo.replace_active_round(
+                    draft_id=current_draft.id,
+                    attempt_no=attempt_no,
+                    variants=variant_defs,
+                )
+            else:
+                variant_round = await round_repo.create(
+                    draft_id=current_draft.id,
+                    attempt_no=attempt_no,
+                    status=AdVariantRoundStatus.ACTIVE,
+                    variants=variant_defs,
+                )
+
             await audit_repo.log(
                 actor="system",
-                action="generation_job_submitted",
+                action="generation_variant_pair_submitted",
                 operator_phone=payload.operator_phone,
                 metadata={
                     "wamid": payload.wamid,
                     "draft_id": str(current_draft.id),
-                    "job_id": submission.job_id,
-                    "mode": submission.mode.value,
-                    "idempotency_key": submission.idempotency_key,
+                    "round_id": str(variant_round.id),
+                    "job_ids": [s.job_id for s in submissions],
+                    "mode": mode.value,
                 },
             )
             logger.info(
-                "Generation job submitted "
+                "Variant pair submitted "
                 "(wamid=%s, operator_phone=%s, draft_id=%s, "
-                "job_id=%s, mode=%s)",
+                "round_id=%s, job_ids=%s, mode=%s)",
                 payload.wamid,
                 payload.operator_phone,
                 current_draft.id,
-                submission.job_id,
-                submission.mode.value,
+                variant_round.id,
+                [s.job_id for s in submissions],
+                mode.value,
             )
+
+            # Capture variant info before commit expires ORM objects.
+            round_id = variant_round.id
 
             # Commit now so the DB lock is released while we wait for generation.
             await session.commit()
-            poll_result = await self._ad_generation_service.wait_for_completion(
-                job_id=submission.job_id
+            poll_results = await self._ad_generation_service.poll_variant_pair(
+                submissions=submissions,
             )
 
-            if poll_result.status == NanoBananaJobStatus.COMPLETED and poll_result.output_image_url:
+            # Update each variant with poll results.
+            variant_image_urls: list[str] = []
+            all_succeeded = True
+            refreshed_variants = await AdVariantRepository(session).list_by_round_id(round_id)
+            for slot_idx, poll_result in enumerate(poll_results):
+                slot_no = slot_idx + 1
+                variant = next(
+                    (v for v in refreshed_variants if v.slot_no == slot_no),
+                    None,
+                )
+                if variant is None:
+                    all_succeeded = False
+                    continue
+                if (
+                    poll_result.status == NanoBananaJobStatus.COMPLETED
+                    and poll_result.output_image_url
+                ):
+                    variant.status = AdVariantStatus.VALID
+                    variant.image_url = poll_result.output_image_url
+                    variant_image_urls.append(poll_result.output_image_url)
+                else:
+                    variant.status = AdVariantStatus.FAILED
+                    variant.error_code = poll_result.error_code
+                    variant.error_message = poll_result.error_message
+                    all_succeeded = False
+
+            if all_succeeded and len(variant_image_urls) == 2:
+                primary_image_url = variant_image_urls[0]
                 completed_draft = await draft_repo.update_for_operator_with_version(
                     draft_id=current_draft.id,
                     operator_phone=payload.operator_phone,
                     expected_version=current_draft.version,
                     status=AdDraftStatus.PREVIEW_READY,
-                    rendered_image_url=poll_result.output_image_url,
-                    preview_reference_url=poll_result.output_image_url,
+                    rendered_image_url=primary_image_url,
+                    preview_reference_url=primary_image_url,
                     awaiting_product_confirmation=False,
                 )
                 if completed_draft is None:
@@ -2140,24 +2213,24 @@ class InboundTaskProcessor:
                 current_draft = completed_draft
                 await audit_repo.log(
                     actor="system",
-                    action="generation_completed",
+                    action="generation_variant_pair_completed",
                     operator_phone=payload.operator_phone,
                     metadata={
                         "wamid": payload.wamid,
                         "draft_id": str(current_draft.id),
-                        "job_id": submission.job_id,
-                        "output_image_url": poll_result.output_image_url,
+                        "round_id": str(round_id),
+                        "variant_image_urls": variant_image_urls,
                     },
                 )
                 logger.info(
-                    "Generation job completed "
+                    "Variant pair completed "
                     "(wamid=%s, operator_phone=%s, draft_id=%s, "
-                    "job_id=%s, output=%s)",
+                    "round_id=%s, variants=%d)",
                     payload.wamid,
                     payload.operator_phone,
                     current_draft.id,
-                    submission.job_id,
-                    poll_result.output_image_url,
+                    round_id,
+                    len(variant_image_urls),
                 )
                 reply_text = _generation_completed_reply(operator.language)
                 next_question = self._select_next_question(
@@ -2176,13 +2249,19 @@ class InboundTaskProcessor:
                 return _GenerationExecutionResult(
                     draft=current_draft,
                     reply_text=reply_text,
-                    generated_image_url=poll_result.output_image_url,
+                    generated_image_url=primary_image_url,
+                    variant_image_urls=variant_image_urls,
                     pending_question_type=pending_question_type,
                     pending_question_context=pending_question_context,
                     publish_buttons_prompt=_publish_buttons_prompt(operator.language),
                     deterministic_action="generation_completed",
                 )
 
+            # At least one variant failed — mark round as failed.
+            refreshed_round = await round_repo.get_by_id(round_id)
+            if refreshed_round is not None:
+                refreshed_round.status = AdVariantRoundStatus.FAILED
+                refreshed_round.failure_reason = "one or more variants failed generation"
             failed_draft = await draft_repo.update_for_operator_with_version(
                 draft_id=current_draft.id,
                 operator_phone=payload.operator_phone,
@@ -2194,33 +2273,30 @@ class InboundTaskProcessor:
                 current_draft = failed_draft
             await audit_repo.log(
                 actor="system",
-                action="generation_failed",
+                action="generation_variant_pair_failed",
                 operator_phone=payload.operator_phone,
                 metadata={
                     "wamid": payload.wamid,
                     "draft_id": str(current_draft.id),
-                    "job_id": submission.job_id,
-                    "status": poll_result.status.value,
-                    "error_code": poll_result.error_code,
-                    "error_message": poll_result.error_message,
+                    "round_id": str(round_id),
+                    "succeeded_count": len(variant_image_urls),
                 },
             )
             logger.warning(
-                "Generation job failed status "
+                "Variant pair failed "
                 "(wamid=%s, operator_phone=%s, draft_id=%s, "
-                "job_id=%s, status=%s, error_code=%s, error_message=%s)",
+                "round_id=%s, succeeded=%d/2)",
                 payload.wamid,
                 payload.operator_phone,
                 current_draft.id,
-                submission.job_id,
-                poll_result.status.value,
-                poll_result.error_code,
-                poll_result.error_message,
+                round_id,
+                len(variant_image_urls),
             )
             return _GenerationExecutionResult(
                 draft=current_draft,
                 reply_text=_generation_failed_reply(operator.language),
                 generated_image_url=None,
+                variant_image_urls=None,
                 pending_question_type=PendingQuestionType.NONE,
                 pending_question_context={},
                 publish_buttons_prompt=None,
@@ -2259,6 +2335,7 @@ class InboundTaskProcessor:
                 draft=current_draft,
                 reply_text=_generation_failed_reply(operator.language),
                 generated_image_url=None,
+                variant_image_urls=None,
                 pending_question_type=PendingQuestionType.NONE,
                 pending_question_context={},
                 publish_buttons_prompt=None,
