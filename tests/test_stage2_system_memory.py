@@ -351,8 +351,10 @@ async def test_generation_adds_followup_when_system_memory_is_missing(
 
     assert result.status == "processed"
     assert result.reply_text is not None
-    assert "מה סוג העסק שלך" in result.reply_text
-    assert "הנחיות כלליות" not in result.reply_text
+    assert result.action_buttons_prompt is not None  # variant selection shown
+    assert result.action_buttons is not None
+    assert len(result.action_buttons) == 2  # A and B
+    assert result.publish_buttons_prompt is None  # deferred until after variant selection
 
 
 async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmation(
@@ -384,8 +386,24 @@ async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmat
         )
     )
     assert first.reply_text is not None
-    assert "מה סוג העסק שלך" in first.reply_text
+    assert first.action_buttons is not None  # variant selection buttons shown
     assert len(generation.submitted_drafts) == 2  # two variant slots per generation
+
+    # Select variant A to proceed to follow-up questions.
+    variant_select = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-seq-1b",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {"button_reply": {"id": "select_variant_a"}},
+            },
+        )
+    )
+    assert variant_select.reply_text is not None
+    assert "מה סוג העסק שלך" in variant_select.reply_text
+    assert variant_select.publish_buttons_prompt is not None
+    assert len(generation.submitted_drafts) == 2
 
     second = await processor.process(
         InboundTaskPayload(
@@ -396,7 +414,7 @@ async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmat
     )
     assert second.reply_text is not None
     assert "הנחיות כלליות לסגנון המודעות" in second.reply_text
-    assert len(generation.submitted_drafts) == 2  # two variant slots per generation
+    assert len(generation.submitted_drafts) == 2  # no new generation
 
     third = await processor.process(
         InboundTaskPayload(
@@ -407,7 +425,7 @@ async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmat
     )
     assert third.reply_text is not None
     assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in third.reply_text
-    assert len(generation.submitted_drafts) == 2  # two variant slots per generation
+    assert len(generation.submitted_drafts) == 2  # still no new generation
 
     fourth = await processor.process(
         InboundTaskPayload(
@@ -461,8 +479,9 @@ async def test_followup_interrupt_create_ad_skips_pending_question_and_generates
         )
     )
     assert first.reply_text is not None
-    assert "מה סוג העסק שלך" in first.reply_text
+    assert first.action_buttons is not None  # variant selection buttons shown
 
+    # Interrupt with a new CREATE_AD while variant selection is pending.
     second = await processor.process(
         InboundTaskPayload(
             wamid="wamid-stage2-interrupt-2",
@@ -505,7 +524,21 @@ async def test_regenerate_confirmation_unclear_answer_keeps_pending_state(
         )
     )
     assert first.reply_text is not None
-    assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in first.reply_text
+    assert first.action_buttons is not None  # variant selection buttons shown
+
+    # Select variant A to proceed — follow-up (regenerate confirmation) should appear.
+    variant_select = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-unclear-1b",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {"button_reply": {"id": "select_variant_a"}},
+            },
+        )
+    )
+    assert variant_select.reply_text is not None
+    assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in variant_select.reply_text
 
     second = await processor.process(
         InboundTaskPayload(
@@ -550,7 +583,9 @@ async def test_publish_buttons_sent_even_when_followup_pending(
     )
 
     assert result.generated_image_url is not None
-    assert result.publish_buttons_prompt is not None
+    assert result.publish_buttons_prompt is None  # deferred until after variant selection
+    assert result.action_buttons_prompt is not None  # variant selection buttons shown
+    assert result.action_buttons is not None
 
 
 async def test_regenerate_confirmation_decline_returns_publish_buttons(
@@ -589,8 +624,22 @@ async def test_regenerate_confirmation_decline_returns_publish_buttons(
         )
     )
     assert first.reply_text is not None
-    assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in first.reply_text
-    assert first.publish_buttons_prompt is not None
+    assert first.action_buttons is not None  # variant selection buttons shown
+
+    # Select variant A to proceed to regenerate confirmation.
+    variant_select = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-decline-1b",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {"button_reply": {"id": "select_variant_a"}},
+            },
+        )
+    )
+    assert variant_select.reply_text is not None
+    assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in variant_select.reply_text
+    assert variant_select.publish_buttons_prompt is not None
 
     second = await processor.process(
         InboundTaskPayload(

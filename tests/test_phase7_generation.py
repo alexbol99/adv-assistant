@@ -1378,7 +1378,7 @@ async def test_pipeline_product_confirmation_button_approves_and_generates(
             .first()
         )
         assert session_obj is not None
-        assert session_obj.pending_question_type == PendingQuestionType.MISSING_INFO
+        assert session_obj.pending_question_type == PendingQuestionType.VARIANT_SELECTION
 
 
 async def test_pipeline_product_confirmation_button_rejects_and_clears_photo(
@@ -1551,8 +1551,9 @@ async def test_pipeline_generates_preview_without_price_and_requests_followup(
     assert result.deterministic_action == "generation_completed"
     assert result.generated_image_url == "https://storage.googleapis.com/media/preview-no-price.png"
     assert result.reply_text is not None
-    assert "preview is ready" in result.reply_text.lower()
-    assert "price" in result.reply_text.lower()
+    assert result.action_buttons_prompt is not None  # variant selection shown
+    assert result.action_buttons is not None
+    assert result.publish_buttons_prompt is None  # deferred until after variant selection
     assert fake_generation.calls == 2  # two variant slots
     assert fake_generation.last_draft is not None
     assert fake_generation.last_draft.price is None

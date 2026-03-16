@@ -51,6 +51,8 @@ from adv_assistant.llm_gateway import (
     BUTTON_CONFIRM_PRODUCT_SELECTION,
     BUTTON_CONFIRM_PUBLISH,
     BUTTON_REJECT_PRODUCT_SELECTION,
+    BUTTON_SELECT_VARIANT_A,
+    BUTTON_SELECT_VARIANT_B,
     ExtractedAdFields,
     Intent,
     IntentClassification,
@@ -183,6 +185,8 @@ class _GenerationExecutionResult:
     pending_question_type: PendingQuestionType
     pending_question_context: dict[str, Any]
     publish_buttons_prompt: str | None
+    action_buttons_prompt: str | None
+    action_buttons: list[tuple[str, str]] | None
     deterministic_action: str | None
 
 
@@ -521,6 +525,8 @@ class InboundTaskProcessor:
                             pending_question_type = generation_result.pending_question_type
                             pending_question_context = generation_result.pending_question_context
                             publish_buttons_prompt = generation_result.publish_buttons_prompt
+                            action_buttons_prompt = generation_result.action_buttons_prompt
+                            action_buttons = generation_result.action_buttons
                             deterministic_action = (
                                 generation_result.deterministic_action
                                 or "product_confirmation_approved"
@@ -565,6 +571,83 @@ class InboundTaskProcessor:
                         deterministic_action = "product_confirmation_reprompt"
                         intent_value = deterministic_action
                         reply_text = _product_confirmation_use_buttons_reply(operator.language)
+                elif pending_question_type == PendingQuestionType.VARIANT_SELECTION:
+                    if button_payload_id in (
+                        BUTTON_SELECT_VARIANT_A,
+                        BUTTON_SELECT_VARIANT_B,
+                    ):
+                        slot_no = 1 if button_payload_id == BUTTON_SELECT_VARIANT_A else 2
+                        slot_label = "A" if slot_no == 1 else "B"
+                        intent_value = button_payload_id
+                        round_id_str = pending_question_context.get("round_id")
+                        selected_variant = None
+                        if round_id_str:
+                            round_id_val = uuid.UUID(round_id_str)
+                            variants = await AdVariantRepository(session).list_by_round_id(
+                                round_id_val
+                            )
+                            selected_variant = next(
+                                (v for v in variants if v.slot_no == slot_no),
+                                None,
+                            )
+                        if selected_variant is not None:
+                            updated_draft = await draft_repo.update_for_operator_with_version(
+                                draft_id=current_draft.id,
+                                operator_phone=payload.operator_phone,
+                                expected_version=current_draft.version,
+                                selected_variant_id=selected_variant.id,
+                                selected_round_id=selected_variant.round_id,
+                                rendered_image_url=selected_variant.image_url,
+                                preview_reference_url=selected_variant.image_url,
+                            )
+                            if updated_draft is None:
+                                deterministic_action = "variant_selection_stale"
+                                reply_text = (
+                                    "This draft was already changed. "
+                                    "Please refresh and try again."
+                                )
+                            else:
+                                current_draft = updated_draft
+                                deterministic_action = "variant_selected"
+                                base_reply = _variant_selected_reply(
+                                    operator.language, slot_label
+                                )
+                                publish_buttons_prompt = _publish_buttons_prompt(
+                                    operator.language
+                                )
+                                # Check for follow-up questions after selection.
+                                next_q = self._select_next_question(
+                                    current_draft=current_draft,
+                                    operator=operator,
+                                    after_preview_generation=True,
+                                    allow_regenerate_confirmation=True,
+                                )
+                                if next_q is not None:
+                                    pending_question_type = next_q.pending_question_type
+                                    pending_question_context = next_q.pending_question_context
+                                    reply_text = f"{base_reply}\n\n{next_q.prompt_text}"
+                                else:
+                                    pending_question_type = PendingQuestionType.NONE
+                                    pending_question_context = {}
+                                    reply_text = base_reply
+                                await audit_repo.log(
+                                    actor="system",
+                                    action="variant_selected",
+                                    operator_phone=payload.operator_phone,
+                                    metadata={
+                                        "wamid": payload.wamid,
+                                        "draft_id": str(current_draft.id),
+                                        "variant_id": str(selected_variant.id),
+                                        "slot_no": slot_no,
+                                    },
+                                )
+                        else:
+                            deterministic_action = "variant_selection_failed"
+                            reply_text = _variant_selection_use_buttons_reply(operator.language)
+                    else:
+                        deterministic_action = "variant_selection_reprompt"
+                        intent_value = deterministic_action
+                        reply_text = _variant_selection_use_buttons_reply(operator.language)
                 elif pending_question_type == PendingQuestionType.CLASSIFICATION:
                     reply_text = _classification_prompt(operator.language)
                     deterministic_action = "classification_reprompt"
@@ -734,6 +817,8 @@ class InboundTaskProcessor:
                                     generation_result.pending_question_context
                                 )
                                 publish_buttons_prompt = generation_result.publish_buttons_prompt
+                                action_buttons_prompt = generation_result.action_buttons_prompt
+                                action_buttons = generation_result.action_buttons
                                 deterministic_action = (
                                     generation_result.deterministic_action
                                     or "product_confirmation_approved"
@@ -1255,6 +1340,8 @@ class InboundTaskProcessor:
                             pending_question_type = generation_result.pending_question_type
                             pending_question_context = generation_result.pending_question_context
                             publish_buttons_prompt = generation_result.publish_buttons_prompt
+                            action_buttons_prompt = generation_result.action_buttons_prompt
+                            action_buttons = generation_result.action_buttons
                             if generation_result.deterministic_action is not None:
                                 deterministic_action = generation_result.deterministic_action
 
@@ -2091,6 +2178,8 @@ class InboundTaskProcessor:
                     pending_question_type=PendingQuestionType.NONE,
                     pending_question_context={},
                     publish_buttons_prompt=None,
+                    action_buttons_prompt=None,
+                    action_buttons=None,
                     deterministic_action=None,
                 )
 
@@ -2204,9 +2293,12 @@ class InboundTaskProcessor:
                         draft=current_draft,
                         reply_text="This draft was already changed. Please refresh and try again.",
                         generated_image_url=None,
+                        variant_image_urls=None,
                         pending_question_type=PendingQuestionType.NONE,
                         pending_question_context={},
                         publish_buttons_prompt=None,
+                        action_buttons_prompt=None,
+                        action_buttons=None,
                         deterministic_action=None,
                     )
 
@@ -2233,27 +2325,17 @@ class InboundTaskProcessor:
                     len(variant_image_urls),
                 )
                 reply_text = _generation_completed_reply(operator.language)
-                next_question = self._select_next_question(
-                    current_draft=current_draft,
-                    operator=operator,
-                    after_preview_generation=True,
-                    allow_regenerate_confirmation=not followup_regen_requested,
-                )
-                pending_question_type = PendingQuestionType.NONE
-                pending_question_context: dict[str, Any] = {}
-                if next_question is not None:
-                    pending_question_type = next_question.pending_question_type
-                    pending_question_context = next_question.pending_question_context
-                    reply_text = f"{reply_text}\n\n{next_question.prompt_text}"
 
                 return _GenerationExecutionResult(
                     draft=current_draft,
                     reply_text=reply_text,
                     generated_image_url=primary_image_url,
                     variant_image_urls=variant_image_urls,
-                    pending_question_type=pending_question_type,
-                    pending_question_context=pending_question_context,
-                    publish_buttons_prompt=_publish_buttons_prompt(operator.language),
+                    pending_question_type=PendingQuestionType.VARIANT_SELECTION,
+                    pending_question_context={"round_id": str(round_id)},
+                    publish_buttons_prompt=None,
+                    action_buttons_prompt=_variant_selection_prompt(operator.language),
+                    action_buttons=_variant_selection_buttons(operator.language),
                     deterministic_action="generation_completed",
                 )
 
@@ -2300,6 +2382,8 @@ class InboundTaskProcessor:
                 pending_question_type=PendingQuestionType.NONE,
                 pending_question_context={},
                 publish_buttons_prompt=None,
+                action_buttons_prompt=None,
+                action_buttons=None,
                 deterministic_action="generation_failed",
             )
         except AdGenerationError as exc:
@@ -2339,6 +2423,8 @@ class InboundTaskProcessor:
                 pending_question_type=PendingQuestionType.NONE,
                 pending_question_context={},
                 publish_buttons_prompt=None,
+                action_buttons_prompt=None,
+                action_buttons=None,
                 deterministic_action="generation_failed",
             )
 
@@ -3276,6 +3362,38 @@ def _publish_buttons_prompt(language: str) -> str:
     if language.lower() == "he":
         return "לפרסם את המודעה הזו ל-CMS?"
     return "Publish this ad to CMS?"
+
+
+def _variant_selection_prompt(language: str) -> str:
+    if language.lower() == "he":
+        return "איזו גרסה אתה מעדיף?"
+    return "Which variant do you prefer?"
+
+
+def _variant_selection_buttons(
+    language: str,
+) -> list[tuple[str, str]]:
+    if language.lower() == "he":
+        return [
+            (BUTTON_SELECT_VARIANT_A, "גרסה A"),
+            (BUTTON_SELECT_VARIANT_B, "גרסה B"),
+        ]
+    return [
+        (BUTTON_SELECT_VARIANT_A, "Variant A"),
+        (BUTTON_SELECT_VARIANT_B, "Variant B"),
+    ]
+
+
+def _variant_selected_reply(language: str, slot_label: str) -> str:
+    if language.lower() == "he":
+        return f"גרסה {slot_label} נבחרה. תרצה לפרסם את המודעה?"
+    return f"Variant {slot_label} selected. Would you like to publish this ad?"
+
+
+def _variant_selection_use_buttons_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "אנא השתמש בכפתורים לבחירת הגרסה."
+    return "Please use the buttons to select a variant."
 
 
 def _coerce_positive_int(value: object) -> int | None:
