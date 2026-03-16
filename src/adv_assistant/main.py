@@ -376,7 +376,12 @@ async def _validate_schema_compatibility(
             "store_type",
             "creative_guidance",
         },
-        "conversation_session": {"pending_upload_type", "pending_followup_question"},
+        "conversation_session": {
+            "pending_upload_type",
+            "pending_followup_question",
+            "pending_question_type",
+            "pending_question_context",
+        },
         "ad_draft": {"product_brand"},
     }
     if settings.enrichment_enabled:
