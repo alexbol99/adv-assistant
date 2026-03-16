@@ -20,6 +20,7 @@ class WhatsAppClient(Protocol):
         to_phone: str,
         body_text: str,
         buttons: list[tuple[str, str]],
+        header_image_url: str | None = None,
     ) -> None: ...
 
     async def close(self) -> None: ...
@@ -44,6 +45,7 @@ class NoopWhatsAppClient:
         to_phone: str,
         body_text: str,
         buttons: list[tuple[str, str]],
+        header_image_url: str | None = None,
     ) -> None:
         return None
 
@@ -113,6 +115,7 @@ class MetaWhatsAppClient:
         to_phone: str,
         body_text: str,
         buttons: list[tuple[str, str]],
+        header_image_url: str | None = None,
     ) -> None:
         interactive_buttons = [
             {
@@ -124,6 +127,17 @@ class MetaWhatsAppClient:
         if not interactive_buttons:
             raise ValueError("at least one button is required")
 
+        interactive_payload: dict[str, object] = {
+            "type": "button",
+            "body": {"text": body_text[:1024]},
+            "action": {"buttons": interactive_buttons},
+        }
+        if header_image_url:
+            interactive_payload["header"] = {
+                "type": "image",
+                "image": {"link": header_image_url},
+            }
+
         response = await self._client.post(
             self._url,
             headers=self._auth_header,
@@ -131,11 +145,7 @@ class MetaWhatsAppClient:
                 "messaging_product": "whatsapp",
                 "to": to_phone,
                 "type": "interactive",
-                "interactive": {
-                    "type": "button",
-                    "body": {"text": body_text[:1024]},
-                    "action": {"buttons": interactive_buttons},
-                },
+                "interactive": interactive_payload,
             },
         )
         response.raise_for_status()

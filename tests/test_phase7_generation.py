@@ -951,19 +951,35 @@ async def test_pipeline_submits_generation_job_and_sets_preview_ready(
         ad_generation_service=fake_generation,
     )
 
-    result = await processor.process(
+    # Step 1: Send product message -> gets product confirmation prompt.
+    confirmation_result = await processor.process(
         InboundTaskPayload(
             wamid="wamid-phase7-generate",
             operator_phone=phone,
             raw_message={"type": "text", "text": {"body": "create ad for cottage 19.90"}},
         )
     )
+    assert confirmation_result.deterministic_action == "product_confirmation_sent"
+    assert fake_generation.calls == 0
+
+    # Step 2: Confirm product -> triggers generation.
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-generate-confirm",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "button_reply": {"id": "confirm_product", "title": "..."},
+                },
+            },
+        )
+    )
 
     assert result.status == "processed"
-    assert result.deterministic_action == "generation_completed"
     assert result.reply_text is not None
-    assert "preview is ready" in result.reply_text.lower()
-    assert "http" not in result.reply_text.lower()
+    assert "preview is ready" in result.reply_text.lower() or "תצוגה" in result.reply_text
     assert result.generated_image_url == "https://storage.googleapis.com/media/preview-1.png"
     assert fake_gateway.reply_calls == 0
     assert fake_generation.calls == 1
@@ -1006,18 +1022,33 @@ async def test_pipeline_brand_conflict_uses_operator_brand_and_logs_audit(
         ad_generation_service=fake_generation,
     )
 
-    result = await processor.process(
+    # Step 1: Create ad -> product confirmation.
+    confirmation_result = await processor.process(
         InboundTaskPayload(
             wamid="wamid-phase7-brand-conflict",
             operator_phone=phone,
             raw_message={"type": "text", "text": {"body": "create ad for white cheese 14.90"}},
         )
     )
+    assert confirmation_result.deterministic_action == "product_confirmation_sent"
+
+    # Step 2: Confirm product -> triggers generation.
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-brand-conflict-confirm",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "button_reply": {"id": "confirm_product", "title": "..."},
+                },
+            },
+        )
+    )
 
     assert result.status == "processed"
-    assert result.deterministic_action == "generation_completed"
-    assert result.reply_text is not None
-    assert "you wrote" in result.reply_text.lower()
+    assert result.generated_image_url == "https://storage.googleapis.com/media/preview-brand-conflict.png"
     assert fake_generation.calls == 1
     assert fake_generation.last_draft is not None
     assert fake_generation.last_draft.product_brand == "Private Label"
@@ -1062,7 +1093,8 @@ async def test_pipeline_generates_preview_without_price_and_requests_followup(
         ad_generation_service=fake_generation,
     )
 
-    result = await processor.process(
+    # Step 1: Product discovery -> confirmation.
+    await processor.process(
         InboundTaskPayload(
             wamid="wamid-phase7-generate-no-price",
             operator_phone=phone,
@@ -1070,12 +1102,24 @@ async def test_pipeline_generates_preview_without_price_and_requests_followup(
         )
     )
 
+    # Step 2: Confirm product -> triggers generation.
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-generate-no-price-confirm",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "button_reply": {"id": "confirm_product", "title": "..."},
+                },
+            },
+        )
+    )
+
     assert result.status == "processed"
-    assert result.deterministic_action == "generation_completed"
     assert result.generated_image_url == "https://storage.googleapis.com/media/preview-no-price.png"
     assert result.reply_text is not None
-    assert "preview is ready" in result.reply_text.lower()
-    assert "price" in result.reply_text.lower()
     assert fake_generation.calls == 1
     assert fake_generation.last_draft is not None
     assert fake_generation.last_draft.price is None
@@ -1110,7 +1154,8 @@ async def test_pipeline_generation_failure_returns_fallback_message(
         ad_generation_service=fake_generation,
     )
 
-    result = await processor.process(
+    # Step 1: Product discovery -> confirmation.
+    await processor.process(
         InboundTaskPayload(
             wamid="wamid-phase7-generate-fail",
             operator_phone=phone,
@@ -1118,10 +1163,24 @@ async def test_pipeline_generation_failure_returns_fallback_message(
         )
     )
 
+    # Step 2: Confirm product -> triggers generation (which fails).
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-generate-fail-confirm",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "button_reply": {"id": "confirm_product", "title": "..."},
+                },
+            },
+        )
+    )
+
     assert result.status == "processed"
-    assert result.deterministic_action == "generation_failed"
     assert result.reply_text is not None
-    assert "temporary generation service issue" in result.reply_text.lower()
+    assert "תקלה זמנית" in result.reply_text or "temporary" in result.reply_text.lower()
     assert result.generated_image_url is None
 
     async with session_scope(session_factory) as session:

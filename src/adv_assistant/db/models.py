@@ -119,6 +119,7 @@ class AdDraft(TimestampMixin, Base):
     promo_text: Mapped[str | None] = mapped_column(String(240), nullable=True)
     ean: Mapped[str | None] = mapped_column(String(32), nullable=True)
     photo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    enriched_product_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
     enriched_brand: Mapped[str | None] = mapped_column(String(120), nullable=True)
     enriched_category: Mapped[str | None] = mapped_column(String(120), nullable=True)
     enriched_description: Mapped[str | None] = mapped_column(String(500), nullable=True)

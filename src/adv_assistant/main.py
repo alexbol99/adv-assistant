@@ -32,6 +32,7 @@ from adv_assistant.enrichment import (
     NoopProductLookupProvider,
     OpenFoodFactsProvider,
     ProviderChainEnrichmentService,
+    SerperImageSearchProvider,
 )
 from adv_assistant.ingress import (
     extract_inbound_messages,
@@ -132,6 +133,15 @@ def _build_whatsapp_client(settings: Settings) -> WhatsAppClient:
 def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentService:
     if not settings.enrichment_enabled:
         return ProviderChainEnrichmentService(providers=[])
+
+    image_search_provider = None
+    if settings.serper_api_key:
+        image_search_provider = SerperImageSearchProvider(
+            api_key=settings.serper_api_key,
+            base_url=settings.serper_base_url,
+            timeout_seconds=settings.serper_timeout_seconds,
+        )
+
     return ProviderChainEnrichmentService(
         providers=[
             OpenFoodFactsProvider(
@@ -141,8 +151,8 @@ def _build_enrichment_service(settings: Settings) -> ProviderChainEnrichmentServ
                 retry_base_seconds=settings.enrichment_retry_base_seconds,
             ),
             NoopProductLookupProvider("ean_fallback"),
-            NoopProductLookupProvider("web_search"),
-        ]
+        ],
+        image_search_provider=image_search_provider,
     )
 
 

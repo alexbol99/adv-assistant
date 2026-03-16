@@ -64,10 +64,27 @@ class ProductLookupProvider(Protocol):
     async def close(self) -> None: ...
 
 
+class ImageSearchProvider(Protocol):
+    """Provider that can look up a product image by name (no EAN required)."""
+
+    @property
+    def source(self) -> str: ...
+
+    async def lookup_by_name(
+        self, *, product_name: str, language: str
+    ) -> EnrichedProduct | None: ...
+
+    async def close(self) -> None: ...
+
+
 class EnrichmentService(Protocol):
     async def decode_ean_from_image(self, image_bytes: bytes) -> str | None: ...
 
     async def enrich_by_ean(self, *, ean: str, language: str) -> EnrichedProduct | None: ...
+
+    async def enrich_by_name(
+        self, *, product_name: str, language: str
+    ) -> EnrichedProduct | None: ...
 
     async def close(self) -> None: ...
 
@@ -219,18 +236,83 @@ class OpenFoodFactsProvider:
             await self._client.aclose()
 
 
+class SerperImageSearchProvider:
+    """Looks up a product image by name using the Serper Google Images API."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str = "https://google.serper.dev",
+        timeout_seconds: float = 8.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._api_key = api_key
+        self._owns_client = client is None
+        self._client = client or httpx.AsyncClient(
+            base_url=base_url.rstrip("/"),
+            timeout=timeout_seconds,
+        )
+
+    @property
+    def source(self) -> str:
+        return "serper_images"
+
+    async def lookup_by_name(
+        self, *, product_name: str, language: str
+    ) -> EnrichedProduct | None:
+        try:
+            response = await self._client.post(
+                "/images",
+                headers={
+                    "X-API-KEY": self._api_key,
+                    "Content-Type": "application/json",
+                },
+                json={"q": product_name, "num": 3},
+            )
+            response.raise_for_status()
+        except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+            logger.warning(
+                "Serper image search failed for product_name=%r: %s",
+                product_name,
+                exc,
+            )
+            return None
+
+        payload = response.json()
+        images = payload.get("images")
+        if not isinstance(images, list) or not images:
+            return None
+
+        # Pick the first result with an imageUrl.
+        for img in images:
+            image_url = img.get("imageUrl")
+            if isinstance(image_url, str) and image_url.strip():
+                return EnrichedProduct(
+                    image_url=image_url.strip(),
+                    source=self.source,
+                )
+        return None
+
+    async def close(self) -> None:
+        if self._owns_client:
+            await self._client.aclose()
+
+
 class ProviderChainEnrichmentService:
     def __init__(
         self,
         *,
         barcode_decoder: BarcodeDecoder | None = None,
         providers: list[ProductLookupProvider] | None = None,
+        image_search_provider: ImageSearchProvider | None = None,
     ) -> None:
         self._barcode_decoder = barcode_decoder or BarcodeDecoderChain(
             primary=NoopBarcodeDecoder(),
             fallback=NoopBarcodeDecoder(),
         )
         self._providers = providers or []
+        self._image_search_provider = image_search_provider
 
     async def decode_ean_from_image(self, image_bytes: bytes) -> str | None:
         return await self._barcode_decoder.decode_ean(image_bytes)
@@ -248,9 +330,20 @@ class ProviderChainEnrichmentService:
             return result
         return None
 
+    async def enrich_by_name(
+        self, *, product_name: str, language: str
+    ) -> EnrichedProduct | None:
+        if self._image_search_provider is None:
+            return None
+        return await self._image_search_provider.lookup_by_name(
+            product_name=product_name, language=language,
+        )
+
     async def close(self) -> None:
         for provider in self._providers:
             await provider.close()
+        if self._image_search_provider is not None:
+            await self._image_search_provider.close()
 
 
 class NoopEnrichmentService:
@@ -258,6 +351,11 @@ class NoopEnrichmentService:
         return None
 
     async def enrich_by_ean(self, *, ean: str, language: str) -> EnrichedProduct | None:
+        return None
+
+    async def enrich_by_name(
+        self, *, product_name: str, language: str
+    ) -> EnrichedProduct | None:
         return None
 
     async def close(self) -> None:

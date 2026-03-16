@@ -42,7 +42,9 @@ from adv_assistant.llm_gateway import (
     BUTTON_CANCEL_DELETE_ALL,
     BUTTON_CANCEL_PUBLISH,
     BUTTON_CONFIRM_DELETE_ALL,
+    BUTTON_CONFIRM_PRODUCT,
     BUTTON_CONFIRM_PUBLISH,
+    BUTTON_REJECT_PRODUCT,
     ExtractedAdFields,
     Intent,
     IntentClassification,
@@ -136,6 +138,16 @@ class RequestTypeDecision:
     request_type: AdRequestType
     resolved: bool
     extracted_fields: ExtractedAdFields | None = None
+
+
+@dataclass(slots=True)
+class _GenerationFlowResult:
+    draft: AdDraft
+    reply_text: str | None = None
+    deterministic_action: str | None = None
+    generated_image_url: str | None = None
+    pending_followup_question: str | None = None
+    publish_buttons_prompt: str | None = None
 
 
 @dataclass(slots=True)
@@ -441,6 +453,87 @@ class InboundTaskProcessor:
                     reply_text = _classification_prompt(operator.language)
                     deterministic_action = "classification_reprompt"
                     intent_value = last_user_intent_hint
+                elif (
+                    button_payload_id == BUTTON_CONFIRM_PRODUCT
+                    and pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION
+                ):
+                    # --- PRODUCT CONFIRMED: proceed to generation ---
+                    updated_draft = await draft_repo.update_for_operator_with_version(
+                        draft_id=current_draft.id,
+                        operator_phone=payload.operator_phone,
+                        expected_version=current_draft.version,
+                        awaiting_product_confirmation=False,
+                    )
+                    if updated_draft is not None:
+                        current_draft = updated_draft
+                    pending_question_type = PendingQuestionType.NONE
+                    pending_question_context = {}
+                    deterministic_action = "product_confirmed"
+                    intent_value = deterministic_action
+                    await audit_repo.log(
+                        actor="system",
+                        action="product_confirmed",
+                        operator_phone=payload.operator_phone,
+                        metadata={
+                            "wamid": payload.wamid,
+                            "draft_id": str(current_draft.id),
+                        },
+                    )
+                    if (
+                        self._ad_generation_service.enabled
+                        and _is_ready_for_generation(current_draft)
+                        and current_draft.status == AdDraftStatus.DRAFT
+                    ):
+                        gen_result = await self._run_generation_flow(
+                            payload=payload,
+                            session=session,
+                            draft_repo=draft_repo,
+                            audit_repo=audit_repo,
+                            operator=operator,
+                            current_draft=current_draft,
+                            mode=GenerationMode.FRESH,
+                            instruction_text="",
+                            followup_regen_requested=False,
+                        )
+                        current_draft = gen_result.draft
+                        reply_text = gen_result.reply_text
+                        if gen_result.deterministic_action is not None:
+                            deterministic_action = gen_result.deterministic_action
+                        generated_image_url = gen_result.generated_image_url
+                        if gen_result.pending_followup_question is not None:
+                            pending_followup_question = (
+                                gen_result.pending_followup_question
+                            )
+                        publish_buttons_prompt = gen_result.publish_buttons_prompt
+                    else:
+                        reply_text = _generation_completed_reply(operator.language)
+                elif (
+                    button_payload_id == BUTTON_REJECT_PRODUCT
+                    and pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION
+                ):
+                    # --- PRODUCT REJECTED: move to correction flow ---
+                    updated_draft = await draft_repo.update_for_operator_with_version(
+                        draft_id=current_draft.id,
+                        operator_phone=payload.operator_phone,
+                        expected_version=current_draft.version,
+                        awaiting_product_confirmation=False,
+                    )
+                    if updated_draft is not None:
+                        current_draft = updated_draft
+                    pending_question_type = PendingQuestionType.NONE
+                    pending_question_context = {}
+                    deterministic_action = "product_rejected"
+                    intent_value = deterministic_action
+                    reply_text = _product_rejected_reply(operator.language)
+                    await audit_repo.log(
+                        actor="system",
+                        action="product_rejected",
+                        operator_phone=payload.operator_phone,
+                        metadata={
+                            "wamid": payload.wamid,
+                            "draft_id": str(current_draft.id),
+                        },
+                    )
                 elif button_payload_id == BUTTON_CONFIRM_PUBLISH:
                     deterministic_action = "confirm_publish"
                     intent_value = deterministic_action
@@ -474,6 +567,9 @@ class InboundTaskProcessor:
                     reply_text = _classification_prompt(operator.language)
                     deterministic_action = "classification_reprompt"
                     intent_value = last_user_intent_hint
+                elif pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION:
+                    reply_text = _product_confirmation_reprompt(operator.language)
+                    deterministic_action = "product_confirmation_reprompt"
                 elif pending_upload_type == _PENDING_UPLOAD_LOGO:
                     deterministic_action = "operator_logo_upload"
                     intent_value = deterministic_action
@@ -507,6 +603,13 @@ class InboundTaskProcessor:
                         "wamid": payload.wamid,
                     }
                 )
+                # If waiting for product confirmation buttons, reprompt
+                # instead of processing text normally.
+                if pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION:
+                    reply_text = _product_confirmation_reprompt(operator.language)
+                    deterministic_action = "product_confirmation_reprompt"
+                    intent_value = "product_confirmation_reprompt"
+
                 try:
                     classification: IntentClassification | None = None
                     clear_fields = _parse_operator_clear_request(sanitized_text)
@@ -841,222 +944,94 @@ class InboundTaskProcessor:
                     ):
                         mode = _generation_mode_for_intent(classification.intent)
                         if _is_ready_for_generation(current_draft):
-                            await self._send_generation_in_progress(
-                                to_phone=payload.operator_phone,
-                                language=operator.language,
-                            )
-                            try:
-                                submission = await self._ad_generation_service.submit_for_draft(
-                                    draft=_to_generation_draft_input(
-                                        draft=current_draft,
-                                        operator=operator,
-                                    ),
-                                    mode=mode,
-                                    instruction_text=sanitized_text,
-                                    wamid=payload.wamid,
-                                    width=self._render_width,
-                                    height=self._render_height,
-                                )
-                                updated_draft = await draft_repo.update_for_operator_with_version(
-                                    draft_id=current_draft.id,
-                                    operator_phone=payload.operator_phone,
-                                    expected_version=current_draft.version,
-                                    status=AdDraftStatus.GENERATING,
-                                    generation_job_id=submission.job_id,
-                                )
-                                if updated_draft is None:
-                                    reply_text = (
-                                        "This draft was already changed. "
-                                        "Please refresh and try again."
-                                    )
-                                    await audit_repo.log(
-                                        actor="system",
-                                        action="draft_stale_write_detected",
+                            # --- PRODUCT CONFIRMATION GATE ---
+                            # For CREATE_AD, require explicit product confirmation
+                            # before starting generation.  Regenerate intents skip
+                            # confirmation because the product was already confirmed.
+                            if (
+                                classification.intent == Intent.CREATE_AD
+                                and not current_draft.awaiting_product_confirmation
+                            ):
+                                updated_draft = (
+                                    await draft_repo.update_for_operator_with_version(
+                                        draft_id=current_draft.id,
                                         operator_phone=payload.operator_phone,
-                                        metadata={"wamid": payload.wamid},
+                                        expected_version=current_draft.version,
+                                        awaiting_product_confirmation=True,
                                     )
-                                else:
+                                )
+                                if updated_draft is not None:
                                     current_draft = updated_draft
-                                    await audit_repo.log(
-                                        actor="system",
-                                        action="generation_job_submitted",
-                                        operator_phone=payload.operator_phone,
-                                        metadata={
-                                            "wamid": payload.wamid,
-                                            "draft_id": str(current_draft.id),
-                                            "job_id": submission.job_id,
-                                            "mode": submission.mode.value,
-                                            "idempotency_key": submission.idempotency_key,
-                                        },
-                                    )
-                                    logger.info(
-                                        "Generation job submitted "
-                                        "(wamid=%s, operator_phone=%s, draft_id=%s, "
-                                        "job_id=%s, mode=%s)",
-                                        payload.wamid,
-                                        payload.operator_phone,
-                                        current_draft.id,
-                                        submission.job_id,
-                                        submission.mode.value,
-                                    )
-                                    # Commit now so the DB lock is released
-                                    # while we wait for the generation service.
-                                    # expire_on_commit=False keeps loaded
-                                    # objects usable after commit.
-                                    await session.commit()
-                                    poll_result = (
-                                        await self._ad_generation_service.wait_for_completion(
-                                            job_id=submission.job_id
-                                        )
-                                    )
-                                    if (
-                                        poll_result.status == NanoBananaJobStatus.COMPLETED
-                                        and poll_result.output_image_url
-                                    ):
-                                        completed_draft = (
-                                            await draft_repo.update_for_operator_with_version(
-                                                draft_id=current_draft.id,
-                                                operator_phone=payload.operator_phone,
-                                                expected_version=current_draft.version,
-                                                status=AdDraftStatus.PREVIEW_READY,
-                                                rendered_image_url=poll_result.output_image_url,
-                                                preview_reference_url=poll_result.output_image_url,
-                                            )
-                                        )
-                                        if completed_draft is None:
-                                            reply_text = (
-                                                "This draft was already changed. "
-                                                "Please refresh and try again."
-                                            )
-                                            await audit_repo.log(
-                                                actor="system",
-                                                action="draft_stale_write_detected",
-                                                operator_phone=payload.operator_phone,
-                                                metadata={"wamid": payload.wamid},
-                                            )
-                                        else:
-                                            current_draft = completed_draft
-                                            deterministic_action = "generation_completed"
-                                            await audit_repo.log(
-                                                actor="system",
-                                                action="generation_completed",
-                                                operator_phone=payload.operator_phone,
-                                                metadata={
-                                                    "wamid": payload.wamid,
-                                                    "draft_id": str(current_draft.id),
-                                                    "job_id": submission.job_id,
-                                                    "output_image_url": (
-                                                        poll_result.output_image_url
-                                                    ),
-                                                },
-                                            )
-                                            logger.info(
-                                                "Generation job completed "
-                                                "(wamid=%s, operator_phone=%s, draft_id=%s, "
-                                                "job_id=%s, output=%s)",
-                                                payload.wamid,
-                                                payload.operator_phone,
-                                                current_draft.id,
-                                                submission.job_id,
-                                                poll_result.output_image_url,
-                                            )
-                                            generated_image_url = poll_result.output_image_url
-                                            reply_text = _generation_completed_reply(
-                                                operator.language,
-                                            )
-                                            next_followup = _next_followup_question(
-                                                draft=current_draft,
-                                                operator=operator,
-                                            )
-                                            if next_followup is not None:
-                                                pending_followup_question = next_followup
-                                                followup_prompt = _followup_question_prompt(
-                                                    next_followup,
-                                                    operator.language,
-                                                )
-                                                reply_text = f"{reply_text}\n\n{followup_prompt}"
-                                            elif not followup_regen_requested:
-                                                pending_followup_question = (
-                                                    _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION
-                                                )
-                                                reply_text = (
-                                                    f"{reply_text}\n\n"
-                                                    f"{_regenerate_again_prompt(operator.language)}"
-                                                )
-                                            publish_buttons_prompt = _publish_buttons_prompt(
-                                                operator.language
-                                            )
-                                    else:
-                                        failed_draft = (
-                                            await draft_repo.update_for_operator_with_version(
-                                                draft_id=current_draft.id,
-                                                operator_phone=payload.operator_phone,
-                                                expected_version=current_draft.version,
-                                                status=AdDraftStatus.DRAFT,
-                                            )
-                                        )
-                                        if failed_draft is not None:
-                                            current_draft = failed_draft
-                                        deterministic_action = "generation_failed"
-                                        await audit_repo.log(
-                                            actor="system",
-                                            action="generation_failed",
-                                            operator_phone=payload.operator_phone,
-                                            metadata={
-                                                "wamid": payload.wamid,
-                                                "draft_id": str(current_draft.id),
-                                                "job_id": submission.job_id,
-                                                "status": poll_result.status.value,
-                                                "error_code": poll_result.error_code,
-                                                "error_message": poll_result.error_message,
-                                            },
-                                        )
-                                        logger.warning(
-                                            "Generation job failed status "
-                                            "(wamid=%s, operator_phone=%s, draft_id=%s, "
-                                            "job_id=%s, status=%s, error_code=%s, "
-                                            "error_message=%s)",
-                                            payload.wamid,
-                                            payload.operator_phone,
-                                            current_draft.id,
-                                            submission.job_id,
-                                            poll_result.status.value,
-                                            poll_result.error_code,
-                                            poll_result.error_message,
-                                        )
-                                        reply_text = _generation_failed_reply(operator.language)
-                            except AdGenerationError as exc:
-                                if current_draft.status == AdDraftStatus.GENERATING:
-                                    reverted_draft = (
-                                        await draft_repo.update_for_operator_with_version(
-                                            draft_id=current_draft.id,
-                                            operator_phone=payload.operator_phone,
-                                            expected_version=current_draft.version,
-                                            status=AdDraftStatus.DRAFT,
-                                        )
-                                    )
-                                    if reverted_draft is not None:
-                                        current_draft = reverted_draft
-                                reply_text = _generation_failed_reply(operator.language)
+                                pending_question_type = (
+                                    PendingQuestionType.PRODUCT_CONFIRMATION
+                                )
+                                pending_question_context = {
+                                    "draft_id": str(current_draft.id),
+                                    "product_name": current_draft.product_name,
+                                    "enriched_product_name": current_draft.enriched_product_name,
+                                    "product_brand": (
+                                        current_draft.enriched_brand
+                                        or current_draft.product_brand
+                                    ),
+                                    "image_url": (
+                                        current_draft.enriched_image_url
+                                        or current_draft.photo_url
+                                    ),
+                                    "enrichment_source": current_draft.enrichment_source,
+                                }
+                                await self._send_product_confirmation(
+                                    to_phone=payload.operator_phone,
+                                    draft=current_draft,
+                                    language=operator.language,
+                                )
+                                _display_name = (
+                                    current_draft.enriched_product_name
+                                    or current_draft.product_name
+                                )
+                                reply_text = _product_confirmation_body(
+                                    operator.language,
+                                    product_name=_display_name,
+                                )
+                                deterministic_action = "product_confirmation_sent"
                                 await audit_repo.log(
                                     actor="system",
-                                    action="generation_flow_failed",
+                                    action="product_confirmation_sent",
                                     operator_phone=payload.operator_phone,
                                     metadata={
                                         "wamid": payload.wamid,
                                         "draft_id": str(current_draft.id),
-                                        "mode": mode.value,
-                                        "error": str(exc),
+                                        "product_name": current_draft.product_name,
                                     },
                                 )
-                                logger.exception(
-                                    "Generation flow failed "
-                                    "(wamid=%s, operator_phone=%s, draft_id=%s, mode=%s)",
-                                    payload.wamid,
-                                    payload.operator_phone,
-                                    current_draft.id,
-                                    mode.value,
+                            elif not current_draft.awaiting_product_confirmation:
+                                # Regenerate intents or already-confirmed drafts
+                                gen_result = await self._run_generation_flow(
+                                    payload=payload,
+                                    session=session,
+                                    draft_repo=draft_repo,
+                                    audit_repo=audit_repo,
+                                    operator=operator,
+                                    current_draft=current_draft,
+                                    mode=mode,
+                                    instruction_text=sanitized_text,
+                                    followup_regen_requested=followup_regen_requested,
                                 )
+                                current_draft = gen_result.draft
+                                if gen_result.reply_text is not None:
+                                    reply_text = gen_result.reply_text
+                                if gen_result.deterministic_action is not None:
+                                    deterministic_action = gen_result.deterministic_action
+                                if gen_result.generated_image_url is not None:
+                                    generated_image_url = gen_result.generated_image_url
+                                if gen_result.pending_followup_question is not None:
+                                    pending_followup_question = (
+                                        gen_result.pending_followup_question
+                                    )
+                                if gen_result.publish_buttons_prompt is not None:
+                                    publish_buttons_prompt = gen_result.publish_buttons_prompt
+                            # else: awaiting_product_confirmation is True but
+                            # we somehow got here again — the pending question
+                            # type guard should prevent this; do nothing.
 
                     if reply_text is None:
                         if classification.intent in {
@@ -1810,6 +1785,271 @@ class InboundTaskProcessor:
                 exc_info=True,
             )
 
+    async def _send_product_confirmation(
+        self,
+        *,
+        to_phone: str,
+        draft: AdDraft,
+        language: str,
+    ) -> None:
+        """Send product image + confirmation buttons to the operator."""
+        image_url = draft.enriched_image_url or draft.photo_url
+        display_name = (
+            draft.enriched_product_name or draft.product_name
+        )
+        body_text = _product_confirmation_body(language, product_name=display_name)
+        try:
+            await self._whatsapp_client.send_buttons(
+                to_phone=to_phone,
+                body_text=body_text,
+                buttons=[
+                    (BUTTON_CONFIRM_PRODUCT, "זה המוצר שלי"),
+                    (BUTTON_REJECT_PRODUCT, "זה לא המוצר שלי"),
+                ],
+                header_image_url=image_url,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to send product confirmation message (operator_phone=%s)",
+                to_phone,
+                exc_info=True,
+            )
+
+    async def _run_generation_flow(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        session: AsyncSession,
+        draft_repo: AdDraftRepository,
+        audit_repo: AuditEventRepository,
+        operator: Operator,
+        current_draft: AdDraft,
+        mode: GenerationMode,
+        instruction_text: str,
+        followup_regen_requested: bool,
+    ) -> _GenerationFlowResult:
+        """Submit, poll, and finalise an ad generation job.
+
+        Extracted so both the text-message flow and the product-confirmation
+        button handler can share the same logic.
+        """
+        result = _GenerationFlowResult(draft=current_draft)
+        await self._send_generation_in_progress(
+            to_phone=payload.operator_phone,
+            language=operator.language,
+        )
+        try:
+            submission = await self._ad_generation_service.submit_for_draft(
+                draft=_to_generation_draft_input(
+                    draft=current_draft,
+                    operator=operator,
+                ),
+                mode=mode,
+                instruction_text=instruction_text,
+                wamid=payload.wamid,
+                width=self._render_width,
+                height=self._render_height,
+            )
+            updated_draft = await draft_repo.update_for_operator_with_version(
+                draft_id=current_draft.id,
+                operator_phone=payload.operator_phone,
+                expected_version=current_draft.version,
+                status=AdDraftStatus.GENERATING,
+                generation_job_id=submission.job_id,
+            )
+            if updated_draft is None:
+                result.reply_text = (
+                    "This draft was already changed. "
+                    "Please refresh and try again."
+                )
+                await audit_repo.log(
+                    actor="system",
+                    action="draft_stale_write_detected",
+                    operator_phone=payload.operator_phone,
+                    metadata={"wamid": payload.wamid},
+                )
+                return result
+
+            current_draft = updated_draft
+            result.draft = current_draft
+            await audit_repo.log(
+                actor="system",
+                action="generation_job_submitted",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "job_id": submission.job_id,
+                    "mode": submission.mode.value,
+                    "idempotency_key": submission.idempotency_key,
+                },
+            )
+            logger.info(
+                "Generation job submitted "
+                "(wamid=%s, operator_phone=%s, draft_id=%s, "
+                "job_id=%s, mode=%s)",
+                payload.wamid,
+                payload.operator_phone,
+                current_draft.id,
+                submission.job_id,
+                submission.mode.value,
+            )
+            # Commit now so the DB lock is released
+            # while we wait for the generation service.
+            await session.commit()
+            poll_result = await self._ad_generation_service.wait_for_completion(
+                job_id=submission.job_id
+            )
+            if (
+                poll_result.status == NanoBananaJobStatus.COMPLETED
+                and poll_result.output_image_url
+            ):
+                completed_draft = (
+                    await draft_repo.update_for_operator_with_version(
+                        draft_id=current_draft.id,
+                        operator_phone=payload.operator_phone,
+                        expected_version=current_draft.version,
+                        status=AdDraftStatus.PREVIEW_READY,
+                        rendered_image_url=poll_result.output_image_url,
+                        preview_reference_url=poll_result.output_image_url,
+                    )
+                )
+                if completed_draft is None:
+                    result.reply_text = (
+                        "This draft was already changed. "
+                        "Please refresh and try again."
+                    )
+                    await audit_repo.log(
+                        actor="system",
+                        action="draft_stale_write_detected",
+                        operator_phone=payload.operator_phone,
+                        metadata={"wamid": payload.wamid},
+                    )
+                else:
+                    current_draft = completed_draft
+                    result.draft = current_draft
+                    result.deterministic_action = "generation_completed"
+                    await audit_repo.log(
+                        actor="system",
+                        action="generation_completed",
+                        operator_phone=payload.operator_phone,
+                        metadata={
+                            "wamid": payload.wamid,
+                            "draft_id": str(current_draft.id),
+                            "job_id": submission.job_id,
+                            "output_image_url": poll_result.output_image_url,
+                        },
+                    )
+                    logger.info(
+                        "Generation job completed "
+                        "(wamid=%s, operator_phone=%s, draft_id=%s, "
+                        "job_id=%s, output=%s)",
+                        payload.wamid,
+                        payload.operator_phone,
+                        current_draft.id,
+                        submission.job_id,
+                        poll_result.output_image_url,
+                    )
+                    result.generated_image_url = poll_result.output_image_url
+                    reply = _generation_completed_reply(operator.language)
+                    next_followup = _next_followup_question(
+                        draft=current_draft,
+                        operator=operator,
+                    )
+                    if next_followup is not None:
+                        result.pending_followup_question = next_followup
+                        followup_prompt = _followup_question_prompt(
+                            next_followup,
+                            operator.language,
+                        )
+                        reply = f"{reply}\n\n{followup_prompt}"
+                    elif not followup_regen_requested:
+                        result.pending_followup_question = (
+                            _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION
+                        )
+                        reply = (
+                            f"{reply}\n\n"
+                            f"{_regenerate_again_prompt(operator.language)}"
+                        )
+                    result.reply_text = reply
+                    result.publish_buttons_prompt = _publish_buttons_prompt(
+                        operator.language
+                    )
+            else:
+                failed_draft = (
+                    await draft_repo.update_for_operator_with_version(
+                        draft_id=current_draft.id,
+                        operator_phone=payload.operator_phone,
+                        expected_version=current_draft.version,
+                        status=AdDraftStatus.DRAFT,
+                    )
+                )
+                if failed_draft is not None:
+                    current_draft = failed_draft
+                    result.draft = current_draft
+                result.deterministic_action = "generation_failed"
+                await audit_repo.log(
+                    actor="system",
+                    action="generation_failed",
+                    operator_phone=payload.operator_phone,
+                    metadata={
+                        "wamid": payload.wamid,
+                        "draft_id": str(current_draft.id),
+                        "job_id": submission.job_id,
+                        "status": poll_result.status.value,
+                        "error_code": poll_result.error_code,
+                        "error_message": poll_result.error_message,
+                    },
+                )
+                logger.warning(
+                    "Generation job failed status "
+                    "(wamid=%s, operator_phone=%s, draft_id=%s, "
+                    "job_id=%s, status=%s, error_code=%s, "
+                    "error_message=%s)",
+                    payload.wamid,
+                    payload.operator_phone,
+                    current_draft.id,
+                    submission.job_id,
+                    poll_result.status.value,
+                    poll_result.error_code,
+                    poll_result.error_message,
+                )
+                result.reply_text = _generation_failed_reply(operator.language)
+        except AdGenerationError as exc:
+            if current_draft.status == AdDraftStatus.GENERATING:
+                reverted_draft = (
+                    await draft_repo.update_for_operator_with_version(
+                        draft_id=current_draft.id,
+                        operator_phone=payload.operator_phone,
+                        expected_version=current_draft.version,
+                        status=AdDraftStatus.DRAFT,
+                    )
+                )
+                if reverted_draft is not None:
+                    current_draft = reverted_draft
+                    result.draft = current_draft
+            result.reply_text = _generation_failed_reply(operator.language)
+            await audit_repo.log(
+                actor="system",
+                action="generation_flow_failed",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "mode": mode.value,
+                    "error": str(exc),
+                },
+            )
+            logger.exception(
+                "Generation flow failed "
+                "(wamid=%s, operator_phone=%s, draft_id=%s, mode=%s)",
+                payload.wamid,
+                payload.operator_phone,
+                current_draft.id,
+                mode.value,
+            )
+        return result
+
     async def _handle_pending_followup_answer(
         self,
         *,
@@ -1943,6 +2183,39 @@ class InboundTaskProcessor:
         if ean is None and allow_existing_draft_ean:
             ean = current_draft.ean
         if ean is None:
+            # --- Fallback: image search by product name ---
+            if (
+                current_draft.product_name
+                and current_draft.enriched_image_url is None
+                and current_draft.photo_url is None
+            ):
+                enriched_by_name = await self._enrichment_service.enrich_by_name(
+                    product_name=current_draft.product_name,
+                    language=language,
+                )
+                if enriched_by_name is not None and enriched_by_name.image_url:
+                    update_fields = {
+                        "enriched_image_url": _truncate(enriched_by_name.image_url, 2000),
+                        "enrichment_source": enriched_by_name.source,
+                    }
+                    updated_draft = await draft_repo.update_for_operator_with_version(
+                        draft_id=current_draft.id,
+                        operator_phone=payload.operator_phone,
+                        expected_version=current_draft.version,
+                        **update_fields,
+                    )
+                    if updated_draft is not None:
+                        current_draft = updated_draft
+                        await audit_repo.log(
+                            actor="system",
+                            action="image_search_applied",
+                            operator_phone=payload.operator_phone,
+                            metadata={
+                                "wamid": payload.wamid,
+                                "product_name": current_draft.product_name,
+                                "source": enriched_by_name.source,
+                            },
+                        )
             return current_draft, None
 
         if current_draft.ean is None:
@@ -2013,6 +2286,7 @@ class InboundTaskProcessor:
     ) -> dict[str, Any]:
         update_fields: dict[str, Any] = {
             "enrichment_source": enriched.source,
+            "enriched_product_name": _truncate(enriched.product_name, 256),
             "enriched_brand": _truncate(enriched.brand, 120),
             "enriched_category": _truncate(enriched.category, 120),
             "enriched_description": _truncate(enriched.description, 500),
@@ -2347,6 +2621,34 @@ def _branding_cleared_reply(*, language: str, cleared_fields: list[str]) -> str:
     }
     names = ", ".join(labels.get(field, field) for field in cleared_fields)
     return f"Cleared the following fields: {names}."
+
+
+def _product_confirmation_body(language: str, product_name: str | None = None) -> str:
+    if language.lower() == "he":
+        if product_name:
+            return f"מצאתי את המוצר הזה:\n{product_name}\nזה המוצר שרצית?"
+        return "מצאתי את המוצר הזה. זה המוצר שרצית?"
+    if product_name:
+        return f"I found this product:\n{product_name}\nIs this the product you wanted?"
+    return "I found this product. Is this the product you wanted?"
+
+
+def _product_confirmation_reprompt(language: str) -> str:
+    if language.lower() == "he":
+        return "אנא לחץ על אחד הכפתורים כדי לאשר או לדחות את המוצר."
+    return "Please use the buttons to confirm or reject the product."
+
+
+def _product_rejected_reply(language: str) -> str:
+    if language.lower() == "he":
+        return (
+            "הבנתי, זה לא המוצר הנכון. "
+            "שלח לי את שם המוצר הנכון ונתחיל מחדש."
+        )
+    return (
+        "Got it, that is not the right product. "
+        "Send me the correct product name and we will start over."
+    )
 
 
 def _missing_product_name_reply(language: str) -> str:

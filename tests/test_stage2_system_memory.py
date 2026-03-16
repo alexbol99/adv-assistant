@@ -18,6 +18,7 @@ from adv_assistant.db.base import Base
 from adv_assistant.db.repositories import ConversationSessionRepository, OperatorRepository
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
 from adv_assistant.llm_gateway import (
+    BUTTON_CONFIRM_PRODUCT,
     ExtractedAdFields,
     ExtractedBrandingFields,
     Intent,
@@ -28,6 +29,20 @@ from adv_assistant.pipeline import InboundTaskProcessor
 from adv_assistant.tasks_queue import InboundTaskPayload
 
 pytestmark = pytest.mark.anyio
+
+
+def _text_msg(body: str) -> dict:
+    return {"type": "text", "text": {"body": body}}
+
+
+def _button_msg(button_id: str) -> dict:
+    return {
+        "type": "interactive",
+        "interactive": {
+            "type": "button",
+            "button_reply": {"id": button_id, "title": "..."},
+        },
+    }
 
 
 class SequencedGateway:
@@ -247,18 +262,36 @@ async def test_system_memory_persists_across_new_drafts_and_flows_to_generation(
         ad_generation_service=generation,
     )
 
-    first = await processor.process(
+    # Step 1a: First product text -> confirmation prompt.
+    await processor.process(
         InboundTaskPayload(
-            wamid="wamid-stage2-create-1",
+            wamid="wamid-stage2-create-1a",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "מודעה לפפריקה"}},
+            raw_message=_text_msg("מודעה לפפריקה"),
         )
     )
+    # Step 1b: Confirm first product -> triggers generation.
+    first = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-create-1b",
+            operator_phone=phone,
+            raw_message=_button_msg(BUTTON_CONFIRM_PRODUCT),
+        )
+    )
+    # Step 2a: Second product text -> confirmation prompt.
+    await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-create-2a",
+            operator_phone=phone,
+            raw_message=_text_msg("מודעה לכמון"),
+        )
+    )
+    # Step 2b: Confirm second product -> triggers generation.
     second = await processor.process(
         InboundTaskPayload(
-            wamid="wamid-stage2-create-2",
+            wamid="wamid-stage2-create-2b",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "מודעה לכמון"}},
+            raw_message=_button_msg(BUTTON_CONFIRM_PRODUCT),
         )
     )
 
@@ -299,11 +332,20 @@ async def test_generation_adds_followup_when_system_memory_is_missing(
         ad_generation_service=generation,
     )
 
+    # Step 1: Text -> confirmation prompt.
+    await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-followup-a",
+            operator_phone=phone,
+            raw_message=_text_msg("מודעה לקולה"),
+        )
+    )
+    # Step 2: Confirm -> generation + followup about store type.
     result = await processor.process(
         InboundTaskPayload(
-            wamid="wamid-stage2-followup",
+            wamid="wamid-stage2-followup-b",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "מודעה לקולה"}},
+            raw_message=_button_msg(BUTTON_CONFIRM_PRODUCT),
         )
     )
 
@@ -334,11 +376,20 @@ async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmat
         ad_generation_service=generation,
     )
 
+    # Step 0: Text -> confirmation prompt (no generation yet).
+    await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-seq-0",
+            operator_phone=phone,
+            raw_message=_text_msg("מודעה לקולה"),
+        )
+    )
+    # Step 1: Confirm -> generation + followup about store type.
     first = await processor.process(
         InboundTaskPayload(
             wamid="wamid-stage2-seq-1",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "מודעה לקולה"}},
+            raw_message=_button_msg(BUTTON_CONFIRM_PRODUCT),
         )
     )
     assert first.reply_text is not None
@@ -411,21 +462,39 @@ async def test_followup_interrupt_create_ad_skips_pending_question_and_generates
         ad_generation_service=generation,
     )
 
+    # Step 1: Text -> confirmation prompt.
+    await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-interrupt-1a",
+            operator_phone=phone,
+            raw_message=_text_msg("מודעה למים"),
+        )
+    )
+    # Step 2: Confirm -> generation + followup about store type.
     first = await processor.process(
         InboundTaskPayload(
-            wamid="wamid-stage2-interrupt-1",
+            wamid="wamid-stage2-interrupt-1b",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "מודעה למים"}},
+            raw_message=_button_msg(BUTTON_CONFIRM_PRODUCT),
         )
     )
     assert first.reply_text is not None
     assert "מה סוג העסק שלך" in first.reply_text
 
+    # Step 3: Interrupt with new CREATE_AD -> confirmation prompt.
+    await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-interrupt-2a",
+            operator_phone=phone,
+            raw_message=_text_msg("מודעה חדשה לחלב"),
+        )
+    )
+    # Step 4: Confirm second product -> generation.
     second = await processor.process(
         InboundTaskPayload(
-            wamid="wamid-stage2-interrupt-2",
+            wamid="wamid-stage2-interrupt-2b",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "מודעה חדשה לחלב"}},
+            raw_message=_button_msg(BUTTON_CONFIRM_PRODUCT),
         )
     )
     assert second.generated_image_url is not None
@@ -455,11 +524,20 @@ async def test_regenerate_confirmation_unclear_answer_keeps_pending_state(
         ad_generation_service=generation,
     )
 
+    # Step 1: Text -> confirmation prompt.
+    await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-unclear-1a",
+            operator_phone=phone,
+            raw_message=_text_msg("מודעה למיץ"),
+        )
+    )
+    # Step 2: Confirm -> generation + regenerate confirmation prompt.
     first = await processor.process(
         InboundTaskPayload(
-            wamid="wamid-stage2-unclear-1",
+            wamid="wamid-stage2-unclear-1b",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "מודעה למיץ"}},
+            raw_message=_button_msg(BUTTON_CONFIRM_PRODUCT),
         )
     )
     assert first.reply_text is not None
@@ -499,11 +577,20 @@ async def test_publish_buttons_sent_even_when_followup_pending(
         ad_generation_service=generation,
     )
 
+    # Step 1: Text -> confirmation prompt.
+    await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-no-publish-cta-a",
+            operator_phone=phone,
+            raw_message=_text_msg("מודעה לבירה"),
+        )
+    )
+    # Step 2: Confirm -> generation.
     result = await processor.process(
         InboundTaskPayload(
-            wamid="wamid-stage2-no-publish-cta",
+            wamid="wamid-stage2-no-publish-cta-b",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "מודעה לבירה"}},
+            raw_message=_button_msg(BUTTON_CONFIRM_PRODUCT),
         )
     )
 
@@ -539,11 +626,20 @@ async def test_regenerate_confirmation_decline_returns_publish_buttons(
         ad_generation_service=generation,
     )
 
+    # Step 1: Text -> confirmation prompt.
+    await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-stage2-decline-1a",
+            operator_phone=phone,
+            raw_message=_text_msg("מודעה לשוקולד"),
+        )
+    )
+    # Step 2: Confirm -> generation + regenerate confirmation prompt.
     first = await processor.process(
         InboundTaskPayload(
-            wamid="wamid-stage2-decline-1",
+            wamid="wamid-stage2-decline-1b",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "מודעה לשוקולד"}},
+            raw_message=_button_msg(BUTTON_CONFIRM_PRODUCT),
         )
     )
     assert first.reply_text is not None
