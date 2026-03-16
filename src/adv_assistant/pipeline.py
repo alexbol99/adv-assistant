@@ -806,9 +806,7 @@ class InboundTaskProcessor:
                                     publish_buttons_prompt = _publish_buttons_prompt(
                                         operator.language
                                     )
-                                transition_status = (
-                                    question_policy.PendingResolutionStatus.RESOLVED
-                                )
+                                transition_status = question_policy.PendingResolutionStatus.RESOLVED
                                 pending_handled = True
                             else:
                                 classification = await self._llm_gateway.classify_intent(
@@ -875,7 +873,9 @@ class InboundTaskProcessor:
                                 and forced_intent is None
                             ):
                                 is_post_preview_phase = (
-                                    pending_question_context.get(question_policy.QUESTION_CONTEXT_PHASE)
+                                    pending_question_context.get(
+                                        question_policy.QUESTION_CONTEXT_PHASE
+                                    )
                                     == question_policy.QUESTION_PHASE_POST_PREVIEW
                                 )
                                 if is_post_preview_phase:
@@ -1142,13 +1142,14 @@ class InboundTaskProcessor:
                                 and current_draft.awaiting_product_confirmation
                                 and current_draft.photo_url is not None
                             ):
-                                current_draft, confirmation_image_url = (
-                                    await self._prepare_product_confirmation_image(
-                                        payload=payload,
-                                        draft_repo=draft_repo,
-                                        audit_repo=audit_repo,
-                                        current_draft=current_draft,
-                                    )
+                                (
+                                    current_draft,
+                                    confirmation_image_url,
+                                ) = await self._prepare_product_confirmation_image(
+                                    payload=payload,
+                                    draft_repo=draft_repo,
+                                    audit_repo=audit_repo,
+                                    current_draft=current_draft,
                                 )
                                 deterministic_action = "product_confirmation_requested"
                                 generated_image_url = confirmation_image_url
@@ -2988,6 +2989,7 @@ def _generation_completed_reply(language: str) -> str:
         return "התצוגה המקדימה מוכנה."
     return "Your ad preview is ready."
 
+
 def _regenerate_again_declined_reply(language: str) -> str:
     if language.lower() == "he":
         return "מעולה. כשתרצה ליצור מודעה נוספת פשוט תכתוב לי."
@@ -3139,7 +3141,7 @@ def _is_confirmation_image_url_compatible(image_url: str) -> bool:
 
 def _product_confirmation_image_link_fallback_reply(*, language: str, image_url: str) -> str:
     if language.lower() == "he":
-        return f'לא הצלחתי לצרף את התמונה ישירות. אפשר לבדוק אותה כאן: {image_url}'
+        return f"לא הצלחתי לצרף את התמונה ישירות. אפשר לבדוק אותה כאן: {image_url}"
     return f"I could not attach the image directly. You can review it here: {image_url}"
 
 
