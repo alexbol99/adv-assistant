@@ -118,7 +118,7 @@ def test_candidate_selector_skips_templated_top_result_and_chooses_next_usable()
             source="retailer-template",
         ),
         ProductCandidate(
-            title="שישיית קוקה קולה זירו 330 מ\"ל",
+            title='שישיית קוקה קולה זירו 330 מ"ל',
             description="מארז שישייה",
             image_url="https://retailer.example/coke-zero-6pack.jpg",
             product_url="https://retailer.example/products/coke-zero-6pack",

@@ -206,7 +206,4 @@ def _fallback_query(product_query: str, brand: str | None) -> str:
 def _clarification_question(product_query: str) -> str:
     if not product_query.strip():
         return "Which product do you want to advertise? For example, tonic 1.5L or 500ml."
-    return (
-        f"Which {product_query} product do you mean? "
-        "For example tonic 1.5L or 500ml."
-    )
+    return f"Which {product_query} product do you mean? For example tonic 1.5L or 500ml."

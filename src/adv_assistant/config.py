@@ -195,12 +195,8 @@ class Settings:
             product_resolution_openai_model=os.getenv(
                 "PRODUCT_RESOLUTION_OPENAI_MODEL", "gpt-4o-mini"
             ),
-            product_resolution_max_input_chars=_int_env(
-                "PRODUCT_RESOLUTION_MAX_INPUT_CHARS", 500
-            ),
-            product_resolution_timeout_seconds=_int_env(
-                "PRODUCT_RESOLUTION_TIMEOUT_SECONDS", 8
-            ),
+            product_resolution_max_input_chars=_int_env("PRODUCT_RESOLUTION_MAX_INPUT_CHARS", 500),
+            product_resolution_timeout_seconds=_int_env("PRODUCT_RESOLUTION_TIMEOUT_SECONDS", 8),
             product_resolution_retailer_timeout_seconds=_float_env(
                 "PRODUCT_RESOLUTION_RETAILER_TIMEOUT_SECONDS", 6.0
             ),
