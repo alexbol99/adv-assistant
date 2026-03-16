@@ -254,6 +254,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 ## Phase 6 — Media Lifecycle and Storage
 
 **Goal:** Implement media handling and lifecycle behavior.
+**Status (March 16, 2026): Completed.**
 
 ### Scope
 - Build `MediaStore` for GCS upload/read URL generation.
@@ -270,6 +271,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 ## Phase 7 — Ad Generation Integration (Nano Banana)
 
 **Goal:** Integrate asynchronous ad generation contract.
+**Status (March 16, 2026): In progress (transition started after Phase 6 completion).**
 
 ### Scope
 - Implement `NanoBananaClient` with:
@@ -407,11 +409,12 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 
 ---
 
-## Current Repository Status (as of March 5, 2026)
+## Current Repository Status (as of March 16, 2026)
 
 Based on the current codebase and automated test coverage:
 
-- **Implemented and test-covered:** Phase 0 through Phase 7.
+- **Implemented and test-covered:** Phase 0 through Phase 6.
+- **Current focus:** Transition into Phase 7 (ad generation integration) is in progress.
 - **Gate A / Gate B evidence:** present in the current test suite (`tests/test_ingress_pipeline.py`, `tests/test_tasks_auth.py`, `tests/test_phase4_llm_boundary.py`, `tests/test_phase5_enrichment.py`, `tests/test_phase6_media.py`, `tests/test_phase7_generation.py`).
 - **Phase 8 status:** publish flow is implemented and tested; `list_ads` / `delete_all` side effects are still pending.
 - **Pending operational/compliance work:** Phase 5 compliance checklist sign-off remains open (`docs/phase5-compliance-checklist.md` is not yet completed).

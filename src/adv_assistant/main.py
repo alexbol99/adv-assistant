@@ -18,6 +18,8 @@ from adv_assistant.ad_generation import (
     NanoBananaAdGenerationService,
     NoopAdGenerationService,
 )
+from adv_assistant.ai_extractor import HeuristicProductAIExtractor, OpenAIProductAIExtractor
+from adv_assistant.candidate_selector import CandidateSelector
 from adv_assistant.cms_cityscreen import CityScreenCMSPublisher, CMSPublisher, NoopCMSPublisher
 from adv_assistant.config import Settings
 from adv_assistant.db.base import utcnow
@@ -60,6 +62,13 @@ from adv_assistant.product_discovery import (
     SerperImageSearchProvider,
     ShufersalSearchProvider,
 )
+from adv_assistant.product_resolution_service import (
+    DefaultProductResolutionService,
+    NoopProductResolutionService,
+    ProductResolutionService,
+)
+from adv_assistant.retailer_search_service import RetailerSearchService
+from adv_assistant.serper_image_search_service import SerperImageSearchService
 from adv_assistant.tasks_auth import (
     OidcTaskRequestAuthorizer,
     RejectAllTaskRequestAuthorizer,
@@ -176,6 +185,41 @@ def _build_product_discovery_service(settings: Settings) -> ProductDiscoveryServ
             ),
         )
     return ProviderChainDiscoveryService(providers=providers)  # type: ignore[arg-type]
+
+
+def _build_product_resolution_service(settings: Settings) -> ProductResolutionService:
+    if not settings.product_resolution_enabled:
+        return NoopProductResolutionService()
+
+    if settings.openai_api_key:
+        extractor = OpenAIProductAIExtractor(
+            api_key=settings.openai_api_key,
+            model=settings.product_resolution_openai_model,
+            base_url=settings.openai_base_url,
+            timeout_seconds=settings.product_resolution_timeout_seconds,
+            max_input_chars=settings.product_resolution_max_input_chars,
+            fallback_extractor=HeuristicProductAIExtractor(),
+        )
+    else:
+        extractor = HeuristicProductAIExtractor()
+
+    retailer_search_service = RetailerSearchService.with_default_adapters(
+        timeout_seconds=settings.product_resolution_retailer_timeout_seconds,
+        max_results_per_adapter=settings.product_resolution_retailer_max_results,
+    )
+    serper_service = SerperImageSearchService(
+        api_key=settings.serper_api_key,
+        base_url=settings.serper_base_url,
+        timeout_seconds=settings.serper_timeout_seconds,
+        max_results=settings.serper_max_results,
+    )
+    selector = CandidateSelector(minimum_score=settings.product_resolution_min_selector_score)
+    return DefaultProductResolutionService(
+        ai_extractor=extractor,
+        retailer_search_service=retailer_search_service,
+        serper_image_search_service=serper_service,
+        candidate_selector=selector,
+    )
 
 
 def _build_ad_generation_service(*, settings: Settings, media_store: MediaStore):
@@ -430,6 +474,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     whatsapp_media_client = _build_whatsapp_media_client(current_settings)
     enrichment_service = _build_enrichment_service(current_settings)
     product_discovery_service = _build_product_discovery_service(current_settings)
+    product_resolution_service = _build_product_resolution_service(current_settings)
     media_store = _build_media_store(current_settings)
     cms_publisher = _build_cms_publisher(current_settings)
     ad_generation_service = _build_ad_generation_service(
@@ -451,12 +496,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         operator_photo_ingestor=operator_photo_ingestor,
         cms_publisher=cms_publisher,
         whatsapp_client=whatsapp_client,
+        product_resolution_service=product_resolution_service,
     )
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):
         result = await task_processor.process(payload)
         if (
-            (result.generated_image_url or result.reply_text or result.publish_buttons_prompt)
+            (
+                result.generated_image_url
+                or result.reply_text
+                or result.publish_buttons_prompt
+                or result.action_buttons
+            )
             and not result.duplicate
             and not result.unauthorized_operator
         ):
@@ -472,7 +523,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         to_phone=payload.operator_phone,
                         message=result.reply_text,
                     )
-                if result.publish_buttons_prompt:
+                if result.action_buttons:
+                    await app.state.whatsapp_client.send_buttons(
+                        to_phone=payload.operator_phone,
+                        body_text=result.action_buttons_prompt or "",
+                        buttons=result.action_buttons,
+                    )
+                elif result.publish_buttons_prompt:
                     await app.state.whatsapp_client.send_buttons(
                         to_phone=payload.operator_phone,
                         body_text=result.publish_buttons_prompt,
@@ -513,7 +570,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 "wamid": payload.wamid,
                                 "sent_text": bool(result.reply_text),
                                 "sent_image": bool(result.generated_image_url),
-                                "sent_buttons": bool(result.publish_buttons_prompt),
+                                "sent_buttons": bool(
+                                    result.publish_buttons_prompt or result.action_buttons
+                                ),
                             },
                         )
                 except Exception:
@@ -541,6 +600,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await whatsapp_media_client.close()
             await enrichment_service.close()
             await product_discovery_service.close()
+            await product_resolution_service.close()
             await ad_generation_service.close()
             await cms_publisher.close()
             await media_store.close()
@@ -557,6 +617,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.whatsapp_client = whatsapp_client
     app.state.product_discovery_service = product_discovery_service
     app.state.ad_generation_service = ad_generation_service
+    app.state.product_resolution_service = product_resolution_service
     app.state.whatsapp_media_client = whatsapp_media_client
     app.state.media_store = media_store
     app.state.cms_publisher = cms_publisher

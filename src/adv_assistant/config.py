@@ -87,6 +87,19 @@ class Settings:
     llm_trace_enabled: bool = False
     llm_trace_max_chars: int = 4000
 
+    product_resolution_enabled: bool = True
+    product_resolution_openai_model: str = "gpt-4o-mini"
+    product_resolution_max_input_chars: int = 500
+    product_resolution_timeout_seconds: int = 8
+    product_resolution_retailer_timeout_seconds: float = 6.0
+    product_resolution_retailer_max_results: int = 6
+    product_resolution_min_selector_score: float = 2.0
+
+    serper_api_key: str | None = None
+    serper_base_url: str = "https://google.serper.dev"
+    serper_timeout_seconds: float = 8.0
+    serper_max_results: int = 8
+
     enrichment_enabled: bool = True
     open_food_facts_base_url: str = "https://world.openfoodfacts.org"
     enrichment_http_timeout_seconds: int = 8
@@ -98,8 +111,6 @@ class Settings:
     discovery_http_timeout_seconds: int = 10
     discovery_max_attempts: int = 2
     discovery_retry_base_seconds: float = 0.5
-    serper_api_key: str | None = None
-    serper_base_url: str = "https://google.serper.dev"
 
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.1-flash-image-preview"
@@ -180,6 +191,29 @@ class Settings:
             llm_max_input_chars=_int_env("LLM_MAX_INPUT_CHARS", 2000),
             llm_trace_enabled=_bool_env("LLM_TRACE_ENABLED", False),
             llm_trace_max_chars=_int_env("LLM_TRACE_MAX_CHARS", 4000),
+            product_resolution_enabled=_bool_env("PRODUCT_RESOLUTION_ENABLED", True),
+            product_resolution_openai_model=os.getenv(
+                "PRODUCT_RESOLUTION_OPENAI_MODEL", "gpt-4o-mini"
+            ),
+            product_resolution_max_input_chars=_int_env(
+                "PRODUCT_RESOLUTION_MAX_INPUT_CHARS", 500
+            ),
+            product_resolution_timeout_seconds=_int_env(
+                "PRODUCT_RESOLUTION_TIMEOUT_SECONDS", 8
+            ),
+            product_resolution_retailer_timeout_seconds=_float_env(
+                "PRODUCT_RESOLUTION_RETAILER_TIMEOUT_SECONDS", 6.0
+            ),
+            product_resolution_retailer_max_results=_int_env(
+                "PRODUCT_RESOLUTION_RETAILER_MAX_RESULTS", 6
+            ),
+            product_resolution_min_selector_score=_float_env(
+                "PRODUCT_RESOLUTION_MIN_SELECTOR_SCORE", 2.0
+            ),
+            serper_api_key=_optional_env("SERPER_API_KEY"),
+            serper_base_url=_env_with_default("SERPER_BASE_URL", "https://google.serper.dev"),
+            serper_timeout_seconds=_float_env("SERPER_TIMEOUT_SECONDS", 8.0),
+            serper_max_results=_int_env("SERPER_MAX_RESULTS", 8),
             enrichment_enabled=_bool_env("ENRICHMENT_ENABLED", True),
             open_food_facts_base_url=os.getenv(
                 "OPEN_FOOD_FACTS_BASE_URL", "https://world.openfoodfacts.org"
@@ -194,8 +228,6 @@ class Settings:
             discovery_http_timeout_seconds=_int_env("DISCOVERY_HTTP_TIMEOUT_SECONDS", 10),
             discovery_max_attempts=_int_env("DISCOVERY_MAX_ATTEMPTS", 2),
             discovery_retry_base_seconds=_float_env("DISCOVERY_RETRY_BASE_SECONDS", 0.5),
-            serper_api_key=_optional_env("SERPER_API_KEY"),
-            serper_base_url=_env_with_default("SERPER_BASE_URL", "https://google.serper.dev"),
             gemini_api_key=_optional_env("GEMINI_API_KEY"),
             gemini_model=_env_with_default("GEMINI_MODEL", "gemini-3.1-flash-image-preview"),
             gemini_base_url=_env_with_default(
