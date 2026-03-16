@@ -502,6 +502,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         cms_publisher=cms_publisher,
         whatsapp_client=whatsapp_client,
         product_resolution_service=product_resolution_service,
+        pipeline_v1_enabled=current_settings.pipeline_v1_enabled,
     )
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):

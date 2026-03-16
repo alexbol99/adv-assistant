@@ -107,6 +107,7 @@ class Settings:
     enrichment_retry_base_seconds: float = 0.5
 
     discovery_enabled: bool = False
+    pipeline_v1_enabled: bool = True
     shufersal_base_url: str = "https://www.shufersal.co.il"
     discovery_http_timeout_seconds: int = 10
     discovery_max_attempts: int = 2
@@ -218,6 +219,7 @@ class Settings:
             enrichment_max_attempts=_int_env("ENRICHMENT_MAX_ATTEMPTS", 2),
             enrichment_retry_base_seconds=_float_env("ENRICHMENT_RETRY_BASE_SECONDS", 0.5),
             discovery_enabled=_bool_env("DISCOVERY_ENABLED", False),
+            pipeline_v1_enabled=_bool_env("PIPELINE_V1_ENABLED", True),
             shufersal_base_url=_env_with_default(
                 "SHUFERSAL_BASE_URL", "https://www.shufersal.co.il"
             ),

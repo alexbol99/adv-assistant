@@ -266,6 +266,7 @@ class InboundTaskProcessor:
         cms_publisher: CMSPublisher | None = None,
         whatsapp_client: WhatsAppClient | None = None,
         product_resolution_service: ProductResolutionService | None = None,
+        pipeline_v1_enabled: bool = True,
     ) -> None:
         self._session_factory = session_factory
         self._llm_gateway = llm_gateway or NoopLLMGateway()
@@ -280,6 +281,7 @@ class InboundTaskProcessor:
         self._product_resolution_service = (
             product_resolution_service or NoopProductResolutionService()
         )
+        self._pipeline_v1_enabled = pipeline_v1_enabled
 
     async def process(self, payload: InboundTaskPayload) -> ProcessInboundResult:
         async with session_scope(self._session_factory) as session:
@@ -323,6 +325,25 @@ class InboundTaskProcessor:
                 self._clear_provider_trace_context(self._llm_gateway)
                 self._clear_provider_trace_context(self._ad_generation_service)
                 return ProcessInboundResult(duplicate=False, unauthorized_operator=True)
+
+            if not self._pipeline_v1_enabled:
+                await audit_repo.log(
+                    actor="system",
+                    action="pipeline_v1_disabled",
+                    operator_phone=payload.operator_phone,
+                    metadata={"wamid": payload.wamid},
+                )
+                logger.info(
+                    "Pipeline V1 disabled, skipping processing (wamid=%s)",
+                    payload.wamid,
+                )
+                self._clear_provider_trace_context(self._llm_gateway)
+                self._clear_provider_trace_context(self._ad_generation_service)
+                return ProcessInboundResult(
+                    duplicate=False,
+                    reply_text="The service is temporarily unavailable. "
+                    "Please try again later.",
+                )
 
             now = utcnow()
             session_obj = await session_repo.get_by_operator_phone(payload.operator_phone)

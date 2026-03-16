@@ -518,3 +518,41 @@ async def test_interrupt_create_ad_during_variant_selection(
     # 4 submitted: 2 variants per generation × 2 generations
     assert len(generation.submitted_drafts) == 4
     assert generation.submitted_drafts[2].product_name == "קולה"
+
+
+async def test_pipeline_v1_disabled_returns_unavailable(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """When pipeline_v1_enabled=False, processing returns unavailable."""
+    phone = "+972500000905"
+    await _seed_operator(session_factory, phone, store_type="סופר")
+
+    gateway = SequencedGateway(
+        intents=[Intent.CREATE_AD],
+        ad_fields=[
+            ExtractedAdFields(
+                product_name="חלב",
+                price=Decimal("6.00"),
+                currency="ILS",
+            )
+        ],
+    )
+    generation = FakeGenerationService()
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=gateway,
+        ad_generation_service=generation,
+        pipeline_v1_enabled=False,
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-e2e-disabled",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "מודעה לחלב"}},
+        )
+    )
+    assert result.reply_text is not None
+    assert "temporarily unavailable" in result.reply_text.lower()
+    assert result.generated_image_url is None
+    assert len(generation.submitted_drafts) == 0  # no generation happened
