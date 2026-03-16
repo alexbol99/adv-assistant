@@ -588,6 +588,12 @@ class PublishedAdRepository:
         result = await self.session.execute(select(PublishedAd).where(PublishedAd.cms_id == cms_id))
         return result.scalar_one_or_none()
 
+    async def get_by_draft_id(self, draft_id: uuid.UUID) -> PublishedAd | None:
+        result = await self.session.execute(
+            select(PublishedAd).where(PublishedAd.ad_draft_id == draft_id)
+        )
+        return result.scalar_one_or_none()
+
 
 class SystemConfigRepository:
     SINGLETON_ID = 1

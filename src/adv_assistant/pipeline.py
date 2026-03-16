@@ -1694,6 +1694,24 @@ class InboundTaskProcessor:
                 return current_draft, "אין כרגע תמונת תצוגה מוכנה לפרסום."
             return current_draft, "There is no generated preview image ready for publishing."
 
+        # Idempotency: skip CMS call if draft is already published.
+        if current_draft.status == AdDraftStatus.PUBLISHED:
+            existing = await published_repo.get_by_draft_id(current_draft.id)
+            if existing is not None:
+                await audit_repo.log(
+                    actor="system",
+                    action="publish_skipped_already_published",
+                    operator_phone=payload.operator_phone,
+                    metadata={
+                        "wamid": payload.wamid,
+                        "draft_id": str(current_draft.id),
+                        "cms_id": existing.cms_id,
+                    },
+                )
+                if language.lower() == "he":
+                    return current_draft, "המודעה הזו כבר פורסמה."
+                return current_draft, "This ad has already been published."
+
         campaign_id = _coerce_positive_int(operator.cms_campaign_id)
         playlist_id = _coerce_positive_int(operator.cms_playlist_id)
         if campaign_id is None or playlist_id is None:
