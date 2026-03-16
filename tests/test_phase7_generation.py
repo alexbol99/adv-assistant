@@ -23,12 +23,14 @@ from adv_assistant.ad_generation import (
     derive_aspect_ratio,
 )
 from adv_assistant.db.base import Base
-from adv_assistant.db.enums import AdDraftStatus
-from adv_assistant.db.models import AdDraft, AuditEvent
+from adv_assistant.db.enums import AdDraftStatus, PendingQuestionType
+from adv_assistant.db.models import AdDraft, AuditEvent, ConversationSession
 from adv_assistant.db.repositories import OperatorRepository
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
 from adv_assistant.enrichment import EnrichedProduct
 from adv_assistant.llm_gateway import (
+    BUTTON_CONFIRM_PRODUCT_SELECTION,
+    BUTTON_REJECT_PRODUCT_SELECTION,
     ExtractedAdFields,
     ExtractedProductQuery,
     Intent,
@@ -37,6 +39,7 @@ from adv_assistant.llm_gateway import (
 )
 from adv_assistant.media_store import MediaUpload
 from adv_assistant.pipeline import InboundTaskProcessor
+from adv_assistant.product_resolution_models import ProductResolutionResult, SelectedProductResult
 from adv_assistant.tasks_queue import InboundTaskPayload
 
 pytestmark = pytest.mark.anyio
@@ -129,6 +132,34 @@ class StaticEnrichmentService:
 
     async def enrich_by_ean(self, *, ean: str, language: str) -> EnrichedProduct | None:
         return self._enriched
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeResolvedProductResolutionService:
+    enabled = True
+
+    async def resolve(
+        self,
+        *,
+        message_text: str,
+        language: str,
+    ) -> ProductResolutionResult:
+        return ProductResolutionResult(
+            status="resolved",
+            brand="Magnum",
+            product_query="גלידת מגנום",
+            raw_user_text=message_text,
+            selected_result=SelectedProductResult(
+                title="גלידת מגנום",
+                description="Magnum ice cream",
+                image_url="https://example.com/magnum.png",
+                product_url="https://example.com/magnum",
+                source="fake",
+                search_method="retailer",
+            ),
+        )
 
     async def close(self) -> None:
         return None
@@ -403,6 +434,104 @@ async def test_gemini_service_generates_image_and_uploads_to_media_store() -> No
     assert media_store.upload_calls[0][0] == b"png-binary"
     assert media_store.upload_calls[0][1] == "image/png"
     assert media_store.upload_calls[0][2] == ".png"
+    assert result.status == NanoBananaJobStatus.COMPLETED
+    assert result.output_image_url == "https://storage.example/generated/preview.png"
+    await client.aclose()
+
+
+async def test_gemini_service_includes_logo_inline_image_when_available() -> None:
+    observed: dict[str, object] = {"get_urls": []}
+    encoded_png = base64.b64encode(b"png-binary").decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            get_urls = observed["get_urls"]
+            assert isinstance(get_urls, list)
+            get_urls.append(str(request.url))
+            if request.url.path.endswith("/product.jpg"):
+                return httpx.Response(
+                    status_code=200,
+                    content=b"product-bytes",
+                    headers={"content-type": "image/jpeg"},
+                )
+            if request.url.path.endswith("/logo.png"):
+                return httpx.Response(
+                    status_code=200,
+                    content=b"logo-bytes",
+                    headers={"content-type": "image/png"},
+                )
+            return httpx.Response(status_code=404)
+
+        observed["path"] = request.url.path
+        observed["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            status_code=200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "mimeType": "image/png",
+                                        "data": encoded_png,
+                                    }
+                                },
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    media_store = FakeMediaStore()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = GeminiFlashImageAdGenerationService(
+        api_key="gemini-test-key",
+        model="gemini-3.1-flash-image-preview",
+        media_store=media_store,
+        client=client,
+    )
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="קוטג",
+        price=Decimal("19.90"),
+        currency="ILS",
+        promo_text="מבצע",
+        ean=None,
+        photo_url="https://assets.example/product.jpg",
+        enriched_brand=None,
+        enriched_category=None,
+        enriched_description=None,
+        preview_reference_url=None,
+        rendered_image_url=None,
+        logo_url="https://assets.example/logo.png",
+    )
+
+    submission = await service.submit_for_draft(
+        draft=draft,
+        mode=GenerationMode.FRESH,
+        instruction_text="generate ad image",
+        wamid="wamid-gemini-logo-1",
+        width=1920,
+        height=1080,
+    )
+    result = await service.wait_for_completion(job_id=submission.job_id)
+
+    assert observed["path"] == "/v1beta/models/gemini-3.1-flash-image-preview:generateContent"
+    get_urls = observed["get_urls"]
+    assert isinstance(get_urls, list)
+    assert "https://assets.example/product.jpg" in get_urls
+    assert "https://assets.example/logo.png" in get_urls
+    body = observed["body"]
+    assert isinstance(body, dict)
+    parts = body["contents"][0]["parts"]
+    inline_parts = [part["inline_data"] for part in parts if "inline_data" in part]
+    assert len(inline_parts) == 2
+    assert inline_parts[0]["mime_type"] == "image/jpeg"
+    assert inline_parts[1]["mime_type"] == "image/png"
     assert result.status == NanoBananaJobStatus.COMPLETED
     assert result.output_image_url == "https://storage.example/generated/preview.png"
     await client.aclose()
@@ -985,6 +1114,221 @@ async def test_pipeline_submits_generation_job_and_sets_preview_ready(
         assert draft.status == AdDraftStatus.PREVIEW_READY
         assert draft.generation_job_id == "job-123"
         assert draft.rendered_image_url == "https://storage.googleapis.com/media/preview-1.png"
+
+
+async def test_pipeline_requests_product_confirmation_before_generation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000705"
+    await _seed_operator(session_factory, phone, language="he")
+    fake_gateway = FakeGateway()
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-confirmation.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=fake_gateway,
+        ad_generation_service=fake_generation,
+        product_resolution_service=FakeResolvedProductResolutionService(),
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-request",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "אני רוצה לעשות מודעה לגלידת מגנום"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.deterministic_action == "product_confirmation_requested"
+    assert result.generated_image_url == "https://example.com/magnum.png"
+    assert result.action_buttons_prompt is not None
+    assert result.action_buttons == [
+        (BUTTON_CONFIRM_PRODUCT_SELECTION, "כן, זה המוצר"),
+        (BUTTON_REJECT_PRODUCT_SELECTION, "לא, מוצר אחר"),
+    ]
+    assert result.publish_buttons_prompt is None
+    assert fake_generation.calls == 0
+    assert fake_generation.wait_calls == 0
+
+    async with session_scope(session_factory) as session:
+        draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert draft is not None
+        assert draft.status == AdDraftStatus.DRAFT
+        assert draft.photo_url == "https://example.com/magnum.png"
+        assert draft.awaiting_product_confirmation is True
+
+        session_obj = (
+            (
+                await session.execute(
+                    select(ConversationSession).where(ConversationSession.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert session_obj is not None
+        assert session_obj.pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION
+
+
+async def test_pipeline_product_confirmation_button_approves_and_generates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000706"
+    await _seed_operator(session_factory, phone, language="he")
+    fake_gateway = FakeGateway()
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-after-approve.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=fake_gateway,
+        ad_generation_service=fake_generation,
+        product_resolution_service=FakeResolvedProductResolutionService(),
+    )
+
+    first_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-approve-step1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "אני רוצה לעשות מודעה לגלידת מגנום"}},
+        )
+    )
+    assert first_result.deterministic_action == "product_confirmation_requested"
+    assert fake_generation.calls == 0
+
+    approve_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-approve-step2",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {
+                    "button_reply": {
+                        "id": BUTTON_CONFIRM_PRODUCT_SELECTION,
+                    }
+                },
+            },
+        )
+    )
+
+    assert approve_result.status == "processed"
+    assert approve_result.deterministic_action == "generation_completed"
+    assert approve_result.generated_image_url == (
+        "https://storage.googleapis.com/media/preview-after-approve.png"
+    )
+    assert fake_generation.calls == 1
+    assert fake_generation.wait_calls == 1
+
+    async with session_scope(session_factory) as session:
+        draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert draft is not None
+        assert draft.status == AdDraftStatus.PREVIEW_READY
+        assert draft.awaiting_product_confirmation is False
+
+        session_obj = (
+            (
+                await session.execute(
+                    select(ConversationSession).where(ConversationSession.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert session_obj is not None
+        assert session_obj.pending_question_type == PendingQuestionType.NONE
+
+
+async def test_pipeline_product_confirmation_button_rejects_and_clears_photo(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000707"
+    await _seed_operator(session_factory, phone, language="he")
+    fake_gateway = FakeGateway()
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-after-reject.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=fake_gateway,
+        ad_generation_service=fake_generation,
+        product_resolution_service=FakeResolvedProductResolutionService(),
+    )
+
+    first_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-reject-step1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "אני רוצה לעשות מודעה לגלידת מגנום"}},
+        )
+    )
+    assert first_result.deterministic_action == "product_confirmation_requested"
+    assert fake_generation.calls == 0
+
+    reject_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-reject-step2",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {
+                    "button_reply": {
+                        "id": BUTTON_REJECT_PRODUCT_SELECTION,
+                    }
+                },
+            },
+        )
+    )
+
+    assert reject_result.status == "processed"
+    assert reject_result.deterministic_action == "product_confirmation_rejected"
+    assert reject_result.generated_image_url is None
+    assert reject_result.reply_text is not None
+    assert "לא אשתמש" in reject_result.reply_text
+    assert fake_generation.calls == 0
+    assert fake_generation.wait_calls == 0
+
+    async with session_scope(session_factory) as session:
+        draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert draft is not None
+        assert draft.status == AdDraftStatus.DRAFT
+        assert draft.awaiting_product_confirmation is False
+        assert draft.photo_url is None
+        assert draft.enriched_image_url is None
+
+        session_obj = (
+            (
+                await session.execute(
+                    select(ConversationSession).where(ConversationSession.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert session_obj is not None
+        assert session_obj.pending_question_type == PendingQuestionType.NONE
 
 
 async def test_pipeline_brand_conflict_uses_operator_brand_and_logs_audit(

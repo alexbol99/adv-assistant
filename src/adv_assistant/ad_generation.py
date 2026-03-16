@@ -464,41 +464,53 @@ class GeminiFlashImageAdGenerationService:
         draft: GenerationDraftInput,
     ) -> dict[str, Any]:
         parts: list[dict[str, Any]] = [{"text": prompt}]
+        included_urls: set[str] = set()
+
+        async def append_inline_image(
+            *,
+            url: str | None,
+            label: str,
+            required: bool = False,
+        ) -> None:
+            if url is None:
+                return
+            normalized_url = url.strip()
+            if not normalized_url or normalized_url in included_urls:
+                return
+            try:
+                content, mime_type = await self._download_reference_image(normalized_url)
+            except AdGenerationError:
+                if required:
+                    raise
+                logger.warning(
+                    "Could not download %s for inline generation (url=%s)",
+                    label,
+                    normalized_url,
+                )
+                return
+            parts.append(
+                {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": base64.b64encode(content).decode("ascii"),
+                    }
+                }
+            )
+            included_urls.add(normalized_url)
 
         # Include operator product photo as inline image data so the model
         # can actually "see" the product.
-        if draft.photo_url:
-            try:
-                photo_content, photo_mime_type = await self._download_reference_image(
-                    draft.photo_url
-                )
-                parts.append(
-                    {
-                        "inline_data": {
-                            "mime_type": photo_mime_type,
-                            "data": base64.b64encode(photo_content).decode("ascii"),
-                        }
-                    }
-                )
-            except AdGenerationError:
-                logger.warning(
-                    "Could not download product photo for inline generation (url=%s)",
-                    draft.photo_url,
-                )
+        await append_inline_image(url=draft.photo_url, label="product photo")
+        # Include business logo as inline image data so logo styling can be grounded.
+        await append_inline_image(url=draft.logo_url, label="business logo")
 
         # Include reference image for REFERENCE mode.
         reference_url = draft.preview_reference_url or draft.rendered_image_url
         if mode == GenerationMode.REFERENCE and reference_url:
-            reference_content, reference_mime_type = await self._download_reference_image(
-                reference_url
-            )
-            parts.append(
-                {
-                    "inline_data": {
-                        "mime_type": reference_mime_type,
-                        "data": base64.b64encode(reference_content).decode("ascii"),
-                    }
-                }
+            await append_inline_image(
+                url=reference_url,
+                label="reference image",
+                required=True,
             )
 
         return {

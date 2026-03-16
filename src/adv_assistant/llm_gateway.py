@@ -40,6 +40,8 @@ BUTTON_CONFIRM_PUBLISH = "confirm_publish"
 BUTTON_CANCEL_PUBLISH = "cancel_publish"
 BUTTON_CONFIRM_DELETE_ALL = "confirm_delete_all"
 BUTTON_CANCEL_DELETE_ALL = "cancel_delete_all"
+BUTTON_CONFIRM_PRODUCT_SELECTION = "confirm_product_selection"
+BUTTON_REJECT_PRODUCT_SELECTION = "reject_product_selection"
 
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
