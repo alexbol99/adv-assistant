@@ -124,6 +124,9 @@ class StaticEnrichmentService:
     async def enrich_by_ean(self, *, ean: str, language: str) -> EnrichedProduct | None:
         return self._enriched
 
+    async def enrich_by_name(self, *, product_name: str, language: str) -> EnrichedProduct | None:
+        return None
+
     async def close(self) -> None:
         return None
 
@@ -1048,7 +1051,10 @@ async def test_pipeline_brand_conflict_uses_operator_brand_and_logs_audit(
     )
 
     assert result.status == "processed"
-    assert result.generated_image_url == "https://storage.googleapis.com/media/preview-brand-conflict.png"
+    assert (
+        result.generated_image_url
+        == "https://storage.googleapis.com/media/preview-brand-conflict.png"
+    )
     assert fake_generation.calls == 1
     assert fake_generation.last_draft is not None
     assert fake_generation.last_draft.product_brand == "Private Label"

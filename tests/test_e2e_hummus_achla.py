@@ -5,7 +5,6 @@ message, through product confirmation, to ad generation and preview.
 """
 
 from collections.abc import AsyncIterator
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -21,11 +20,11 @@ from adv_assistant.ad_generation import (
 from adv_assistant.db.base import Base
 from adv_assistant.db.enums import AdDraftStatus, PendingQuestionType
 from adv_assistant.db.repositories import (
-    AdDraftRepository,
     ConversationSessionRepository,
     OperatorRepository,
 )
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
+from adv_assistant.enrichment import EnrichedProduct, ProviderChainEnrichmentService
 from adv_assistant.llm_gateway import (
     BUTTON_CONFIRM_PRODUCT,
     BUTTON_REJECT_PRODUCT,
@@ -35,7 +34,6 @@ from adv_assistant.llm_gateway import (
     IntentClassification,
     ReplyGeneration,
 )
-from adv_assistant.enrichment import EnrichedProduct, ProviderChainEnrichmentService
 from adv_assistant.pipeline import InboundTaskProcessor
 from adv_assistant.tasks_queue import InboundTaskPayload
 
@@ -64,10 +62,10 @@ class HummusGateway:
     ) -> ExtractedAdFields:
         return ExtractedAdFields(
             product_name="חומוס אחלה",
-            price=None,        # user didn't mention price
+            price=None,  # user didn't mention price
             currency=None,
             promo_text=None,
-            ean=None,           # no barcode in text
+            ean=None,  # no barcode in text
             photo_url=None,
         )
 
@@ -77,7 +75,11 @@ class HummusGateway:
         return ExtractedBrandingFields()
 
     async def generate_reply(
-        self, *, intent: Intent, message_text: str, language: str,
+        self,
+        *,
+        intent: Intent,
+        message_text: str,
+        language: str,
         extracted_fields: ExtractedAdFields | None,
     ) -> ReplyGeneration:
         return ReplyGeneration(reply_text="fallback")
@@ -93,8 +95,14 @@ class FakeGenerationService:
         self.submitted_drafts: list[GenerationDraftInput] = []
 
     async def submit_for_draft(
-        self, *, draft: GenerationDraftInput, mode: GenerationMode,
-        instruction_text: str, wamid: str, width: int, height: int,
+        self,
+        *,
+        draft: GenerationDraftInput,
+        mode: GenerationMode,
+        instruction_text: str,
+        wamid: str,
+        width: int,
+        height: int,
     ) -> GenerationSubmission:
         self.calls += 1
         self.submitted_drafts.append(draft)
@@ -122,9 +130,7 @@ class FakeSerperImageSearchProvider:
     def source(self) -> str:
         return "serper_images"
 
-    async def lookup_by_name(
-        self, *, product_name: str, language: str
-    ) -> EnrichedProduct:
+    async def lookup_by_name(self, *, product_name: str, language: str) -> EnrichedProduct:
         return EnrichedProduct(
             image_url=f"https://images.example/search/{product_name}.jpg",
             source=self.source,
@@ -148,20 +154,24 @@ class TrackingWhatsAppClient:
     async def send_image(
         self, *, to_phone: str, image_url: str, caption: str | None = None
     ) -> None:
-        self.sent_images.append(
-            {"to_phone": to_phone, "image_url": image_url, "caption": caption}
-        )
+        self.sent_images.append({"to_phone": to_phone, "image_url": image_url, "caption": caption})
 
     async def send_buttons(
-        self, *, to_phone: str, body_text: str, buttons: list[tuple[str, str]],
+        self,
+        *,
+        to_phone: str,
+        body_text: str,
+        buttons: list[tuple[str, str]],
         header_image_url: str | None = None,
     ) -> None:
-        self.sent_buttons.append({
-            "to_phone": to_phone,
-            "body_text": body_text,
-            "buttons": buttons,
-            "header_image_url": header_image_url,
-        })
+        self.sent_buttons.append(
+            {
+                "to_phone": to_phone,
+                "body_text": body_text,
+                "buttons": buttons,
+                "header_image_url": header_image_url,
+            }
+        )
 
     async def close(self) -> None:
         pass
@@ -265,7 +275,7 @@ async def test_e2e_hummus_achla_full_flow(
     assert result1.llm_used is True
     assert result1.intent == "create_ad"
     assert result1.deterministic_action == "product_confirmation_sent"
-    assert result1.generated_image_url is None       # NOT yet generated
+    assert result1.generated_image_url is None  # NOT yet generated
     assert result1.publish_buttons_prompt is None
 
     # -- reply_text includes product name --
@@ -325,7 +335,7 @@ async def test_e2e_hummus_achla_full_flow(
     assert result2.duplicate is False
     assert result2.session_created is False
     assert result2.draft_created is False
-    assert result2.llm_used is False     # button handler is deterministic
+    assert result2.llm_used is False  # button handler is deterministic
     assert result2.intent == "product_confirmed"
     assert result2.deterministic_action == "generation_completed"
     assert result2.generated_image_url is not None

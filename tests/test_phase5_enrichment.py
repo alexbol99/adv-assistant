@@ -118,6 +118,9 @@ class StaticEnrichmentService:
         self.calls += 1
         return self._result
 
+    async def enrich_by_name(self, *, product_name: str, language: str) -> EnrichedProduct | None:
+        return None
+
     async def close(self) -> None:
         return None
 

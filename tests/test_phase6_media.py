@@ -157,6 +157,9 @@ class StaticEnrichmentService:
     async def enrich_by_ean(self, *, ean: str, language: str) -> EnrichedProduct | None:
         return self._enriched
 
+    async def enrich_by_name(self, *, product_name: str, language: str) -> EnrichedProduct | None:
+        return None
+
     async def close(self) -> None:
         return None
 

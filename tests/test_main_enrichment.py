@@ -22,5 +22,4 @@ def test_build_enrichment_service_enabled_uses_expected_provider_chain() -> None
     assert [provider.source for provider in providers] == [
         "open_food_facts",
         "ean_fallback",
-        "web_search",
     ]
