@@ -37,6 +37,7 @@ from adv_assistant.llm_gateway import (
     IntentClassification,
     ReplyGeneration,
 )
+from adv_assistant.media_ingest import IngestedOperatorPhoto
 from adv_assistant.media_store import MediaUpload
 from adv_assistant.pipeline import InboundTaskProcessor
 from adv_assistant.product_resolution_models import ProductResolutionResult, SelectedProductResult
@@ -159,6 +160,54 @@ class FakeResolvedProductResolutionService:
                 source="fake",
                 search_method="retailer",
             ),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeResolvedProductResolutionServiceUnsafeImage:
+    enabled = True
+
+    async def resolve(
+        self,
+        *,
+        message_text: str,
+        language: str,
+    ) -> ProductResolutionResult:
+        return ProductResolutionResult(
+            status="resolved",
+            brand="Magnum",
+            product_query="גלידת מגנום",
+            raw_user_text=message_text,
+            selected_result=SelectedProductResult(
+                title="גלידת מגנום",
+                description="Magnum ice cream",
+                image_url="https://www.tiktok.com/api/img/?itemId=123",
+                product_url="https://example.com/magnum",
+                source="fake",
+                search_method="retailer",
+            ),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeExternalPhotoIngestor:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def ingest_whatsapp_image(self, *, media_id: str) -> IngestedOperatorPhoto:
+        raise RuntimeError("not used in this test")
+
+    async def ingest_external_image_url(self, *, image_url: str) -> IngestedOperatorPhoto:
+        self.calls.append(image_url)
+        return IngestedOperatorPhoto(
+            public_url="https://storage.example/rehosted/magnum.jpg",
+            object_name="rehosted/magnum.jpg",
+            content_type="image/jpeg",
+            content=b"fake-image",
         )
 
     async def close(self) -> None:
@@ -1179,6 +1228,48 @@ async def test_pipeline_requests_product_confirmation_before_generation(
         assert session_obj.pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION
 
 
+async def test_pipeline_product_confirmation_rehosts_unsafe_image_url(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000726"
+    await _seed_operator(session_factory, phone, language="he")
+    fake_ingestor = FakeExternalPhotoIngestor()
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=FakeGateway(),
+        ad_generation_service=FakeGenerationService(
+            poll_result=GenerationPollResult(
+                status=NanoBananaJobStatus.COMPLETED,
+                output_image_url="https://storage.googleapis.com/media/preview-unsafe.png",
+            )
+        ),
+        product_resolution_service=FakeResolvedProductResolutionServiceUnsafeImage(),
+        operator_photo_ingestor=fake_ingestor,
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-unsafe-image",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "מודעה לגלידת מגנום"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.deterministic_action == "product_confirmation_requested"
+    assert result.generated_image_url == "https://storage.example/rehosted/magnum.jpg"
+    assert fake_ingestor.calls == ["https://www.tiktok.com/api/img/?itemId=123"]
+
+    async with session_scope(session_factory) as session:
+        draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert draft is not None
+        assert draft.photo_url == "https://storage.example/rehosted/magnum.jpg"
+
+
 async def test_pipeline_product_confirmation_button_approves_and_generates(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1251,7 +1342,7 @@ async def test_pipeline_product_confirmation_button_approves_and_generates(
             .first()
         )
         assert session_obj is not None
-        assert session_obj.pending_question_type == PendingQuestionType.NONE
+        assert session_obj.pending_question_type == PendingQuestionType.MISSING_INFO
 
 
 async def test_pipeline_product_confirmation_button_rejects_and_clears_photo(

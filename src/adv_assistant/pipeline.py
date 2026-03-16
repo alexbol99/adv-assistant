@@ -3,9 +3,11 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adv_assistant import question_policy
 from adv_assistant.ad_generation import (
     AdGenerationError,
     AdGenerationService,
@@ -81,26 +83,6 @@ _ONBOARDING_STEP_AWAITING_NAME = "awaiting_name"
 _ONBOARDING_STEP_AWAITING_LOGO = "awaiting_logo"
 
 _PENDING_UPLOAD_LOGO = "logo"
-_PENDING_FOLLOWUP_PRICE = "price"
-_PENDING_FOLLOWUP_STORE_TYPE = "store_type"
-_PENDING_FOLLOWUP_CREATIVE_GUIDANCE = "creative_guidance"
-_PENDING_FOLLOWUP_REGENERATE_CONFIRMATION = "regenerate_confirmation"
-_PENDING_FOLLOWUP_KEYS = {
-    _PENDING_FOLLOWUP_PRICE,
-    _PENDING_FOLLOWUP_STORE_TYPE,
-    _PENDING_FOLLOWUP_CREATIVE_GUIDANCE,
-}
-_FOLLOWUP_INTERRUPT_INTENTS = {
-    Intent.CREATE_AD,
-    Intent.REGENERATE_WITH_REFERENCE,
-    Intent.REGENERATE_FROM_SCRATCH,
-    Intent.PUBLISH_AD,
-    Intent.SET_LOGO,
-    Intent.SET_BRANDING,
-    Intent.DELETE_ALL,
-    Intent.LIST_ADS,
-    Intent.HELP,
-}
 _AD_INTENTS = {
     Intent.CREATE_AD,
     Intent.REGENERATE_WITH_REFERENCE,
@@ -141,6 +123,19 @@ _REQUEST_TYPE_STORE_GENERAL_KEYWORDS = {
     "מודעה כללית",
     "מבצעי החנות",
 }
+_CONFIRMATION_UNSAFE_IMAGE_HOSTS = {
+    "tiktok.com",
+    "www.tiktok.com",
+    "lookaside.instagram.com",
+    "l.instagram.com",
+}
+_CONFIRMATION_SAFE_IMAGE_SUFFIXES = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif",
+)
 
 
 @dataclass(slots=True)
@@ -179,7 +174,8 @@ class _GenerationExecutionResult:
     draft: AdDraft
     reply_text: str | None
     generated_image_url: str | None
-    pending_followup_question: str | None
+    pending_question_type: PendingQuestionType
+    pending_question_context: dict[str, Any]
     publish_buttons_prompt: str | None
     deterministic_action: str | None
 
@@ -230,17 +226,7 @@ def _contains_any_keyword(message_text: str, keywords: set[str]) -> bool:
 
 
 def _classification_prompt(language: str) -> str:
-    if language.lower() == "he":
-        return (
-            "כדי להמשיך צריך להבין איזה סוג מודעה אתה רוצה: "
-            "מוצר אחד, כמה מוצרים, או מודעה כללית לחנות? "
-            "כתוב רק אחת מהאפשרויות."
-        )
-    return (
-        "To continue, tell me which ad type you want: "
-        "single product, multiple products, or a general store ad. "
-        "Reply with one option only."
-    )
+    return question_policy.classification_prompt(language)
 
 
 def _request_type_resolved_reply(*, request_type: AdRequestType, language: str) -> str | None:
@@ -335,7 +321,6 @@ class InboundTaskProcessor:
             history: list[dict[str, str]] = []
             current_draft_id: uuid.UUID | None = None
             pending_upload_type: str | None = None
-            pending_followup_question: str | None = None
             pending_question_type = PendingQuestionType.NONE
             pending_question_context: dict[str, Any] = {}
             last_user_intent_hint: str | None = None
@@ -343,9 +328,15 @@ class InboundTaskProcessor:
                 history = list(session_obj.history)
                 current_draft_id = session_obj.current_draft_id
                 pending_upload_type = session_obj.pending_upload_type
-                pending_followup_question = session_obj.pending_followup_question
                 pending_question_type = session_obj.pending_question_type
                 pending_question_context = dict(session_obj.pending_question_context or {})
+                pending_question_type, pending_question_context = (
+                    question_policy.normalize_legacy_pending_followup(
+                        pending_question_type=pending_question_type,
+                        pending_question_context=pending_question_context,
+                        pending_followup_question=session_obj.pending_followup_question,
+                    )
+                )
                 last_user_intent_hint = session_obj.last_user_intent_hint
 
             # --- ONBOARDING GATE ---
@@ -519,7 +510,8 @@ class InboundTaskProcessor:
                             current_draft = generation_result.draft
                             reply_text = generation_result.reply_text
                             generated_image_url = generation_result.generated_image_url
-                            pending_followup_question = generation_result.pending_followup_question
+                            pending_question_type = generation_result.pending_question_type
+                            pending_question_context = generation_result.pending_question_context
                             publish_buttons_prompt = generation_result.publish_buttons_prompt
                             deterministic_action = (
                                 generation_result.deterministic_action
@@ -728,8 +720,9 @@ class InboundTaskProcessor:
                                 current_draft = generation_result.draft
                                 reply_text = generation_result.reply_text
                                 generated_image_url = generation_result.generated_image_url
-                                pending_followup_question = (
-                                    generation_result.pending_followup_question
+                                pending_question_type = generation_result.pending_question_type
+                                pending_question_context = (
+                                    generation_result.pending_question_context
                                 )
                                 publish_buttons_prompt = generation_result.publish_buttons_prompt
                                 deterministic_action = (
@@ -746,7 +739,12 @@ class InboundTaskProcessor:
                         )
                         for field_name in clear_fields:
                             setattr(operator, field_name, None)
-                        pending_followup_question = None
+                        if pending_question_type in {
+                            PendingQuestionType.MISSING_INFO,
+                            PendingQuestionType.GENERATION_RETRY,
+                        }:
+                            pending_question_type = PendingQuestionType.NONE
+                            pending_question_context = {}
                         deterministic_action = "clear_branding_fields"
                         intent_value = deterministic_action
                         await audit_repo.log(
@@ -777,51 +775,127 @@ class InboundTaskProcessor:
                             )
                         except ValueError:
                             forced_intent = Intent.CREATE_AD
-                    regenerate_confirmation_unresolved = False
-                    if pending_followup_question == _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION:
-                        yes_no = _parse_yes_no_answer(
-                            message_text=sanitized_text,
-                            language=operator.language,
-                        )
-                        if yes_no is False:
-                            pending_followup_question = None
-                            reply_text = _regenerate_again_declined_reply(operator.language)
-                            if current_draft.rendered_image_url is not None:
-                                publish_buttons_prompt = _publish_buttons_prompt(operator.language)
-                        elif yes_no is None:
-                            regenerate_confirmation_unresolved = True
-                        else:
-                            followup_regen_requested = True
-                            pending_followup_question = None
-                            forced_intent = Intent.REGENERATE_WITH_REFERENCE
-
-                    if reply_text is None and pending_followup_question in _PENDING_FOLLOWUP_KEYS:
-                        classification = await self._llm_gateway.classify_intent(
-                            message_text=sanitized_text,
-                            language=operator.language,
-                            history=history,
-                        )
-                        llm_used = self._llm_gateway.uses_external_llm or llm_used
-                        if _should_interrupt_pending_followup(classification.intent):
-                            pending_followup_question = None
-                        else:
-                            (
-                                current_draft,
-                                pending_followup_question,
-                                reply_text,
-                                llm_used_in_followup,
-                            ) = await self._handle_pending_followup_answer(
-                                payload=payload,
-                                draft_repo=draft_repo,
-                                operator_repo=operator_repo,
-                                audit_repo=audit_repo,
-                                current_draft=current_draft,
-                                operator=operator,
-                                history=history,
-                                pending_followup_question=pending_followup_question,
+                    pending_question_key = question_policy.pending_question_key(
+                        pending_question_type=pending_question_type,
+                        pending_question_context=pending_question_context,
+                    )
+                    if (
+                        reply_text is None
+                        and pending_question_key is not None
+                        and pending_question_type
+                        in {
+                            PendingQuestionType.MISSING_INFO,
+                            PendingQuestionType.GENERATION_RETRY,
+                        }
+                    ):
+                        transition_status: question_policy.PendingResolutionStatus | None = None
+                        pending_handled = False
+                        if pending_question_type == PendingQuestionType.GENERATION_RETRY:
+                            yes_no = _parse_yes_no_answer(
                                 message_text=sanitized_text,
+                                language=operator.language,
                             )
-                            llm_used = llm_used or llm_used_in_followup
+                            if yes_no is True:
+                                followup_regen_requested = True
+                                forced_intent = Intent.REGENERATE_WITH_REFERENCE
+                                transition_status = question_policy.PendingResolutionStatus.RESOLVED
+                                pending_handled = True
+                            elif yes_no is False:
+                                reply_text = _regenerate_again_declined_reply(operator.language)
+                                if current_draft.rendered_image_url is not None:
+                                    publish_buttons_prompt = _publish_buttons_prompt(
+                                        operator.language
+                                    )
+                                transition_status = question_policy.PendingResolutionStatus.RESOLVED
+                                pending_handled = True
+                            else:
+                                classification = await self._llm_gateway.classify_intent(
+                                    message_text=sanitized_text,
+                                    language=operator.language,
+                                    history=history,
+                                )
+                                llm_used = self._llm_gateway.uses_external_llm or llm_used
+                                if (
+                                    classification.intent
+                                    in question_policy.INTERRUPT_PENDING_QUESTION_INTENTS
+                                ):
+                                    transition_status = (
+                                        question_policy.PendingResolutionStatus.INTERRUPTED
+                                    )
+                                else:
+                                    transition_status = (
+                                        question_policy.PendingResolutionStatus.UNRESOLVED
+                                    )
+                                    classification = IntentClassification(intent=Intent.UNKNOWN)
+                                pending_handled = True
+                        elif pending_question_type == PendingQuestionType.MISSING_INFO:
+                            classification = await self._llm_gateway.classify_intent(
+                                message_text=sanitized_text,
+                                language=operator.language,
+                                history=history,
+                            )
+                            llm_used = self._llm_gateway.uses_external_llm or llm_used
+                            if (
+                                classification.intent
+                                in question_policy.INTERRUPT_PENDING_QUESTION_INTENTS
+                            ):
+                                transition_status = (
+                                    question_policy.PendingResolutionStatus.INTERRUPTED
+                                )
+                                pending_handled = True
+                            else:
+                                (
+                                    current_draft,
+                                    transition_status,
+                                    pending_reply_text,
+                                    llm_used_in_pending,
+                                ) = await self._resolve_pending_missing_info_answer(
+                                    payload=payload,
+                                    draft_repo=draft_repo,
+                                    operator_repo=operator_repo,
+                                    audit_repo=audit_repo,
+                                    current_draft=current_draft,
+                                    operator=operator,
+                                    history=history,
+                                    pending_question_context=pending_question_context,
+                                    message_text=sanitized_text,
+                                )
+                                llm_used = llm_used or llm_used_in_pending
+                                if pending_reply_text is not None:
+                                    reply_text = pending_reply_text
+                                classification = IntentClassification(intent=Intent.UNKNOWN)
+                                pending_handled = True
+                        if pending_handled and transition_status is not None:
+                            next_question = None
+                            if (
+                                transition_status
+                                == question_policy.PendingResolutionStatus.RESOLVED
+                                and forced_intent is None
+                            ):
+                                is_post_preview_phase = (
+                                    pending_question_context.get(
+                                        question_policy.QUESTION_CONTEXT_PHASE
+                                    )
+                                    == question_policy.QUESTION_PHASE_POST_PREVIEW
+                                )
+                                if is_post_preview_phase:
+                                    next_question = self._select_next_question(
+                                        current_draft=current_draft,
+                                        operator=operator,
+                                        after_preview_generation=True,
+                                        allow_regenerate_confirmation=True,
+                                    )
+                            pending_transition = question_policy.resolve_pending_question(
+                                pending_question_type=pending_question_type,
+                                pending_question_context=pending_question_context,
+                                status=transition_status,
+                                language=operator.language,
+                                next_question=next_question,
+                            )
+                            pending_question_type = pending_transition.pending_question_type
+                            pending_question_context = pending_transition.pending_question_context
+                            if reply_text is None and pending_transition.reply_text is not None:
+                                reply_text = pending_transition.reply_text
 
                     if forced_intent is not None:
                         classification = IntentClassification(intent=forced_intent)
@@ -834,15 +908,6 @@ class InboundTaskProcessor:
                         llm_used = self._llm_gateway.uses_external_llm or llm_used
                     elif classification is None:
                         classification = IntentClassification(intent=Intent.UNKNOWN)
-
-                    if (
-                        pending_followup_question == _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION
-                        and forced_intent is None
-                    ):
-                        if _should_interrupt_pending_followup(classification.intent):
-                            pending_followup_question = None
-                        elif regenerate_confirmation_unresolved and reply_text is None:
-                            reply_text = _regenerate_again_prompt(operator.language)
 
                     intent_value = classification.intent.value
 
@@ -1077,12 +1142,32 @@ class InboundTaskProcessor:
                                 and current_draft.awaiting_product_confirmation
                                 and current_draft.photo_url is not None
                             ):
+                                (
+                                    current_draft,
+                                    confirmation_image_url,
+                                ) = await self._prepare_product_confirmation_image(
+                                    payload=payload,
+                                    draft_repo=draft_repo,
+                                    audit_repo=audit_repo,
+                                    current_draft=current_draft,
+                                )
                                 deterministic_action = "product_confirmation_requested"
-                                generated_image_url = current_draft.photo_url
+                                generated_image_url = confirmation_image_url
                                 reply_text = _product_confirmation_caption(
                                     language=operator.language,
                                     product_name=current_draft.product_name,
                                 )
+                                if (
+                                    generated_image_url is None
+                                    and current_draft.photo_url is not None
+                                ):
+                                    reply_text = (
+                                        f"{reply_text}\n\n"
+                                        + _product_confirmation_image_link_fallback_reply(
+                                            language=operator.language,
+                                            image_url=current_draft.photo_url,
+                                        )
+                                    )
                                 action_buttons_prompt = _product_confirmation_buttons_prompt(
                                     operator.language
                                 )
@@ -1157,7 +1242,8 @@ class InboundTaskProcessor:
                             current_draft = generation_result.draft
                             reply_text = generation_result.reply_text
                             generated_image_url = generation_result.generated_image_url
-                            pending_followup_question = generation_result.pending_followup_question
+                            pending_question_type = generation_result.pending_question_type
+                            pending_question_context = generation_result.pending_question_context
                             publish_buttons_prompt = generation_result.publish_buttons_prompt
                             if generation_result.deterministic_action is not None:
                                 deterministic_action = generation_result.deterministic_action
@@ -1275,7 +1361,10 @@ class InboundTaskProcessor:
                 last_user_intent_hint=intent_value,
                 current_draft_id=current_draft.id,
                 pending_upload_type=pending_upload_type,
-                pending_followup_question=pending_followup_question,
+                pending_followup_question=question_policy.legacy_pending_followup_from_canonical(
+                    pending_question_type=pending_question_type,
+                    pending_question_context=pending_question_context,
+                ),
                 last_active_at=now,
             )
 
@@ -1916,6 +2005,27 @@ class InboundTaskProcessor:
                 exc_info=True,
             )
 
+    def _select_next_question(
+        self,
+        *,
+        current_draft: AdDraft,
+        operator: Operator,
+        after_preview_generation: bool,
+        allow_regenerate_confirmation: bool,
+    ) -> question_policy.QuestionSelection | None:
+        return question_policy.select_next_question(
+            request_type=current_draft.request_type,
+            classification_resolved=current_draft.is_classification_resolved,
+            awaiting_product_confirmation=current_draft.awaiting_product_confirmation,
+            has_product_name=current_draft.product_name is not None,
+            has_price=current_draft.price is not None,
+            has_store_type=_normalize_brand_value(operator.store_type) is not None,
+            has_creative_guidance=_normalize_brand_value(operator.creative_guidance) is not None,
+            language=operator.language,
+            after_preview_generation=after_preview_generation,
+            allow_regenerate_confirmation=allow_regenerate_confirmation,
+        )
+
     async def _execute_generation(
         self,
         *,
@@ -1964,7 +2074,8 @@ class InboundTaskProcessor:
                     draft=current_draft,
                     reply_text="This draft was already changed. Please refresh and try again.",
                     generated_image_url=None,
-                    pending_followup_question=None,
+                    pending_question_type=PendingQuestionType.NONE,
+                    pending_question_context={},
                     publish_buttons_prompt=None,
                     deterministic_action=None,
                 )
@@ -2020,7 +2131,8 @@ class InboundTaskProcessor:
                         draft=current_draft,
                         reply_text="This draft was already changed. Please refresh and try again.",
                         generated_image_url=None,
-                        pending_followup_question=None,
+                        pending_question_type=PendingQuestionType.NONE,
+                        pending_question_context={},
                         publish_buttons_prompt=None,
                         deterministic_action=None,
                     )
@@ -2048,25 +2160,25 @@ class InboundTaskProcessor:
                     poll_result.output_image_url,
                 )
                 reply_text = _generation_completed_reply(operator.language)
-                pending_followup_question = _next_followup_question(
-                    draft=current_draft,
+                next_question = self._select_next_question(
+                    current_draft=current_draft,
                     operator=operator,
+                    after_preview_generation=True,
+                    allow_regenerate_confirmation=not followup_regen_requested,
                 )
-                if pending_followup_question is not None:
-                    followup_prompt = _followup_question_prompt(
-                        pending_followup_question,
-                        operator.language,
-                    )
-                    reply_text = f"{reply_text}\n\n{followup_prompt}"
-                elif not followup_regen_requested:
-                    pending_followup_question = _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION
-                    reply_text = f"{reply_text}\n\n{_regenerate_again_prompt(operator.language)}"
+                pending_question_type = PendingQuestionType.NONE
+                pending_question_context: dict[str, Any] = {}
+                if next_question is not None:
+                    pending_question_type = next_question.pending_question_type
+                    pending_question_context = next_question.pending_question_context
+                    reply_text = f"{reply_text}\n\n{next_question.prompt_text}"
 
                 return _GenerationExecutionResult(
                     draft=current_draft,
                     reply_text=reply_text,
                     generated_image_url=poll_result.output_image_url,
-                    pending_followup_question=pending_followup_question,
+                    pending_question_type=pending_question_type,
+                    pending_question_context=pending_question_context,
                     publish_buttons_prompt=_publish_buttons_prompt(operator.language),
                     deterministic_action="generation_completed",
                 )
@@ -2109,7 +2221,8 @@ class InboundTaskProcessor:
                 draft=current_draft,
                 reply_text=_generation_failed_reply(operator.language),
                 generated_image_url=None,
-                pending_followup_question=None,
+                pending_question_type=PendingQuestionType.NONE,
+                pending_question_context={},
                 publish_buttons_prompt=None,
                 deterministic_action="generation_failed",
             )
@@ -2146,12 +2259,13 @@ class InboundTaskProcessor:
                 draft=current_draft,
                 reply_text=_generation_failed_reply(operator.language),
                 generated_image_url=None,
-                pending_followup_question=None,
+                pending_question_type=PendingQuestionType.NONE,
+                pending_question_context={},
                 publish_buttons_prompt=None,
                 deterministic_action="generation_failed",
             )
 
-    async def _handle_pending_followup_answer(
+    async def _resolve_pending_missing_info_answer(
         self,
         *,
         payload: InboundTaskPayload,
@@ -2161,12 +2275,20 @@ class InboundTaskProcessor:
         current_draft: AdDraft,
         operator: Operator,
         history: list[dict[str, str]],
-        pending_followup_question: str,
+        pending_question_context: dict[str, Any],
         message_text: str,
-    ) -> tuple[AdDraft, str | None, str, bool]:
+    ) -> tuple[
+        AdDraft,
+        question_policy.PendingResolutionStatus,
+        str | None,
+        bool,
+    ]:
         llm_used = False
-
-        if pending_followup_question == _PENDING_FOLLOWUP_PRICE:
+        question_key = question_policy.pending_question_key(
+            pending_question_type=PendingQuestionType.MISSING_INFO,
+            pending_question_context=pending_question_context,
+        )
+        if question_key == question_policy.QUESTION_KEY_PRICE:
             extracted_fields = await self._llm_gateway.extract_ad_fields(
                 message_text=message_text,
                 language=operator.language,
@@ -2177,8 +2299,8 @@ class InboundTaskProcessor:
             if "price" not in update_fields:
                 return (
                     current_draft,
-                    pending_followup_question,
-                    _followup_reprompt(pending_followup_question, operator.language),
+                    question_policy.PendingResolutionStatus.UNRESOLVED,
+                    None,
                     llm_used,
                 )
 
@@ -2200,7 +2322,7 @@ class InboundTaskProcessor:
                 )
                 return (
                     current_draft,
-                    pending_followup_question,
+                    question_policy.PendingResolutionStatus.UNRESOLVED,
                     "This draft was already changed. Please refresh and try again.",
                     llm_used,
                 )
@@ -2216,13 +2338,19 @@ class InboundTaskProcessor:
                     "currency": current_draft.currency,
                 },
             )
-        elif pending_followup_question == _PENDING_FOLLOWUP_STORE_TYPE:
+            return (
+                current_draft,
+                question_policy.PendingResolutionStatus.RESOLVED,
+                None,
+                llm_used,
+            )
+        if question_key == question_policy.QUESTION_KEY_STORE_TYPE:
             store_type = _truncate(message_text, 120)
             if store_type is None:
                 return (
                     current_draft,
-                    pending_followup_question,
-                    _followup_reprompt(pending_followup_question, operator.language),
+                    question_policy.PendingResolutionStatus.UNRESOLVED,
+                    None,
                     llm_used,
                 )
             await operator_repo.update_branding(payload.operator_phone, store_type=store_type)
@@ -2233,13 +2361,19 @@ class InboundTaskProcessor:
                 operator_phone=payload.operator_phone,
                 metadata={"wamid": payload.wamid, "store_type": store_type},
             )
-        elif pending_followup_question == _PENDING_FOLLOWUP_CREATIVE_GUIDANCE:
+            return (
+                current_draft,
+                question_policy.PendingResolutionStatus.RESOLVED,
+                None,
+                llm_used,
+            )
+        if question_key == question_policy.QUESTION_KEY_CREATIVE_GUIDANCE:
             creative_guidance = _truncate(message_text, 500)
             if creative_guidance is None:
                 return (
                     current_draft,
-                    pending_followup_question,
-                    _followup_reprompt(pending_followup_question, operator.language),
+                    question_policy.PendingResolutionStatus.UNRESOLVED,
+                    None,
                     llm_used,
                 )
             await operator_repo.update_branding(
@@ -2253,21 +2387,120 @@ class InboundTaskProcessor:
                 operator_phone=payload.operator_phone,
                 metadata={"wamid": payload.wamid},
             )
-
-        next_followup = _next_followup_question(draft=current_draft, operator=operator)
-        if next_followup is not None:
             return (
                 current_draft,
-                next_followup,
-                _followup_question_prompt(next_followup, operator.language),
+                question_policy.PendingResolutionStatus.RESOLVED,
+                None,
+                llm_used,
+            )
+        if question_key == question_policy.QUESTION_KEY_PRODUCT_NAME:
+            product_name = _truncate(message_text, 120)
+            if product_name is None:
+                return (
+                    current_draft,
+                    question_policy.PendingResolutionStatus.UNRESOLVED,
+                    None,
+                    llm_used,
+                )
+            updated_draft = await draft_repo.update_for_operator_with_version(
+                draft_id=current_draft.id,
+                operator_phone=payload.operator_phone,
+                expected_version=current_draft.version,
+                product_name=product_name,
+            )
+            if updated_draft is None:
+                await audit_repo.log(
+                    actor="system",
+                    action="draft_stale_write_detected",
+                    operator_phone=payload.operator_phone,
+                    metadata={"wamid": payload.wamid},
+                )
+                return (
+                    current_draft,
+                    question_policy.PendingResolutionStatus.UNRESOLVED,
+                    "This draft was already changed. Please refresh and try again.",
+                    llm_used,
+                )
+            current_draft = updated_draft
+            await audit_repo.log(
+                actor="system",
+                action="missing_info_product_name_captured",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "product_name": current_draft.product_name,
+                },
+            )
+            return (
+                current_draft,
+                question_policy.PendingResolutionStatus.RESOLVED,
+                None,
                 llm_used,
             )
         return (
             current_draft,
-            _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION,
-            _regenerate_again_prompt(operator.language),
+            question_policy.PendingResolutionStatus.UNRESOLVED,
+            None,
             llm_used,
         )
+
+    async def _prepare_product_confirmation_image(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+    ) -> tuple[AdDraft, str | None]:
+        photo_url = _truncate(current_draft.photo_url, 2000)
+        if photo_url is None:
+            return current_draft, None
+
+        if _is_confirmation_image_url_compatible(photo_url):
+            return current_draft, photo_url
+
+        ingest_external = getattr(self._operator_photo_ingestor, "ingest_external_image_url", None)
+        if not callable(ingest_external):
+            return current_draft, None
+
+        try:
+            ingested_photo = await ingest_external(image_url=photo_url)
+        except MediaIngestError as exc:
+            await audit_repo.log(
+                actor="system",
+                action="product_confirmation_image_rehost_failed",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "photo_url": photo_url,
+                    "error": str(exc),
+                },
+            )
+            return current_draft, None
+
+        updated_draft = await draft_repo.update_for_operator_with_version(
+            draft_id=current_draft.id,
+            operator_phone=payload.operator_phone,
+            expected_version=current_draft.version,
+            photo_url=ingested_photo.public_url,
+        )
+        if updated_draft is not None:
+            current_draft = updated_draft
+
+        await audit_repo.log(
+            actor="system",
+            action="product_confirmation_image_rehosted",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "draft_id": str(current_draft.id),
+                "source_photo_url": photo_url,
+                "rehosted_photo_url": ingested_photo.public_url,
+            },
+        )
+        return current_draft, ingested_photo.public_url
 
     async def _enrich_current_draft(
         self,
@@ -2668,7 +2901,12 @@ def _generation_mode_for_intent(intent: Intent) -> GenerationMode:
 
 
 def _is_ready_for_generation(draft: AdDraft) -> bool:
-    return draft.product_name is not None
+    return question_policy.is_generation_ready(
+        request_type=draft.request_type,
+        classification_resolved=draft.is_classification_resolved,
+        awaiting_product_confirmation=draft.awaiting_product_confirmation,
+        has_product_name=draft.product_name is not None,
+    )
 
 
 def _to_generation_draft_input(
@@ -2750,56 +2988,6 @@ def _generation_completed_reply(language: str) -> str:
     if language.lower() == "he":
         return "התצוגה המקדימה מוכנה."
     return "Your ad preview is ready."
-
-
-def _next_followup_question(*, draft: AdDraft, operator: Operator) -> str | None:
-    if draft.price is None:
-        return _PENDING_FOLLOWUP_PRICE
-    if _normalize_brand_value(operator.store_type) is None:
-        return _PENDING_FOLLOWUP_STORE_TYPE
-    if _normalize_brand_value(operator.creative_guidance) is None:
-        return _PENDING_FOLLOWUP_CREATIVE_GUIDANCE
-    return None
-
-
-def _should_interrupt_pending_followup(intent: Intent) -> bool:
-    return intent in _FOLLOWUP_INTERRUPT_INTENTS
-
-
-def _followup_question_prompt(question_key: str, language: str) -> str:
-    if question_key == _PENDING_FOLLOWUP_PRICE:
-        if language.lower() == "he":
-            return "מה המחיר המדויק שתרצה להציג במודעה?"
-        return "What exact price should I display in the ad?"
-    if question_key == _PENDING_FOLLOWUP_STORE_TYPE:
-        if language.lower() == "he":
-            return "מה סוג העסק שלך? (למשל סופרמרקט, בגדים, תבלינים)"
-        return "What is your store type? (for example grocery, clothing, spices)"
-    if question_key == _PENDING_FOLLOWUP_CREATIVE_GUIDANCE:
-        if language.lower() == "he":
-            return "יש לך הנחיות כלליות לסגנון המודעות? (צבעים, טון, אווירה)"
-        return "Do you have general creative guidance? (colors, tone, style)"
-    if question_key == _PENDING_FOLLOWUP_REGENERATE_CONFIRMATION:
-        return _regenerate_again_prompt(language)
-    return "Please provide the requested information."
-
-
-def _followup_reprompt(question_key: str, language: str) -> str:
-    if question_key == _PENDING_FOLLOWUP_PRICE:
-        if language.lower() == "he":
-            return "לא הצלחתי לזהות מחיר. מה המחיר המדויק?"
-        return "I could not detect a price. What is the exact price?"
-    if language.lower() == "he":
-        return "לא הצלחתי לזהות תשובה ברורה. " + _followup_question_prompt(question_key, language)
-    return "I could not detect a clear answer. " + _followup_question_prompt(question_key, language)
-
-
-def _regenerate_again_prompt(language: str) -> str:
-    if language.lower() == "he":
-        return "כל השאלות הושלמו. רוצה שאפעיל עכשיו יצירת מודעה נוספת? (כן/לא)"
-    return (
-        "All follow-up questions are complete. Do you want me to generate another ad now? (yes/no)"
-    )
 
 
 def _regenerate_again_declined_reply(language: str) -> str:
@@ -2929,6 +3117,32 @@ def _publish_confirmation_prompt(language: str) -> str:
     if language.lower() == "he":
         return "בחר האם לפרסם עכשיו ל-CMS או לבטל."
     return "Choose whether to publish to CMS now or cancel."
+
+
+def _is_confirmation_image_url_compatible(image_url: str) -> bool:
+    try:
+        parsed = urlparse(image_url)
+    except ValueError:
+        return False
+    if parsed.scheme.lower() != "https":
+        return False
+    host = parsed.netloc.strip().lower()
+    if not host:
+        return False
+    if host in _CONFIRMATION_UNSAFE_IMAGE_HOSTS:
+        return False
+    path = parsed.path.lower()
+    if path.endswith(_CONFIRMATION_SAFE_IMAGE_SUFFIXES):
+        return True
+    if "storage.googleapis.com" in host or host.endswith(".amazonaws.com"):
+        return True
+    return False
+
+
+def _product_confirmation_image_link_fallback_reply(*, language: str, image_url: str) -> str:
+    if language.lower() == "he":
+        return f"לא הצלחתי לצרף את התמונה ישירות. אפשר לבדוק אותה כאן: {image_url}"
+    return f"I could not attach the image directly. You can review it here: {image_url}"
 
 
 def _product_confirmation_caption(language: str, product_name: str | None) -> str:
