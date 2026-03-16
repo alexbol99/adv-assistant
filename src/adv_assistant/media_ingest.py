@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+import httpx
+
 from adv_assistant.media_store import MediaStore, MediaStoreError
 
 
@@ -32,6 +34,7 @@ class WhatsAppMediaClient(Protocol):
 
 class OperatorPhotoIngestor(Protocol):
     async def ingest_whatsapp_image(self, *, media_id: str) -> IngestedOperatorPhoto: ...
+    async def ingest_external_image_url(self, *, image_url: str) -> IngestedOperatorPhoto: ...
 
     async def close(self) -> None: ...
 
@@ -48,6 +51,9 @@ class NoopOperatorPhotoIngestor:
     async def ingest_whatsapp_image(self, *, media_id: str) -> IngestedOperatorPhoto:
         raise MediaIngestError("Operator photo ingest is not configured")
 
+    async def ingest_external_image_url(self, *, image_url: str) -> IngestedOperatorPhoto:
+        raise MediaIngestError("Operator photo ingest is not configured")
+
     async def close(self) -> None:
         return None
 
@@ -58,15 +64,49 @@ class DefaultOperatorPhotoIngestor:
         *,
         media_client: WhatsAppMediaClient,
         media_store: MediaStore,
+        http_client: httpx.AsyncClient | None = None,
+        timeout_seconds: float = 15.0,
     ) -> None:
         self._media_client = media_client
         self._media_store = media_store
+        self._owns_http_client = http_client is None
+        self._http_client = http_client or httpx.AsyncClient(
+            timeout=timeout_seconds,
+            follow_redirects=True,
+        )
 
     async def ingest_whatsapp_image(self, *, media_id: str) -> IngestedOperatorPhoto:
         if not media_id.strip():
             raise MediaIngestError("media_id is required")
 
         downloaded = await self._media_client.download_media(media_id=media_id)
+        return await self._upload_downloaded_media(downloaded=downloaded)
+
+    async def ingest_external_image_url(self, *, image_url: str) -> IngestedOperatorPhoto:
+        normalized_url = image_url.strip()
+        if not normalized_url:
+            raise MediaIngestError("image_url is required")
+        try:
+            response = await self._http_client.get(normalized_url)
+            response.raise_for_status()
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            raise MediaIngestError(f"External image download failed: {exc}") from exc
+
+        content_type_header = response.headers.get("content-type", "")
+        content_type = content_type_header.split(";")[0].strip().lower()
+        if not content_type:
+            content_type = "application/octet-stream"
+        downloaded = DownloadedMedia(
+            content=response.content,
+            content_type=content_type,
+        )
+        return await self._upload_downloaded_media(downloaded=downloaded)
+
+    async def _upload_downloaded_media(
+        self,
+        *,
+        downloaded: DownloadedMedia,
+    ) -> IngestedOperatorPhoto:
         if not downloaded.content:
             raise MediaIngestError("Downloaded media payload is empty")
         if not downloaded.content_type.startswith("image/"):
@@ -92,6 +132,8 @@ class DefaultOperatorPhotoIngestor:
         )
 
     async def close(self) -> None:
+        if self._owns_http_client:
+            await self._http_client.aclose()
         return None
 
 
