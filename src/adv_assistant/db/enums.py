@@ -36,6 +36,7 @@ class PendingQuestionType(StrEnum):
     CANDIDATE_SELECTION = "candidate_selection"
     MISSING_INFO = "missing_info"
     GENERATION_RETRY = "generation_retry"
+    VARIANT_SELECTION = "variant_selection"
 
 
 class DraftProductStatus(StrEnum):

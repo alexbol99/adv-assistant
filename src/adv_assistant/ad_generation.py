@@ -588,6 +588,7 @@ class NanoBananaAdGenerationService:
         wamid: str,
         width: int,
         height: int,
+        variant_slot: int | None = None,
     ) -> GenerationSubmission:
         if mode == GenerationMode.REFERENCE and not (
             draft.preview_reference_url or draft.rendered_image_url
@@ -599,12 +600,14 @@ class NanoBananaAdGenerationService:
             draft_id=draft.draft_id,
             wamid=wamid,
             mode=mode,
+            variant_slot=variant_slot,
         )
         payload = {
             "prompt": build_generation_prompt(
                 draft=draft,
                 mode=mode,
                 instruction_text=instruction_text,
+                variant_slot=variant_slot,
             ),
             "type": self._generation_type,
             "numImages": self._num_images,
@@ -699,6 +702,44 @@ class NanoBananaAdGenerationService:
             idempotency_key=idempotency_key,
             mode=mode,
             request_payload=payload,
+        )
+
+    async def submit_variant_pair(
+        self,
+        *,
+        draft: GenerationDraftInput,
+        mode: GenerationMode,
+        instruction_text: str,
+        wamid: str,
+        width: int,
+        height: int,
+    ) -> list[GenerationSubmission]:
+        """Submit two generation jobs (slot 1 and slot 2) for a variant pair."""
+        submissions: list[GenerationSubmission] = []
+        for slot in (1, 2):
+            sub = await self.submit_for_draft(
+                draft=draft,
+                mode=mode,
+                instruction_text=instruction_text,
+                wamid=wamid,
+                width=width,
+                height=height,
+                variant_slot=slot,
+            )
+            submissions.append(sub)
+        return submissions
+
+    async def poll_variant_pair(
+        self,
+        *,
+        submissions: list[GenerationSubmission],
+    ) -> list[GenerationPollResult]:
+        """Poll both variant jobs concurrently and return results."""
+        return list(
+            await asyncio.gather(
+                self.wait_for_completion(job_id=submissions[0].job_id),
+                self.wait_for_completion(job_id=submissions[1].job_id),
+            )
         )
 
     async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult:
@@ -921,8 +962,11 @@ def stable_idempotency_key(
     draft_id: uuid.UUID,
     wamid: str,
     mode: GenerationMode,
+    variant_slot: int | None = None,
 ) -> str:
     stable = f"{draft_id}:{wamid}:{mode.value}"
+    if variant_slot is not None:
+        stable = f"{stable}:slot{variant_slot}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, stable))
 
 
@@ -933,11 +977,18 @@ def derive_aspect_ratio(*, width: int, height: int) -> str:
     return f"{width // divisor}:{height // divisor}"
 
 
+_VARIANT_HINTS: dict[int, str] = {
+    1: "Style A: bold and vibrant layout, emphasize the product prominently.",
+    2: "Style B: clean and elegant layout, emphasize branding and store identity.",
+}
+
+
 def build_generation_prompt(
     *,
     draft: GenerationDraftInput,
     mode: GenerationMode,
     instruction_text: str,
+    variant_slot: int | None = None,
 ) -> str:
     sections: list[str] = [
         "Generate a professional retail advertisement image.",
@@ -1010,6 +1061,12 @@ def build_generation_prompt(
     ):
         sections.append("")
         sections.append("Preserve the overall visual style of the previous preview.")
+
+    # --- Variant hint ---
+    if variant_slot is not None and variant_slot in _VARIANT_HINTS:
+        sections.append("")
+        sections.append("=== VARIANT DIRECTION ===")
+        sections.append(_VARIANT_HINTS[variant_slot])
 
     # --- Operator instruction ---
     cleaned_instruction = " ".join(instruction_text.split()).strip()

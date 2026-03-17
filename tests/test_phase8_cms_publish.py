@@ -299,3 +299,53 @@ async def test_confirm_publish_routes_by_operator_cms_mapping(
     assert result_a.status == "processed"
     assert result_b.status == "processed"
     assert cms.target_calls == [(157, 139), (501, 808)]
+
+
+async def test_re_pressing_publish_on_already_published_draft_is_idempotent(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000806"
+    await _seed_operator(session_factory, phone)
+    draft_id = await _seed_preview_draft(
+        session_factory,
+        phone=phone,
+        rendered_image_url="https://storage.googleapis.com/media/preview-idem.png",
+    )
+    cms = FakeCMSPublisher()
+    processor = InboundTaskProcessor(session_factory, cms_publisher=cms)
+
+    publish_payload = InboundTaskPayload(
+        wamid="wamid-phase8-idem-1",
+        operator_phone=phone,
+        raw_message={
+            "type": "interactive",
+            "interactive": {"button_reply": {"id": BUTTON_CONFIRM_PUBLISH}},
+        },
+    )
+    first = await processor.process(publish_payload)
+    assert first.status == "processed"
+    assert cms.calls == 1
+
+    # Re-press publish on the same (now PUBLISHED) draft.
+    second_payload = InboundTaskPayload(
+        wamid="wamid-phase8-idem-2",
+        operator_phone=phone,
+        raw_message={
+            "type": "interactive",
+            "interactive": {"button_reply": {"id": BUTTON_CONFIRM_PUBLISH}},
+        },
+    )
+    second = await processor.process(second_payload)
+    assert second.status == "processed"
+    assert (
+        "כבר פורסמה" in second.reply_text or "already been published" in second.reply_text.lower()
+    )
+    assert cms.calls == 1  # no additional CMS call
+
+    async with session_scope(session_factory) as session:
+        published_rows = (
+            (await session.execute(select(PublishedAd).where(PublishedAd.ad_draft_id == draft_id)))
+            .scalars()
+            .all()
+        )
+        assert len(published_rows) == 1  # no duplicate

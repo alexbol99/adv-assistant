@@ -502,6 +502,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         cms_publisher=cms_publisher,
         whatsapp_client=whatsapp_client,
         product_resolution_service=product_resolution_service,
+        pipeline_v1_enabled=current_settings.pipeline_v1_enabled,
     )
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):
@@ -509,6 +510,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if (
             (
                 result.generated_image_url
+                or result.variant_image_urls
                 or result.reply_text
                 or result.publish_buttons_prompt
                 or result.action_buttons
@@ -517,7 +519,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             and not result.unauthorized_operator
         ):
             try:
-                if result.generated_image_url:
+                if result.variant_image_urls and len(result.variant_image_urls) == 2:
+                    # Send both variant images. First with caption, second without.
+                    await app.state.whatsapp_client.send_image(
+                        to_phone=payload.operator_phone,
+                        image_url=result.variant_image_urls[0],
+                        caption=f"A\n{result.reply_text}" if result.reply_text else "A",
+                    )
+                    await app.state.whatsapp_client.send_image(
+                        to_phone=payload.operator_phone,
+                        image_url=result.variant_image_urls[1],
+                        caption="B",
+                    )
+                elif result.generated_image_url:
                     await app.state.whatsapp_client.send_image(
                         to_phone=payload.operator_phone,
                         image_url=result.generated_image_url,

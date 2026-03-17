@@ -237,16 +237,52 @@ class FakeGenerationService:
         wamid: str,
         width: int,
         height: int,
+        variant_slot: int | None = None,
     ) -> GenerationSubmission:
         self.calls += 1
         self.last_mode = mode
         self.last_draft = draft
+        slot_suffix = f"-slot{variant_slot}" if variant_slot is not None else ""
         return GenerationSubmission(
-            job_id="job-123",
-            idempotency_key="fixed-key",
+            job_id=f"job-123{slot_suffix}",
+            idempotency_key=f"fixed-key{slot_suffix}",
             mode=mode,
-            request_payload={"draft_id": str(draft.draft_id)},
+            request_payload={"draft_id": str(draft.draft_id), "prompt": "test-prompt"},
         )
+
+    async def submit_variant_pair(
+        self,
+        *,
+        draft: GenerationDraftInput,
+        mode: GenerationMode,
+        instruction_text: str,
+        wamid: str,
+        width: int,
+        height: int,
+    ) -> list[GenerationSubmission]:
+        submissions = []
+        for slot in (1, 2):
+            sub = await self.submit_for_draft(
+                draft=draft,
+                mode=mode,
+                instruction_text=instruction_text,
+                wamid=wamid,
+                width=width,
+                height=height,
+                variant_slot=slot,
+            )
+            submissions.append(sub)
+        return submissions
+
+    async def poll_variant_pair(
+        self,
+        *,
+        submissions: list[GenerationSubmission],
+    ) -> list[GenerationPollResult]:
+        results = []
+        for sub in submissions:
+            results.append(await self.wait_for_completion(job_id=sub.job_id))
+        return results
 
     async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult:
         self.wait_calls += 1
@@ -1150,8 +1186,8 @@ async def test_pipeline_submits_generation_job_and_sets_preview_ready(
     assert "http" not in result.reply_text.lower()
     assert result.generated_image_url == "https://storage.googleapis.com/media/preview-1.png"
     assert fake_gateway.reply_calls == 0
-    assert fake_generation.calls == 1
-    assert fake_generation.wait_calls == 1
+    assert fake_generation.calls == 2  # two variant slots
+    assert fake_generation.wait_calls == 2  # polled both variants
 
     async with session_scope(session_factory) as session:
         draft = (
@@ -1161,7 +1197,7 @@ async def test_pipeline_submits_generation_job_and_sets_preview_ready(
         )
         assert draft is not None
         assert draft.status == AdDraftStatus.PREVIEW_READY
-        assert draft.generation_job_id == "job-123"
+        assert draft.generation_job_id == "job-123-slot1"
         assert draft.rendered_image_url == "https://storage.googleapis.com/media/preview-1.png"
 
 
@@ -1319,8 +1355,8 @@ async def test_pipeline_product_confirmation_button_approves_and_generates(
     assert approve_result.generated_image_url == (
         "https://storage.googleapis.com/media/preview-after-approve.png"
     )
-    assert fake_generation.calls == 1
-    assert fake_generation.wait_calls == 1
+    assert fake_generation.calls == 2  # two variant slots
+    assert fake_generation.wait_calls == 2  # polled both variants
 
     async with session_scope(session_factory) as session:
         draft = (
@@ -1342,7 +1378,7 @@ async def test_pipeline_product_confirmation_button_approves_and_generates(
             .first()
         )
         assert session_obj is not None
-        assert session_obj.pending_question_type == PendingQuestionType.MISSING_INFO
+        assert session_obj.pending_question_type == PendingQuestionType.VARIANT_SELECTION
 
 
 async def test_pipeline_product_confirmation_button_rejects_and_clears_photo(
@@ -1459,7 +1495,7 @@ async def test_pipeline_brand_conflict_uses_operator_brand_and_logs_audit(
     assert result.deterministic_action == "generation_completed"
     assert result.reply_text is not None
     assert "you wrote" in result.reply_text.lower()
-    assert fake_generation.calls == 1
+    assert fake_generation.calls == 2  # two variant slots
     assert fake_generation.last_draft is not None
     assert fake_generation.last_draft.product_brand == "Private Label"
     assert fake_generation.last_draft.enriched_brand == "Tnuva"
@@ -1515,9 +1551,10 @@ async def test_pipeline_generates_preview_without_price_and_requests_followup(
     assert result.deterministic_action == "generation_completed"
     assert result.generated_image_url == "https://storage.googleapis.com/media/preview-no-price.png"
     assert result.reply_text is not None
-    assert "preview is ready" in result.reply_text.lower()
-    assert "price" in result.reply_text.lower()
-    assert fake_generation.calls == 1
+    assert result.action_buttons_prompt is not None  # variant selection shown
+    assert result.action_buttons is not None
+    assert result.publish_buttons_prompt is None  # deferred until after variant selection
+    assert fake_generation.calls == 2  # two variant slots
     assert fake_generation.last_draft is not None
     assert fake_generation.last_draft.price is None
 
