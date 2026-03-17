@@ -162,21 +162,15 @@ class FakeGenerationService:
             results.append(
                 GenerationPollResult(
                     status=NanoBananaJobStatus.COMPLETED,
-                    output_image_url=(
-                        "https://storage.googleapis.com/media/preview.png"
-                    ),
+                    output_image_url=("https://storage.googleapis.com/media/preview.png"),
                 )
             )
         return results
 
-    async def wait_for_completion(
-        self, *, job_id: str
-    ) -> GenerationPollResult:
+    async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult:
         return GenerationPollResult(
             status=NanoBananaJobStatus.COMPLETED,
-            output_image_url=(
-                "https://storage.googleapis.com/media/preview.png"
-            ),
+            output_image_url=("https://storage.googleapis.com/media/preview.png"),
         )
 
 
@@ -194,9 +188,7 @@ class FakeCMSPublisher:
         playlist_id: int | None = None,
     ) -> CMSPublishResult:
         self.calls += 1
-        return CMSPublishResult(
-            file_id=100, advertisement_id=200, slot_id=300
-        )
+        return CMSPublishResult(file_id=100, advertisement_id=200, slot_id=300)
 
     async def close(self) -> None:
         return None
@@ -321,13 +313,7 @@ async def test_full_v1_flow_create_generate_select_publish(
     # Verify DB state.
     async with session_scope(session_factory) as session:
         draft = (
-            (
-                await session.execute(
-                    select(AdDraft).where(
-                        AdDraft.operator_phone == phone
-                    )
-                )
-            )
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
             .scalars()
             .first()
         )
@@ -337,13 +323,7 @@ async def test_full_v1_flow_create_generate_select_publish(
         assert draft.selected_round_id is not None
 
         published = (
-            (
-                await session.execute(
-                    select(PublishedAd).where(
-                        PublishedAd.ad_draft_id == draft.id
-                    )
-                )
-            )
+            (await session.execute(select(PublishedAd).where(PublishedAd.ad_draft_id == draft.id)))
             .scalars()
             .first()
         )
@@ -445,13 +425,7 @@ async def test_select_variant_b_sets_correct_variant(
 
     async with session_scope(session_factory) as session:
         draft = (
-            (
-                await session.execute(
-                    select(AdDraft).where(
-                        AdDraft.operator_phone == phone
-                    )
-                )
-            )
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
             .scalars()
             .first()
         )

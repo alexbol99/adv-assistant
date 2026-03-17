@@ -338,13 +338,14 @@ async def test_re_pressing_publish_on_already_published_draft_is_idempotent(
     second = await processor.process(second_payload)
     assert second.status == "processed"
     assert (
-        "כבר פורסמה" in second.reply_text
-        or "already been published" in second.reply_text.lower()
+        "כבר פורסמה" in second.reply_text or "already been published" in second.reply_text.lower()
     )
     assert cms.calls == 1  # no additional CMS call
 
     async with session_scope(session_factory) as session:
         published_rows = (
-            await session.execute(select(PublishedAd).where(PublishedAd.ad_draft_id == draft_id))
-        ).scalars().all()
+            (await session.execute(select(PublishedAd).where(PublishedAd.ad_draft_id == draft_id)))
+            .scalars()
+            .all()
+        )
         assert len(published_rows) == 1  # no duplicate

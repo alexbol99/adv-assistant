@@ -1,7 +1,13 @@
-.PHONY: install lint format test test-docker migrate run docker-up
+.PHONY: install lint format test test-docker migrate run docker-up fix-pth
 
 install:
 	uv sync --all-groups
+	@$(MAKE) fix-pth
+
+# Python 3.13+ skips .pth files with the macOS UF_HIDDEN flag.
+# uv sometimes creates them with this flag set; clear it so editable installs work.
+fix-pth:
+	@find .venv -name '*.pth' -exec chflags nohidden {} + 2>/dev/null || true
 
 lint:
 	uv run ruff check .

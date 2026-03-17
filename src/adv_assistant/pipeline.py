@@ -341,8 +341,7 @@ class InboundTaskProcessor:
                 self._clear_provider_trace_context(self._ad_generation_service)
                 return ProcessInboundResult(
                     duplicate=False,
-                    reply_text="The service is temporarily unavailable. "
-                    "Please try again later.",
+                    reply_text="The service is temporarily unavailable. Please try again later.",
                 )
 
             now = utcnow()
@@ -624,18 +623,13 @@ class InboundTaskProcessor:
                             if updated_draft is None:
                                 deterministic_action = "variant_selection_stale"
                                 reply_text = (
-                                    "This draft was already changed. "
-                                    "Please refresh and try again."
+                                    "This draft was already changed. Please refresh and try again."
                                 )
                             else:
                                 current_draft = updated_draft
                                 deterministic_action = "variant_selected"
-                                base_reply = _variant_selected_reply(
-                                    operator.language, slot_label
-                                )
-                                publish_buttons_prompt = _publish_buttons_prompt(
-                                    operator.language
-                                )
+                                base_reply = _variant_selected_reply(operator.language, slot_label)
+                                publish_buttons_prompt = _publish_buttons_prompt(operator.language)
                                 # Check for follow-up questions after selection.
                                 next_q = self._select_next_question(
                                     current_draft=current_draft,
