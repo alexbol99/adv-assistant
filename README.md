@@ -9,8 +9,8 @@
 | [Product Specification](docs/product-spec.md) | Goals, user roles, use cases, conversation experience, ad visual specs, publishing behaviour, and regional defaults. |
 | [Architecture & Technical Specification](docs/architecture-and-technical-spec.md) | System components, data flow diagrams, conceptual data model, intents/commands, CMS integration interface, reliability, and prompt-injection guardrails. |
 | [Technology Decisions](docs/technology-decisions.md) | Concrete technology decisions: Python stack, GCP Cloud Run + Cloud Tasks deployment, Cloud SQL PostgreSQL, GCS media storage, Nano Banana ad generation, and product enrichment approach for Israeli grocery. |
-| [Workplan](docs/workplan.md) | Step-by-step implementation phases (0–11) for building the application. |
-| [MVP Priority Plan](docs/mvp-priority-plan-2026-03-05.md) | Current MVP stage order, locked decisions, and acceptance tests. |
+| [Workplan](docs/workplan.md) | Single source of truth for active priorities, statuses, and next actions. |
+| [Archive: Historical Task Plans](docs/archive/README.md) | Archived dated plans/checklists kept for traceability only (not active planning). |
 | [Phase 5 Compliance Checklist](docs/phase5-compliance-checklist.md) | Pre-production legal/compliance checklist for enrichment sources and data handling. |
 | [DB Migration Discipline](docs/database-migration-discipline.md) | Expand/contract migration policy and rollout sequence for safe staged deployments. |
 | [Secrets and Configuration Management](docs/secrets-and-configuration-management.md) | Secret Manager naming convention and Cloud Run secret-binding rollout. |

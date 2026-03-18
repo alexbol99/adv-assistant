@@ -19,6 +19,12 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 
 **Goal:** Ship the new operator conversation flow as the top-priority delivery track.
 
+### Planning Ownership (Updated March 17, 2026)
+
+- `docs/workplan.md` is the single source of truth for active priorities and sequencing.
+- Historical execution plans and dated checklists are archived under [`docs/archive`](archive/README.md).
+- When this file conflicts with an archived note, this file takes precedence.
+
 ### State Storage Contract
 
 | Domain state | Source of truth |
@@ -34,24 +40,27 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 
 ### Execution Backlog (V1)
 
-1. `T1` Update product/workplan docs for V1 flow, Hebrew-only V1 policy, and state contract.
-2. `T2` Add schema/migration foundations (`business_profile`, session state fields, draft state fields, `draft_product`, `ad_variant_round`, `ad_variant`).
-3. `T3` Add repositories/state utilities for round replacement, candidate tracking, and pending-question updates.
-4. `T4` Add first-time onboarding gate (business name + logo required).
-5. `T5` Implement request-type classification loop until unambiguous.
-6. `T6` Implement product/visual discovery with external image lookup and explicit fallback behavior.
-7. `T7` Implement one-question policy engine with dynamic next-question selection.
-8. `T8` Implement dynamic prompt composer and enforce exactly two valid variants per generation round.
-9. `T9` Implement deterministic variant actions with single-active-round lifecycle (`ACTIVE` -> `SUPERSEDED`).
-10. `T10` Implement publish-gate with idempotency for confirm-publish retries/duplicates.
-11. `T11` Add E2E coverage including “already enough info -> direct generation” and “image-only request” paths.
-12. `T12` Ship end-to-end feature flag toggle (fully new flow vs fully legacy flow, no mixed mode).
-## MVP Priority Reset (as of March 5, 2026)
+| Track item | Status (main) | Notes |
+|------------|---------------|-------|
+| `T1` Docs + state contract | Completed | Included in V1 planning and docs updates. |
+| `T2` Schema + migration foundations | Completed | Core flow-v1 schema landed (`business_profile`, session/draft state, variant tables). |
+| `T3` Repository/state utilities | Completed | Repositories for variants/pending-question state are in active flow. |
+| `T4` Onboarding gate (business name + logo) | Completed | Covered in onboarding flow and tests. |
+| `T5` Classification loop | Completed | Unambiguous classification flow and tests are in place. |
+| `T6` Product/visual discovery | Completed | Product discovery + fallback behavior integrated. |
+| `T7` One-question policy engine | Completed | Canonical pending-question flow implemented (`question_policy`). |
+| `T8` Dynamic prompt composer + 2 variants | Completed | Two-variant generation lifecycle is active. |
+| `T9` Deterministic variant actions + round lifecycle | Completed | `ACTIVE -> SUPERSEDED` round replacement path implemented. |
+| `T10` Publish idempotency | Completed | Confirm-publish retry/duplicate guards are implemented and tested. |
+| `T11` E2E V1 coverage | Completed | End-to-end V1 tests cover direct generation and image flow paths. |
+| `T12` Flow kill-switch | Completed | `PIPELINE_V1_ENABLED` enables full V1 vs legacy fallback. |
+
+## MVP Priority Reset (March 5, 2026, historical baseline)
 
 This section defines the immediate delivery order for the first MVP.
-Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
+Historical detailed checklist: [MVP Priority Plan (archived)](archive/mvp-priority-plan-2026-03-05.md).
 
-### Stage 1 — Multi-Operator CMS Routing (Highest Priority)
+### Stage 1 — Multi-Operator CMS Routing (Highest Priority, Completed)
 
 **Goal:** each authorized operator publishes to their own CMS campaign/playlist mapping.
 
@@ -73,7 +82,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 - Two-number E2E publish test passes with distinct CMS targets.
 - Missing-mapping publish flow returns the exact blocked message.
 
-### Stage 2 — Creative Flow Optimization (System Memory + Draft Memory)
+### Stage 2 — Creative Flow Optimization (System Memory + Draft Memory, Completed)
 
 **Goal:** improve generation quality while preserving clear data boundaries.
 
@@ -93,7 +102,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 **Exit gate**
 - End-to-end flow proves: first generation with product name only, then follow-up prompts for quality improvements.
 
-### Stage 3 — MVP QA and Release
+### Stage 3 — MVP QA and Release (Completed)
 
 **Goal:** validate publish-ready MVP behavior.
 
@@ -109,7 +118,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 **Exit gate**
 - Regression suite green and manual checklist completed in staging.
 
-### Next Sprint Backlog Additions (March 6, 2026)
+### Next Sprint Backlog Additions (March 6, 2026, Completed)
 
 **Requested carry-over items**
 - Publish CTA must always be present immediately after any successful preview generation response.
@@ -119,6 +128,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 1. Automated tests confirm publish buttons are present for preview success + follow-up paths.
 2. Manual WhatsApp E2E confirms button visibility in real conversation flow.
 3. Admin UI lookup renders a structured operator profile view from phone lookup.
+4. Optional manual cross-checks (Hebrew/English/regenerate-declined CTA visibility) remain optional and are not release blockers.
 
 ---
 
@@ -243,6 +253,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 - Persist only normalized enrichment fields; do not persist raw provider payloads.
 - Notify enrichment-unavailable at most once per draft.
 - Run short legal/compliance review before production enablement of enrichment sources.
+- Compliance sign-off is not a blocker for MVP feature completion, but it is mandatory before production rollout with enrichment enabled.
 
 ### Exit Criteria
 - Provider adapters return normalized schema consistently.
@@ -271,7 +282,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 ## Phase 7 — Ad Generation Integration (Nano Banana)
 
 **Goal:** Integrate asynchronous ad generation contract.
-**Status (March 16, 2026): In progress (transition started after Phase 6 completion).**
+**Status (March 17, 2026): Completed for MVP flow.**
 
 ### Scope
 - Implement `NanoBananaClient` with:
@@ -300,6 +311,7 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 ## Phase 8 — CMS Integration and Contract Safety
 
 **Goal:** Deliver publish/list/delete-all with safe fallbacks.
+**Status (March 17, 2026): Partially completed for MVP (`publish_ad` done; `list_ads` / `delete_all_ads` side effects deferred to Post-MVP).**
 
 ### Scope
 - Implement `CMSClient` (`publish_ad`, `list_ads`, `delete_all_ads`).
@@ -409,27 +421,68 @@ Detailed checklist: [MVP Priority Plan](mvp-priority-plan-2026-03-05.md).
 
 ---
 
-## Current Repository Status (as of March 16, 2026)
+## Current Repository Status (as of March 18, 2026)
 
 Based on the current codebase and automated test coverage:
 
-- **Implemented and test-covered:** Phase 0 through Phase 6.
-- **Current focus:** Transition into Phase 7 (ad generation integration) is in progress.
-- **Gate A / Gate B evidence:** present in the current test suite (`tests/test_ingress_pipeline.py`, `tests/test_tasks_auth.py`, `tests/test_phase4_llm_boundary.py`, `tests/test_phase5_enrichment.py`, `tests/test_phase6_media.py`, `tests/test_phase7_generation.py`).
-- **Phase 8 status:** publish flow is implemented and tested; `list_ads` / `delete_all` side effects are still pending.
-- **Pending operational/compliance work:** Phase 5 compliance checklist sign-off remains open (`docs/phase5-compliance-checklist.md` is not yet completed).
-- **Not yet implemented:** Phase 9 Admin control plane (full scope), Phase 10 hardening, and Phase 11 launch verification.
-- **MVP execution order:** prioritize per-operator CMS mapping + basic admin first, then memory-driven creative optimization.
+- **Planning ownership:** this file is now the only active planning source; dated task docs are archived under `docs/archive/`.
+- **Feature completion status:** the V1 track (`T1`..`T12`) is implemented on `main` for MVP flow.
+- **Gate A / Gate B evidence:** present in tests (`tests/test_ingress_pipeline.py`, `tests/test_tasks_auth.py`, `tests/test_phase4_llm_boundary.py`, `tests/test_phase5_enrichment.py`, `tests/test_phase6_media.py`, `tests/test_phase7_generation.py`, `tests/test_conversation_flow_v1_e2e.py`).
+- **MVP scope now:** keep `publish_ad` flow active; keep `list_ads` and `delete_all` execution as Post-MVP scope.
+- **Compliance status:** Phase 5 compliance checklist is still open; it does not block feature completion, but it must be closed before production enrichment enablement.
+- **Production readiness still pending:** Phase 9 (full admin control plane), Phase 10 (hardening), and Phase 11 (launch verification).
 
 ---
 
 ## Immediate Next Actions
 
-1. Complete `T1` documentation updates for the V1 conversation flow and state contract.
-2. Complete `T2` schema migration and model updates for conversation-flow state foundations.
-3. Execute a migration/test proof (`alembic upgrade head` + `pytest`) before starting `T3`.
-1. Implement Stage 1 MVP scope: per-operator CMS mapping and minimal admin API/UI with basic auth.
-2. Wire publish routing strictly to operator CMS mapping and block publishing when mapping is missing with the approved message.
-3. Implement Stage 2 MVP scope: system memory vs draft memory separation and post-generation quality follow-ups.
-4. Complete Stage 3 MVP QA: full regression and manual WhatsApp staging checklist.
-5. Keep Phase 5 compliance sign-off as required before production enablement of enrichment sources.
+1. Finalize MVP feature scope freeze on `main`: keep current flow as MVP baseline and keep `list_ads` / `delete_all` side effects in Post-MVP backlog.
+2. Run full MVP stabilization pass (`ruff`, `pytest`, targeted staging smoke) and close any regressions before release candidate tagging.
+3. Prepare production rollout track in parallel: Phase 9 minimum operational controls, then Phase 10 hardening essentials, then Phase 11 launch checks.
+4. Complete Phase 5 compliance checklist before enabling enrichment in production (`docs/phase5-compliance-checklist.md`).
+5. Keep optional manual CTA cross-checks as optional (non-blocking) verification items.
+
+---
+
+## Current Sprint Plan — MVP Feature Completion (March 18, 2026)
+
+Objective: complete MVP feature behavior for product-image control and clarification flow, then stabilize for production rollout.
+
+### Locked Functional Decisions
+
+1. Flow sequence:
+   - operator sends create prompt
+   - system searches product
+   - system asks for product confirmation
+   - operator confirms product
+   - system asks up to 3 clarification questions
+   - system generates final ad
+2. Clarification budget is **up to 3** questions (not always exactly 3).
+3. `product_name` must exist before entering the 3-question clarification cycle.
+4. Operator-uploaded product image is draft-scoped (current draft only), not global memory.
+5. Currency target state is operator/business-level default (not draft-level source of truth).
+6. If operator sends an image outside the expected image steps, system must ask confirmation before replacing current product image and must reset the draft on confirmed replacement.
+7. When product confirmation is rejected after system lookup, system offers two deterministic paths:
+   - upload product image
+   - provide more precise textual description (then retry lookup + confirmation).
+
+### Sprint Backlog (Testable Work Items)
+
+| ID | Priority | Task | Acceptance checks |
+|----|----------|------|-------------------|
+| `SP-01` | P0 | Write the flow/state contract for the March 18 behavior in this workplan and align terms used in code/tests. | Updated docs clearly define the sequence and guard conditions; no conflicting active task doc remains outside `docs/archive`. |
+| `SP-02` | P0 | Add a generation gate: clarification cycle starts only after product is confirmed and `product_name` is present. | Integration test proves no entry to clarification cycle before product confirmation + product name availability. |
+| `SP-03` | P0 | Implement clarification budget (`<= 3`) in deterministic question policy. | Conversation test proves no 4th clarification question; when enough data exists after question 1/2/3 generation starts immediately. |
+| `SP-04` | P0 | Implement "image-first message" path: operator can start flow by sending a product image. | E2E test starts with image payload and reaches product confirmation flow successfully. |
+| `SP-05` | P0 | Implement deterministic reject-product branch: ask operator to upload image or provide a more precise description. | Tests cover both branch choices and validate state transitions + prompts. |
+| `SP-06` | P0 | Implement out-of-flow image handling: ask "replace product image?" confirmation. | Confirm branch replaces image; cancel branch preserves current draft image; both paths tested. |
+| `SP-07` | P0 | On confirmed out-of-flow image replacement, reset current draft product-specific fields and restart product flow. | Test verifies reset scope includes product fields, price-related fields, selected variant/round context; operator-level memory remains unchanged. |
+| `SP-08` | P0 | Move currency ownership to operator/business-level default and remove draft-level currency as source of truth for generation decisions. | Migration/repository tests validate source of truth; generation input tests validate currency comes from operator/business default unless explicitly overridden by business-level update flow. |
+| `SP-09` | P0 | Enforce image precedence in generation input: user-uploaded draft image overrides discovery/enrichment images. | Generation integration test verifies submitted image URL equals user-uploaded image when available. |
+| `SP-10` | P0 | Refine image-generation system prompt and policy interplay: ask only critical missing clarifications and respect 3-question cap. | Prompt contract test (or snapshot) + behavior tests confirm no extra non-critical clarifications and no question 4. |
+| `SP-11` | P1 | Add audit/trace events for new paths (image override request/confirm/cancel, clarification budget reached, regenerate after precise description). | Audit event tests confirm expected events and metadata in each path. |
+| `SP-12` | P1 | Run stabilization + release checks for updated MVP behavior. | `ruff` and `pytest` are green; staging smoke verifies image override, 3-question cap, and publish flow regression-free. |
+
+### Explicit Post-MVP Scope (Unchanged)
+
+- `list_ads` and `delete_all` side-effect execution remain Post-MVP scope.
