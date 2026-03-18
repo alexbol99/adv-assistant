@@ -38,6 +38,105 @@ This implementation plan is execution-focused: each phase has explicit deliverab
 | Generation readiness | deterministic computation from draft/session/product state, persisted in `ad_draft.generation_ready` as orchestration cache |
 | Current variant round | `ad_variant_round` (`ACTIVE` status is unique per draft) |
 
+### Conversation Flow Contract (March 18, 2026)
+
+This section is the authoritative reference for the MVP conversation flow. Every guard condition, state transition, and decision branch is defined here. Sprint items SP-02 through SP-10 implement these behaviors; this contract is the source of truth for expected outcomes.
+
+#### Flow Sequence and Guard Conditions
+
+Each step is deterministic (no LLM in control flow). Steps reference the exact DB field that gates progression.
+
+1. **Inbound message received.**
+   Session loaded (`conversation_session`); active draft loaded or created (`ad_draft`).
+
+2. **Onboarding gate.**
+   Guard: `business_profile` exists for operator's `business_scope`.
+   Fail → prompt for business name + logo; `pending_question_type = ONBOARDING`.
+
+3. **Image-first entry (SP-04).**
+   Guard: inbound message is an image AND no confirmed `draft_product` exists for current draft.
+   Action → use uploaded image as candidate product image; enter product confirmation flow (step 7).
+
+4. **Out-of-flow image handling (SP-06, SP-07).**
+   Guard: inbound message is an image AND draft already has a confirmed product.
+   Action → ask "replace product image?" confirmation; `pending_question_type` set for image-replacement prompt.
+   - **Confirm** → reset draft product fields (`product_name`, `product_brand`, `price`, draft `selected_variant_id`, `selected_round_id`, active variant round → `SUPERSEDED`). Operator-level memory is preserved (`store_type`, `creative_guidance`, currency default). Restart product flow from step 6.
+   - **Cancel** → preserve current draft unchanged; resume previous flow position.
+
+5. **Classification.**
+   Guard: `ad_draft.is_classification_resolved == false`.
+   Fail → ask classification question; `pending_question_type = CLASSIFICATION`.
+   Resolve → set `ad_draft.classification_status = RESOLVED`, `ad_draft.is_classification_resolved = true`, `ad_draft.request_type` to selected type (`SINGLE_PRODUCT` | `MULTI_PRODUCT` | `STORE_GENERAL`).
+
+6. **Product discovery.**
+   System searches for product by name or image (retailer chain → Serper fallback).
+   Result → create `draft_product` rows with `status = CANDIDATE`; set `ad_draft.awaiting_product_confirmation = true`.
+
+7. **Product confirmation.**
+   Guard: `ad_draft.awaiting_product_confirmation == true`.
+   Action → show confirm/reject buttons (`BUTTON_CONFIRM_PRODUCT_SELECTION` / `BUTTON_REJECT_PRODUCT_SELECTION`).
+   - **Confirm** → `draft_product.status = CONFIRMED`; clear `ad_draft.awaiting_product_confirmation`.
+   - **Reject (SP-05)** → deterministic fork with two choices:
+     - (a) upload a product image (returns to step 3 image-first path), or
+     - (b) provide a more precise textual description (retry discovery from step 6).
+
+8. **Generation gate (SP-02).**
+   Guard: product is confirmed (`awaiting_product_confirmation == false`) AND `product_name` is present on confirmed `draft_product`.
+   Fail → do not enter clarification cycle; remain in product confirmation or product-name collection.
+   Pass → enter clarification cycle (step 9).
+
+9. **Clarification cycle (SP-03, SP-10).**
+   Budget: up to `MAX_CLARIFICATION_QUESTIONS` (= 3) total questions across the draft lifecycle. Questions are selected by `select_next_question()` from `question_policy.py`, asking only critical missing fields. Per-question reprompt budget is `MAX_REPROMPTS_PER_QUESTION` (= 2).
+   - When enough data exists after any question (1, 2, or 3) → skip remaining questions, set `ad_draft.generation_ready = true`.
+   - When budget exhausted (3 questions asked) → set `ad_draft.generation_ready = true` regardless of remaining optional fields.
+
+10. **Generation.**
+    Guard: `ad_draft.generation_ready == true`.
+    Action → submit 2-variant round (`ad_variant_round` with `status = ACTIVE`, two `ad_variant` slots). If prior active round exists → transition to `SUPERSEDED`.
+
+11. **Image precedence in generation input (SP-09).**
+    Rule: if operator uploaded a draft-specific product image, that image URL overrides any discovery/enrichment image in the generation request payload.
+
+12. **Currency source of truth (SP-08).**
+    Rule: currency for generation input comes from operator/business-level default (`operator.currency` or `business_profile` currency field), not from any draft-level currency field.
+
+13. **Variant selection → publish.**
+    Operator selects variant A or B (`BUTTON_SELECT_VARIANT_A` / `BUTTON_SELECT_VARIANT_B`). Confirm-publish with idempotency guard. On publish → `ad_variant_round.status = PUBLISHED`.
+
+#### State Field Glossary
+
+Maps sprint terminology to exact code identifiers.
+
+| Sprint term | Code identifier | File |
+|---|---|---|
+| Clarification budget (total Qs per draft) | `MAX_CLARIFICATION_QUESTIONS` (new constant, SP-03) | `question_policy.py` |
+| Reprompt budget (per single question) | `MAX_REPROMPTS_PER_QUESTION = 2` | `question_policy.py` |
+| Generation gate | `is_generation_ready()` | `question_policy.py` |
+| Image-first message | New inbound-image handler path (SP-04) | `pipeline.py` |
+| Reject-product branch | `BUTTON_REJECT_PRODUCT_SELECTION` payload | `llm_gateway.py` |
+| Out-of-flow image | New image-replacement confirmation handler (SP-06) | `pipeline.py` |
+| Image precedence | Generation input builder override (SP-09) | `pipeline.py` / `draft_service.py` |
+| Currency ownership | `operator.currency` / `business_profile` default | `models.py` |
+| Classification status | `ad_draft.classification_status` (enum: `PENDING` / `RESOLVED`) | `enums.py` |
+| Classification resolved flag | `ad_draft.is_classification_resolved` (bool) | `models.py` |
+| Product confirmation wait | `ad_draft.awaiting_product_confirmation` (bool) | `models.py` |
+| Generation readiness cache | `ad_draft.generation_ready` (bool, computed then persisted) | `models.py` |
+| Pending question type | `conversation_session.pending_question_type` (enum) | `enums.py`, `models.py` |
+| Pending question context | `conversation_session.pending_question_context` (JSON dict) | `models.py` |
+| Variant round status | `ad_variant_round.status` (enum: `ACTIVE` / `SUPERSEDED` / `FAILED` / `PUBLISHED`) | `enums.py` |
+
+#### Guard Condition Summary
+
+| Guard | DB field | Fail action |
+|---|---|---|
+| Onboarding complete | `business_profile` exists | Prompt for business name + logo |
+| Classification resolved | `ad_draft.is_classification_resolved == true` | Ask classification question |
+| Product confirmed | `ad_draft.awaiting_product_confirmation == false` | Show confirm/reject buttons |
+| Product name present | `draft_product.product_name is not null` (confirmed row) | Ask for product name |
+| Clarification budget | clarification count < `MAX_CLARIFICATION_QUESTIONS` | Skip remaining optional Qs, proceed to generation |
+| Generation ready | `ad_draft.generation_ready == true` | Block generation, continue clarification |
+| Active round uniqueness | Only one `ad_variant_round` with `status = ACTIVE` per draft | Supersede prior round before creating new one |
+
 ### Execution Backlog (V1)
 
 | Track item | Status (main) | Notes |

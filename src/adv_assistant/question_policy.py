@@ -18,7 +18,7 @@ QUESTION_CONTEXT_PHASE = "phase"
 QUESTION_CONTEXT_REPROMPT_COUNT = "reprompt_count"
 QUESTION_PHASE_PRE_GENERATION = "pre_generation"
 QUESTION_PHASE_POST_PREVIEW = "post_preview"
-MAX_REPROMPTS_DEFAULT = 2
+MAX_REPROMPTS_PER_QUESTION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +227,7 @@ def resolve_pending_question(
     status: PendingResolutionStatus,
     language: str,
     next_question: QuestionSelection | None = None,
-    max_reprompts: int = MAX_REPROMPTS_DEFAULT,
+    max_reprompts: int = MAX_REPROMPTS_PER_QUESTION,
 ) -> PendingQuestionTransition:
     context = dict(pending_question_context or {})
     question_key = pending_question_key(
