@@ -63,7 +63,7 @@ Once the bot has sufficient information, it suggests generating an advertisement
 | **Show, don't ask too much** | After gathering the essentials, the bot generates and shows an ad rather than asking more questions. Improvement is driven by the operator's reaction to the visual, not by a pre-generation questionnaire. |
 | **Iterate with context** | The bot retains context between turns in an ad session. When regenerating, it applies only the changes the operator specifies (e.g., *"make the price bigger"*, *"use a blue background"*) without losing other collected details. |
 | **Draft isolation** | In multi-operator mode, each operator works on their own draft. Drafts are not shared across operators. |
-| **Memory** | The bot keeps two memory layers: **system memory** per operator (preferred language, store type, global creative guidance, logo) and **draft memory** per ad (product name, optional brand, optional price/currency, product photo). System memory persists across ads; draft memory does not. |
+| **Memory** | The bot keeps two memory layers: **system memory** per operator/business (preferred language, default currency, store type, global creative guidance, logo) and **draft memory** per ad (product name, optional brand, optional price, product photo). System memory persists across ads; draft memory does not. |
 
 ### 3.3 Required vs Optional Fields
 
@@ -77,7 +77,7 @@ Once the bot has sufficient information, it suggests generating an advertisement
 | Price / offer | Optional | Not a hard requirement in V1. |
 | Promotional text | Optional | E.g., "20% off today only". |
 | Product name | **Required** | Must be confirmed before generating an ad. |
-| Price | Optional (recommended) | Defaults to ILS (₪) unless the operator specifies another currency. First generation may proceed without price. |
+| Price | Optional (recommended) | First generation may proceed without price. Display currency defaults from operator/business settings (ILS in current deployment). |
 | Product photo | Optional | Operator may send an image; the bot incorporates it into the generated ad. |
 | EAN barcode | Optional | Helps the bot identify the product and enrich details from the web. |
 | Promotional text | Optional | E.g., "20% off today only". The bot may suggest text if not provided. |
@@ -232,19 +232,25 @@ Additionally, product names and promotional text entered by the operator may ina
 
 ---
 
-## 10. Priority V1 Conversational Flow (2026-03-10)
+## 10. Priority V1 Conversational Flow (Updated 2026-03-18)
 
 ### 10.1 Flow
 1. First-time onboarding asks only for business name and logo (required), and optionally brand colors if logo is missing.
 2. User can send free-form text, image, or both.
-3. Bot classifies request into `single_product`, `multi_product`, or `store_general`; if ambiguous, it keeps asking one classification question until resolved.
-4. For product ads, bot performs product/visual discovery from text/image and may use external sources for candidate images.
-5. Bot asks one clarification question at a time, only when strictly needed.
-6. Bot builds a dynamic generation prompt from user request, clarifications, business profile, and screen constraints.
-7. Bot generates exactly two ad variants per round (valid outputs only).
-8. Bot returns both variants with deterministic action buttons (select variant 1/2, create two more, restart).
-9. Bot marks selected variant as approved.
-10. Bot publishes to CMS only after deterministic final confirmation.
+3. For product ads, bot performs product/visual discovery from text/image and asks for product confirmation.
+4. If product confirmation is rejected, bot asks operator to choose one of two paths: upload product image or provide more precise text description.
+5. If operator provides precise text description, bot retries lookup and confirmation flow.
+6. Clarification cycle starts only after confirmed product + existing `product_name`.
+7. Clarification cycle asks one question at a time with a cap of up to 3 questions; it may stop earlier when enough data exists.
+8. Bot builds a dynamic generation prompt from user request, clarifications, business profile, and screen constraints.
+9. Bot generates exactly two ad variants per round (valid outputs only).
+10. Bot returns both variants with deterministic action buttons (select variant 1/2, create two more, restart).
+11. Bot marks selected variant as approved.
+12. Bot publishes to CMS only after deterministic final confirmation.
+
+Image override rule:
+- If operator sends an image outside the expected image steps, bot asks explicit confirmation before replacing current draft product image.
+- On confirmed replacement, bot resets product-specific draft fields and restarts product flow for the current draft.
 
 ### 10.2 State Model (Source of Truth)
 - `business_profile`: singleton per `business_scope` (for current deployment scope, this is `default`).

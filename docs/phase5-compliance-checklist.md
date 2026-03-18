@@ -2,6 +2,8 @@
 
 Use this checklist before enabling enrichment in staging/production.
 
+Priority note (March 17, 2026): this checklist does not block MVP feature completion, but it is required before production rollout with enrichment enabled.
+
 ## Source Terms Review
 
 - [ ] Open Food Facts terms reviewed (API usage, attribution, rate limits, dataset license obligations).

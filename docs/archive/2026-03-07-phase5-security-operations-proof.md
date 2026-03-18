@@ -1,7 +1,7 @@
 # Phase 5 Security and Operations Proof (March 7, 2026)
 
 This note captures evidence for the **Security and Operations** section in
-`docs/phase5-compliance-checklist.md`.
+`../phase5-compliance-checklist.md`.
 
 ## 1) Outbound request timeouts and retries are configured
 
