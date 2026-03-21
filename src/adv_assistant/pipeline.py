@@ -874,9 +874,7 @@ class InboundTaskProcessor:
                                 llm_used = self._llm_gateway.uses_external_llm or llm_used
                                 if planner_turn.reply_text is not None:
                                     pending_question_type = planner_turn.pending_question_type
-                                    pending_question_context = (
-                                        planner_turn.pending_question_context
-                                    )
+                                    pending_question_context = planner_turn.pending_question_context
                                     reply_text = planner_turn.reply_text
                                     deterministic_action = "generation_gate_blocked"
                                 else:
@@ -960,12 +958,9 @@ class InboundTaskProcessor:
                             )
                         except ValueError:
                             forced_intent = Intent.CREATE_AD
-                    if (
-                        reply_text is None
-                        and _is_creative_brief_pending(
-                            pending_question_type=pending_question_type,
-                            pending_question_context=pending_question_context,
-                        )
+                    if reply_text is None and _is_creative_brief_pending(
+                        pending_question_type=pending_question_type,
+                        pending_question_context=pending_question_context,
                     ):
                         interrupt_classification = await self._llm_gateway.classify_intent(
                             message_text=sanitized_text,
@@ -1009,8 +1004,7 @@ class InboundTaskProcessor:
                             else:
                                 brief_instruction_override = planner_turn.brief_instruction_text
                                 forced_intent = (
-                                    planner_turn.resume_intent
-                                    or Intent.REGENERATE_FROM_SCRATCH
+                                    planner_turn.resume_intent or Intent.REGENERATE_FROM_SCRATCH
                                 )
                     pending_question_key = question_policy.pending_question_key(
                         pending_question_type=pending_question_type,
@@ -1543,9 +1537,7 @@ class InboundTaskProcessor:
                                     current_draft=current_draft,
                                     operator=operator,
                                     mode=mode,
-                                    instruction_text=(
-                                        brief_instruction_override or sanitized_text
-                                    ),
+                                    instruction_text=(brief_instruction_override or sanitized_text),
                                     followup_regen_requested=followup_regen_requested,
                                 )
                                 current_draft = generation_result.draft
@@ -1630,14 +1622,19 @@ class InboundTaskProcessor:
                                 deterministic_action = "generation_gate_blocked"
 
                     if reply_text is None:
-                        if classification.intent in {
-                            Intent.CREATE_AD,
-                            Intent.REGENERATE_WITH_REFERENCE,
-                            Intent.REGENERATE_FROM_SCRATCH,
-                        } and not planner_allowed and not _is_ready_for_generation(
-                            current_draft,
-                            operator=operator,
-                            pending_question_context=readiness_context,
+                        if (
+                            classification.intent
+                            in {
+                                Intent.CREATE_AD,
+                                Intent.REGENERATE_WITH_REFERENCE,
+                                Intent.REGENERATE_FROM_SCRATCH,
+                            }
+                            and not planner_allowed
+                            and not _is_ready_for_generation(
+                                current_draft,
+                                operator=operator,
+                                pending_question_context=readiness_context,
+                            )
                         ):
                             pre_generation_question = self._select_next_question(
                                 current_draft=current_draft,
@@ -2472,13 +2469,10 @@ class InboundTaskProcessor:
             else None
         )
         session_state: creative_brief_planner.CreativeBriefSessionState
-        if (
-            _is_creative_brief_pending(
-                pending_question_type=PendingQuestionType.MISSING_INFO,
-                pending_question_context=context_payload,
-            )
-            and isinstance(session_payload, dict)
-        ):
+        if _is_creative_brief_pending(
+            pending_question_type=PendingQuestionType.MISSING_INFO,
+            pending_question_context=context_payload,
+        ) and isinstance(session_payload, dict):
             session_state = creative_brief_planner.CreativeBriefSessionState.model_validate(
                 session_payload
             )
@@ -2531,9 +2525,7 @@ class InboundTaskProcessor:
         # Release any pending DB write lock before waiting on external LLM I/O.
         await audit_repo.session.commit()
         planner_method = getattr(self._llm_gateway, "plan_creative_brief", None)
-        planner_output = creative_brief_planner.noop_plan_creative_brief(
-            context=planner_context
-        )
+        planner_output = creative_brief_planner.noop_plan_creative_brief(context=planner_context)
         planner_call_failed = False
         planner_failure_type: str | None = None
         planner_failure_message: str | None = None

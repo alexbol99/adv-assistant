@@ -704,10 +704,7 @@ class OpenAILLMGateway:
             "the provided context; prefer high-information concrete questions; "
             "if the brief is sufficient, return decision='brief_ready' and final_brief."
         )
-        user_prompt = (
-            "Creative brief planning context JSON:\n"
-            f"{context_json}"
-        )
+        user_prompt = f"Creative brief planning context JSON:\n{context_json}"
         return await self._request_json_model(
             model_name=self._extraction_model,
             system_prompt=system_prompt,

@@ -283,9 +283,7 @@ def _coerce_next_question_payload(payload: dict[str, Any]) -> dict[str, str] | N
         }
     if isinstance(raw_question, str):
         question_key = (
-            payload.get("next_question_key")
-            or payload.get("question_key")
-            or "creative_direction"
+            payload.get("next_question_key") or payload.get("question_key") or "creative_direction"
         )
         return {
             "key": question_key,
@@ -294,9 +292,7 @@ def _coerce_next_question_payload(payload: dict[str, Any]) -> dict[str, str] | N
     top_level_question = payload.get("question_text") or payload.get("question")
     if isinstance(top_level_question, str):
         question_key = (
-            payload.get("next_question_key")
-            or payload.get("question_key")
-            or "creative_direction"
+            payload.get("next_question_key") or payload.get("question_key") or "creative_direction"
         )
         return {
             "key": question_key,

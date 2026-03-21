@@ -234,8 +234,7 @@ class FakeGatewayPlannerAskThenReady(FakeGateway):
             )
         enriched_state = context.session_state.model_copy(deep=True)
         enriched_state.inferred_brief_fields.goal = (
-            enriched_state.inferred_brief_fields.goal
-            or "Increase immediate purchase intent"
+            enriched_state.inferred_brief_fields.goal or "Increase immediate purchase intent"
         )
         enriched_state.inferred_brief_fields.scene = (
             context.latest_user_message or "Close-up hero scene"
@@ -1869,8 +1868,7 @@ async def test_pipeline_creative_brief_reuses_memory_and_skips_style_reask(
     assert first_result.status == "processed"
     assert first_result.deterministic_action == "generation_completed"
     assert (
-        first_result.generated_image_url
-        == "https://storage.googleapis.com/media/preview-cap-3.png"
+        first_result.generated_image_url == "https://storage.googleapis.com/media/preview-cap-3.png"
     )
     assert first_result.reply_text is not None
     assert "איזה סגנון חזותי" not in first_result.reply_text
@@ -2007,11 +2005,7 @@ async def test_pipeline_missing_info_price_answer_does_not_start_new_create_flow
         assert active_draft.price == Decimal("7.90")
 
         drafts = (
-            (
-                await session.execute(
-                    select(AdDraft.id).where(AdDraft.operator_phone == phone)
-                )
-            )
+            (await session.execute(select(AdDraft.id).where(AdDraft.operator_phone == phone)))
             .scalars()
             .all()
         )
