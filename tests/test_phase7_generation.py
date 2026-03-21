@@ -107,6 +107,21 @@ class FakeGatewayNoPrice(FakeGateway):
         )
 
 
+class FakeGatewayNoProductName(FakeGateway):
+    async def extract_ad_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> ExtractedAdFields:
+        return ExtractedAdFields(
+            price=Decimal("19.90"),
+            currency="ILS",
+            promo_text="Fresh and tasty",
+        )
+
+
 class FakeGatewayBrandConflict(FakeGateway):
     async def extract_ad_fields(
         self,
@@ -184,6 +199,34 @@ class FakeResolvedProductResolutionServiceUnsafeImage:
                 title="גלידת מגנום",
                 description="Magnum ice cream",
                 image_url="https://www.tiktok.com/api/img/?itemId=123",
+                product_url="https://example.com/magnum",
+                source="fake",
+                search_method="retailer",
+            ),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeResolvedProductResolutionServiceMissingTitle:
+    enabled = True
+
+    async def resolve(
+        self,
+        *,
+        message_text: str,
+        language: str,
+    ) -> ProductResolutionResult:
+        return ProductResolutionResult(
+            status="resolved",
+            brand="Magnum",
+            product_query="גלידת מגנום",
+            raw_user_text=message_text,
+            selected_result=SelectedProductResult(
+                title="",
+                description="Magnum ice cream",
+                image_url="https://example.com/magnum.png",
                 product_url="https://example.com/magnum",
                 source="fake",
                 search_method="retailer",
@@ -1456,6 +1499,85 @@ async def test_pipeline_product_confirmation_button_rejects_and_clears_photo(
         )
         assert session_obj is not None
         assert session_obj.pending_question_type == PendingQuestionType.NONE
+
+
+async def test_pipeline_product_confirmation_approved_without_product_name_prompts_missing_info(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000731"
+    await _seed_operator(session_factory, phone, language="he")
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-after-approve.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=FakeGatewayNoProductName(),
+        ad_generation_service=fake_generation,
+        product_resolution_service=FakeResolvedProductResolutionServiceMissingTitle(),
+    )
+
+    first_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-no-name-step1",
+            operator_phone=phone,
+            raw_message={
+                "type": "text",
+                "text": {"body": "אני רוצה מודעה למוצר אחד גלידת מגנום"},
+            },
+        )
+    )
+    assert first_result.deterministic_action == "product_confirmation_requested"
+    assert fake_generation.calls == 0
+
+    approve_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-no-name-step2",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {
+                    "button_reply": {
+                        "id": BUTTON_CONFIRM_PRODUCT_SELECTION,
+                    }
+                },
+            },
+        )
+    )
+
+    assert approve_result.status == "processed"
+    assert approve_result.deterministic_action == "generation_gate_blocked"
+    assert approve_result.generated_image_url is None
+    assert approve_result.reply_text is not None
+    assert "שם המוצר" in approve_result.reply_text
+    assert fake_generation.calls == 0
+    assert fake_generation.wait_calls == 0
+
+    async with session_scope(session_factory) as session:
+        draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert draft is not None
+        assert draft.awaiting_product_confirmation is False
+        assert draft.product_name is None
+
+        session_obj = (
+            (
+                await session.execute(
+                    select(ConversationSession).where(ConversationSession.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert session_obj is not None
+        assert session_obj.pending_question_type == PendingQuestionType.MISSING_INFO
+        assert session_obj.pending_question_context["question_key"] == "product_name"
+        assert session_obj.pending_question_context["required"] is True
 
 
 async def test_pipeline_brand_conflict_uses_operator_brand_and_logs_audit(
