@@ -567,6 +567,86 @@ async def test_gemini_service_generates_image_and_uploads_to_media_store() -> No
     await client.aclose()
 
 
+async def test_gemini_service_submit_and_poll_variant_pair() -> None:
+    observed: dict[str, object] = {"prompts": [], "post_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST":
+            return httpx.Response(status_code=404)
+        observed["post_calls"] = int(observed["post_calls"]) + 1
+        body = json.loads(request.content.decode("utf-8"))
+        parts = body["contents"][0]["parts"]
+        observed["prompts"].append(parts[0]["text"])
+        encoded_png = base64.b64encode(f"png-{observed['post_calls']}".encode()).decode(
+            "ascii"
+        )
+        return httpx.Response(
+            status_code=200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "mimeType": "image/png",
+                                        "data": encoded_png,
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    media_store = FakeMediaStore()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = GeminiFlashImageAdGenerationService(
+        api_key="gemini-test-key",
+        model="gemini-3.1-flash-image-preview",
+        media_store=media_store,
+        client=client,
+    )
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="קוטג",
+        price=Decimal("19.90"),
+        currency="ILS",
+        promo_text="מבצע",
+        ean=None,
+        photo_url=None,
+        enriched_brand=None,
+        enriched_category=None,
+        enriched_description=None,
+        preview_reference_url=None,
+        rendered_image_url=None,
+    )
+
+    submissions = await service.submit_variant_pair(
+        draft=draft,
+        mode=GenerationMode.FRESH,
+        instruction_text="generate ad image",
+        wamid="wamid-gemini-pair-1",
+        width=1920,
+        height=1080,
+    )
+    results = await service.poll_variant_pair(submissions=submissions)
+
+    assert len(submissions) == 2
+    assert submissions[0].idempotency_key != submissions[1].idempotency_key
+    assert len(results) == 2
+    assert all(result.status == NanoBananaJobStatus.COMPLETED for result in results)
+    assert int(observed["post_calls"]) == 2
+    assert len(media_store.upload_calls) == 2
+    prompts = observed["prompts"]
+    assert any("Style A" in prompt for prompt in prompts)
+    assert any("Style B" in prompt for prompt in prompts)
+    await client.aclose()
+
+
 async def test_gemini_service_includes_logo_inline_image_when_available() -> None:
     observed: dict[str, object] = {"get_urls": []}
     encoded_png = base64.b64encode(b"png-binary").decode("ascii")

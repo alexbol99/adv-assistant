@@ -241,6 +241,7 @@ Additionally, product names and promotional text entered by the operator may ina
 4. If product confirmation is rejected, bot asks operator to choose one of two paths: upload product image or provide more precise text description.
 5. If operator provides precise text description, bot retries lookup and confirmation flow.
 6. Clarification cycle starts only after confirmed product + existing `product_name`.
+   - If product confirmation is approved but `product_name` is still missing, bot must ask for product name and keep generation blocked.
 7. Clarification cycle asks one question at a time with a cap of up to 3 questions; it may stop earlier when enough data exists.
 8. Bot builds a dynamic generation prompt from user request, clarifications, business profile, and screen constraints.
 9. Bot generates exactly two ad variants per round (valid outputs only).

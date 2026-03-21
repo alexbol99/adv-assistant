@@ -25,7 +25,12 @@ migrate:
 	set -a; [ -f .env ] && . ./.env; set +a; uv run alembic upgrade head
 
 run:
-	set -a; [ -f .env ] && . ./.env; set +a; uv run uvicorn --app-dir src adv_assistant.main:app --reload --host 0.0.0.0 --port 8080
+	set -a; [ -f .env ] && . ./.env; set +a; \
+	uv run uvicorn --app-dir src adv_assistant.main:app \
+		--reload --reload-dir src \
+		--reload-exclude '.claude/*' \
+		--reload-exclude '.venv/*' \
+		--host 0.0.0.0 --port 8080
 
 docker-up:
 	docker compose up --build

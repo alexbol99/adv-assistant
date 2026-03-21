@@ -102,7 +102,25 @@ class AdGenerationService(Protocol):
         wamid: str,
         width: int,
         height: int,
+        variant_slot: int | None = None,
     ) -> GenerationSubmission: ...
+
+    async def submit_variant_pair(
+        self,
+        *,
+        draft: GenerationDraftInput,
+        mode: GenerationMode,
+        instruction_text: str,
+        wamid: str,
+        width: int,
+        height: int,
+    ) -> list[GenerationSubmission]: ...
+
+    async def poll_variant_pair(
+        self,
+        *,
+        submissions: list[GenerationSubmission],
+    ) -> list[GenerationPollResult]: ...
 
     async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult: ...
 
@@ -135,7 +153,27 @@ class NoopAdGenerationService:
         wamid: str,
         width: int,
         height: int,
+        variant_slot: int | None = None,
     ) -> GenerationSubmission:
+        raise AdGenerationError("Ad generation service is not configured")
+
+    async def submit_variant_pair(
+        self,
+        *,
+        draft: GenerationDraftInput,
+        mode: GenerationMode,
+        instruction_text: str,
+        wamid: str,
+        width: int,
+        height: int,
+    ) -> list[GenerationSubmission]:
+        raise AdGenerationError("Ad generation service is not configured")
+
+    async def poll_variant_pair(
+        self,
+        *,
+        submissions: list[GenerationSubmission],
+    ) -> list[GenerationPollResult]:
         raise AdGenerationError("Ad generation service is not configured")
 
     async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult:
@@ -207,6 +245,7 @@ class GeminiFlashImageAdGenerationService:
         wamid: str,
         width: int,
         height: int,
+        variant_slot: int | None = None,
     ) -> GenerationSubmission:
         if mode == GenerationMode.REFERENCE and not (
             draft.preview_reference_url or draft.rendered_image_url
@@ -217,12 +256,14 @@ class GeminiFlashImageAdGenerationService:
             draft_id=draft.draft_id,
             wamid=wamid,
             mode=mode,
+            variant_slot=variant_slot,
         )
         aspect_ratio = derive_aspect_ratio(width=width, height=height)
         prompt = build_generation_prompt(
             draft=draft,
             mode=mode,
             instruction_text=instruction_text,
+            variant_slot=variant_slot,
         )
         prompt = f"{prompt}\nTarget aspect ratio: {aspect_ratio}."
         payload = await self._build_request_payload(
@@ -361,6 +402,44 @@ class GeminiFlashImageAdGenerationService:
             idempotency_key=idempotency_key,
             mode=mode,
             request_payload=payload,
+        )
+
+    async def submit_variant_pair(
+        self,
+        *,
+        draft: GenerationDraftInput,
+        mode: GenerationMode,
+        instruction_text: str,
+        wamid: str,
+        width: int,
+        height: int,
+    ) -> list[GenerationSubmission]:
+        submissions: list[GenerationSubmission] = []
+        for slot in (1, 2):
+            sub = await self.submit_for_draft(
+                draft=draft,
+                mode=mode,
+                instruction_text=instruction_text,
+                wamid=wamid,
+                width=width,
+                height=height,
+                variant_slot=slot,
+            )
+            submissions.append(sub)
+        return submissions
+
+    async def poll_variant_pair(
+        self,
+        *,
+        submissions: list[GenerationSubmission],
+    ) -> list[GenerationPollResult]:
+        if len(submissions) != 2:
+            raise AdGenerationError("Gemini variant polling requires exactly 2 submissions")
+        return list(
+            await asyncio.gather(
+                self.wait_for_completion(job_id=submissions[0].job_id),
+                self.wait_for_completion(job_id=submissions[1].job_id),
+            )
         )
 
     async def wait_for_completion(self, *, job_id: str) -> GenerationPollResult:

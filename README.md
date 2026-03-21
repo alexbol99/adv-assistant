@@ -32,7 +32,7 @@
    - `uv run ruff format --check .`
    - `uv run pytest`
 3. Run the app locally:
-   - `uv run uvicorn --app-dir src adv_assistant.main:app --reload --host 0.0.0.0 --port 8080`
+   - `uv run uvicorn --app-dir src adv_assistant.main:app --reload --reload-dir src --host 0.0.0.0 --port 8080`
    - or `make run` (auto-loads `.env` into process env)
 4. Run with Docker:
    - `docker compose up --build`
