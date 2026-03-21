@@ -16,9 +16,11 @@ QUESTION_CONTEXT_KEY = "question_key"
 QUESTION_CONTEXT_REQUIRED = "required"
 QUESTION_CONTEXT_PHASE = "phase"
 QUESTION_CONTEXT_REPROMPT_COUNT = "reprompt_count"
+QUESTION_CONTEXT_CLARIFICATION_COUNT = "clarification_count"
 QUESTION_PHASE_PRE_GENERATION = "pre_generation"
 QUESTION_PHASE_POST_PREVIEW = "post_preview"
 MAX_REPROMPTS_DEFAULT = 2
+MAX_PRE_GENERATION_CLARIFICATION_QUESTIONS = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +115,11 @@ def is_generation_ready(
     classification_resolved: bool,
     awaiting_product_confirmation: bool,
     has_product_name: bool,
+    has_price: bool = False,
+    has_store_type: bool = False,
+    has_creative_guidance: bool = False,
+    clarification_question_count: int = 0,
+    max_pre_generation_clarification_questions: int = MAX_PRE_GENERATION_CLARIFICATION_QUESTIONS,
 ) -> bool:
     if not classification_resolved:
         return False
@@ -122,10 +129,25 @@ def is_generation_ready(
         request_type,
         REQUEST_TYPE_QUESTION_RULES[AdRequestType.UNSET],
     )
+    asked_clarifications = max(clarification_question_count, 0)
     for required_key in rules.required_before_generation:
-        if required_key == QUESTION_KEY_PRODUCT_NAME and not has_product_name:
-            return False
+        if _is_missing(
+            question_key=required_key,
+            has_product_name=has_product_name,
+            has_price=has_price,
+            has_store_type=has_store_type,
+            has_creative_guidance=has_creative_guidance,
+        ):
+            return asked_clarifications >= max_pre_generation_clarification_questions
     return True
+
+
+def clarification_count_from_context(
+    *,
+    pending_question_context: dict[str, Any] | None,
+) -> int:
+    context = pending_question_context or {}
+    return _parse_reprompt_count(context.get(QUESTION_CONTEXT_CLARIFICATION_COUNT))
 
 
 def select_next_question(
@@ -140,6 +162,8 @@ def select_next_question(
     language: str,
     after_preview_generation: bool,
     allow_regenerate_confirmation: bool = False,
+    clarification_question_count: int = 0,
+    max_pre_generation_clarification_questions: int = MAX_PRE_GENERATION_CLARIFICATION_QUESTIONS,
 ) -> QuestionSelection | None:
     if not classification_resolved or request_type == AdRequestType.UNSET:
         return QuestionSelection(
@@ -161,6 +185,7 @@ def select_next_question(
         request_type,
         REQUEST_TYPE_QUESTION_RULES[AdRequestType.UNSET],
     )
+    asked_clarifications = max(clarification_question_count, 0)
     for required_key in rules.required_before_generation:
         if _is_missing(
             question_key=required_key,
@@ -169,6 +194,8 @@ def select_next_question(
             has_store_type=has_store_type,
             has_creative_guidance=has_creative_guidance,
         ):
+            if asked_clarifications >= max_pre_generation_clarification_questions:
+                return None
             return QuestionSelection(
                 pending_question_type=PendingQuestionType.MISSING_INFO,
                 pending_question_context={
@@ -176,6 +203,7 @@ def select_next_question(
                     QUESTION_CONTEXT_REQUIRED: True,
                     QUESTION_CONTEXT_PHASE: QUESTION_PHASE_PRE_GENERATION,
                     QUESTION_CONTEXT_REPROMPT_COUNT: 0,
+                    QUESTION_CONTEXT_CLARIFICATION_COUNT: asked_clarifications + 1,
                 },
                 prompt_text=question_prompt(required_key, language),
                 is_blocking_for_generation=True,

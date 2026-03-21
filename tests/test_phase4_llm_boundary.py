@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adv_assistant import creative_brief_planner
 from adv_assistant.db.base import Base
 from adv_assistant.db.repositories import OperatorRepository
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
@@ -286,6 +287,7 @@ async def test_openai_gateway_retries_on_schema_mismatch(monkeypatch: Any) -> No
         system_prompt: str,
         user_prompt: str,
         operation: str,
+        timeout_seconds: int | None = None,
     ) -> str:
         calls["n"] += 1
         if calls["n"] == 1:
@@ -340,6 +342,54 @@ async def test_openai_gateway_retries_without_temperature_when_model_rejects_it(
     assert len(calls) == 2
     assert calls[0]["temperature"] == 0
     assert "temperature" not in calls[1]
+
+
+async def test_openai_gateway_coerces_creative_brief_schema_variants(
+    monkeypatch: Any,
+) -> None:
+    gateway = OpenAILLMGateway(
+        api_key="test-key",
+        classification_model="gpt-5-mini",
+        extraction_model="gpt-5-mini",
+        reply_model="gpt-5-mini",
+        max_retries=0,
+        timeout_seconds=5,
+        max_input_chars=2000,
+    )
+
+    async def fake_chat_json(
+        *,
+        model_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        operation: str,
+        timeout_seconds: int | None = None,
+    ) -> str:
+        return (
+            '{"decision":"need_more_info","next_question":"האם יש טקסט פרסומי?"'
+            ',"current_brief_state":{"scene":"מוצר על רקע נקי"}}'
+        )
+
+    monkeypatch.setattr(gateway, "_chat_json", fake_chat_json)
+
+    state = creative_brief_planner.initialize_session_state(
+        confirmed_product={"product_name": "Milk"},
+        user_memory_context={},
+        conversation_context=[],
+        source_intent="create_ad",
+    )
+    output = await gateway.plan_creative_brief(
+        context=creative_brief_planner.CreativeBriefPlannerContext(
+            language="he",
+            source_intent="create_ad",
+            latest_user_message="תעשה מודעה לחלב",
+            session_state=state,
+        )
+    )
+
+    assert output.decision == creative_brief_planner.CreativeBriefDecision.ASK_QUESTION
+    assert output.next_question is not None
+    assert output.next_question.question_text == "האם יש טקסט פרסומי?"
 
 
 async def test_openai_gateway_emits_trace_event_when_enabled(monkeypatch: Any) -> None:

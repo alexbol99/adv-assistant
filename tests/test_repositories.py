@@ -2,6 +2,7 @@ from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from adv_assistant.db.base import utcnow
@@ -171,6 +172,31 @@ async def test_pending_question_updates(db_session: AsyncSession) -> None:
     assert cleared_session is not None
     assert cleared_session.pending_question_type == PendingQuestionType.NONE
     assert cleared_session.pending_question_context == {}
+
+
+async def test_mark_processed_retries_on_sqlite_lock(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = ProcessedInboundMessageRepository(db_session)
+    original_flush = db_session.flush
+    call_count = {"n": 0}
+
+    async def flaky_flush(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise OperationalError(
+                "INSERT INTO processed_inbound_message (...) VALUES (...)",
+                {},
+                Exception("database is locked"),
+            )
+        return await original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(db_session, "flush", flaky_flush)
+
+    marked = await repo.mark_processed(wamid="wamid-lock-retry", operator_phone="+972500000099")
+    assert marked is True
+    assert call_count["n"] >= 2
+    assert await repo.exists("wamid-lock-retry") is True
 
 
 async def test_business_profile_upsert_by_scope(db_session: AsyncSession) -> None:

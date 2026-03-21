@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adv_assistant import creative_brief_planner
 from adv_assistant.ad_generation import (
     GenerationDraftInput,
     GenerationMode,
@@ -92,6 +93,23 @@ class SequencedGateway:
         extracted_fields: ExtractedAdFields | None,
     ) -> ReplyGeneration:
         return ReplyGeneration(reply_text="fallback")
+
+    async def plan_creative_brief(
+        self,
+        *,
+        context: creative_brief_planner.CreativeBriefPlannerContext,
+    ) -> creative_brief_planner.CreativeBriefPlannerOutput:
+        return creative_brief_planner.CreativeBriefPlannerOutput(
+            decision=creative_brief_planner.CreativeBriefDecision.BRIEF_READY,
+            current_brief_state=creative_brief_planner.CurrentBriefState(
+                scene="Clean product hero shot in a supermarket aisle",
+                style="Clean commercial style with high product focus",
+            ),
+            missing_dimensions=[],
+            final_brief=None,
+            internal_notes="sequenced_gateway_brief_ready",
+            confidence=0.8,
+        )
 
 
 class FakeGenerationService:
