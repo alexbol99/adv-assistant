@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adv_assistant import creative_brief_planner
 from adv_assistant import question_policy
 from adv_assistant.ad_generation import (
     AdGenerationError,
@@ -129,6 +130,15 @@ _REQUEST_TYPE_STORE_GENERAL_KEYWORDS = {
     "מודעה כללית",
     "מבצעי החנות",
 }
+_EXPLICIT_NEW_AD_INTERRUPT_KEYWORDS = {
+    "new ad",
+    "create a new ad",
+    "start a new ad",
+    "מודעה חדשה",
+    "מודעה אחרת",
+    "צור מודעה חדשה",
+    "להתחיל מודעה חדשה",
+}
 _CONFIRMATION_UNSAFE_IMAGE_HOSTS = {
     "tiktok.com",
     "www.tiktok.com",
@@ -190,6 +200,17 @@ class _GenerationExecutionResult:
     deterministic_action: str | None
 
 
+@dataclass(slots=True)
+class _CreativeBriefPlannerTurnResult:
+    pending_question_type: PendingQuestionType
+    pending_question_context: dict[str, Any]
+    reply_text: str | None
+    brief_instruction_text: str | None
+    resume_intent: Intent | None
+    forced_reason: str | None
+    validation_fallback: bool
+
+
 def _operator_needs_onboarding(operator: Operator) -> bool:
     """Return True if the operator has not completed first-time onboarding."""
     return operator.business_name is None or operator.logo_url is None
@@ -233,6 +254,10 @@ def _normalized_casefold_text(value: str) -> str:
 def _contains_any_keyword(message_text: str, keywords: set[str]) -> bool:
     normalized = _normalized_casefold_text(message_text)
     return any(keyword in normalized for keyword in keywords)
+
+
+def _is_explicit_new_ad_interrupt(message_text: str) -> bool:
+    return _contains_any_keyword(message_text, _EXPLICIT_NEW_AD_INTERRUPT_KEYWORDS)
 
 
 def _classification_prompt(language: str) -> str:
@@ -313,6 +338,9 @@ class InboundTaskProcessor:
                 self._clear_provider_trace_context(self._llm_gateway)
                 self._clear_provider_trace_context(self._ad_generation_service)
                 return ProcessInboundResult(duplicate=True)
+            # Keep the dedupe write transaction short so concurrent inbound messages
+            # are less likely to hit SQLite "database is locked" contention.
+            await session.commit()
 
             operator = await operator_repo.get_by_phone(payload.operator_phone)
             if operator is None or not operator.active:
@@ -482,6 +510,7 @@ class InboundTaskProcessor:
             action_buttons: list[tuple[str, str]] | None = None
             session_language_override: str | None = None
             followup_regen_requested = False
+            brief_instruction_override: str | None = None
 
             if button_payload_id:
                 history.append(
@@ -525,20 +554,21 @@ class InboundTaskProcessor:
                                     "photo_url": current_draft.photo_url,
                                 },
                             )
-                            pre_generation_question = self._select_next_question(
+                            planner_turn = await self._advance_creative_brief_planner(
+                                payload=payload,
+                                audit_repo=audit_repo,
                                 current_draft=current_draft,
                                 operator=operator,
-                                after_preview_generation=False,
-                                allow_regenerate_confirmation=False,
+                                history=history,
+                                pending_question_context=pending_question_context,
+                                source_intent=Intent.CREATE_AD,
+                                latest_user_message=None,
                             )
-                            if pre_generation_question is not None:
-                                pending_question_type = (
-                                    pre_generation_question.pending_question_type
-                                )
-                                pending_question_context = (
-                                    pre_generation_question.pending_question_context
-                                )
-                                reply_text = pre_generation_question.prompt_text
+                            llm_used = self._llm_gateway.uses_external_llm or llm_used
+                            if planner_turn.reply_text is not None:
+                                pending_question_type = planner_turn.pending_question_type
+                                pending_question_context = planner_turn.pending_question_context
+                                reply_text = planner_turn.reply_text
                                 deterministic_action = "generation_gate_blocked"
                             else:
                                 generation_result = await self._execute_generation(
@@ -549,8 +579,11 @@ class InboundTaskProcessor:
                                     current_draft=current_draft,
                                     operator=operator,
                                     mode=GenerationMode.FRESH,
-                                    instruction_text=_product_confirmation_generation_instruction(
-                                        operator.language
+                                    instruction_text=(
+                                        planner_turn.brief_instruction_text
+                                        or _product_confirmation_generation_instruction(
+                                            operator.language
+                                        )
                                     ),
                                     followup_regen_requested=False,
                                 )
@@ -654,6 +687,7 @@ class InboundTaskProcessor:
                                     operator=operator,
                                     after_preview_generation=True,
                                     allow_regenerate_confirmation=True,
+                                    current_pending_question_context=pending_question_context,
                                 )
                                 if next_q is not None:
                                     pending_question_type = next_q.pending_question_type
@@ -828,20 +862,23 @@ class InboundTaskProcessor:
                                         "photo_url": current_draft.photo_url,
                                     },
                                 )
-                                pre_generation_question = self._select_next_question(
+                                planner_turn = await self._advance_creative_brief_planner(
+                                    payload=payload,
+                                    audit_repo=audit_repo,
                                     current_draft=current_draft,
                                     operator=operator,
-                                    after_preview_generation=False,
-                                    allow_regenerate_confirmation=False,
+                                    history=history,
+                                    pending_question_context=pending_question_context,
+                                    source_intent=Intent.CREATE_AD,
+                                    latest_user_message=None,
                                 )
-                                if pre_generation_question is not None:
-                                    pending_question_type = (
-                                        pre_generation_question.pending_question_type
-                                    )
+                                llm_used = self._llm_gateway.uses_external_llm or llm_used
+                                if planner_turn.reply_text is not None:
+                                    pending_question_type = planner_turn.pending_question_type
                                     pending_question_context = (
-                                        pre_generation_question.pending_question_context
+                                        planner_turn.pending_question_context
                                     )
-                                    reply_text = pre_generation_question.prompt_text
+                                    reply_text = planner_turn.reply_text
                                     deterministic_action = "generation_gate_blocked"
                                 else:
                                     generation_result = await self._execute_generation(
@@ -852,8 +889,11 @@ class InboundTaskProcessor:
                                         current_draft=current_draft,
                                         operator=operator,
                                         mode=GenerationMode.FRESH,
-                                        instruction_text=_product_confirmation_generation_instruction(
-                                            operator.language
+                                        instruction_text=(
+                                            planner_turn.brief_instruction_text
+                                            or _product_confirmation_generation_instruction(
+                                                operator.language
+                                            )
                                         ),
                                         followup_regen_requested=False,
                                     )
@@ -908,6 +948,7 @@ class InboundTaskProcessor:
                         classification = IntentClassification(intent=Intent.SET_BRANDING)
 
                     forced_intent: Intent | None = None
+                    clarification_budget_context_override: dict[str, Any] | None = None
                     if (
                         reply_text is None
                         and pending_question_type == PendingQuestionType.CLASSIFICATION
@@ -920,12 +961,68 @@ class InboundTaskProcessor:
                             )
                         except ValueError:
                             forced_intent = Intent.CREATE_AD
+                    if (
+                        reply_text is None
+                        and _is_creative_brief_pending(
+                            pending_question_type=pending_question_type,
+                            pending_question_context=pending_question_context,
+                        )
+                    ):
+                        interrupt_classification = await self._llm_gateway.classify_intent(
+                            message_text=sanitized_text,
+                            language=operator.language,
+                            history=history,
+                        )
+                        llm_used = self._llm_gateway.uses_external_llm or llm_used
+                        if (
+                            interrupt_classification.intent
+                            in question_policy.INTERRUPT_PENDING_QUESTION_INTENTS
+                        ):
+                            if (
+                                interrupt_classification.intent == Intent.CREATE_AD
+                                and not _is_explicit_new_ad_interrupt(sanitized_text)
+                            ):
+                                interrupt_classification = IntentClassification(
+                                    intent=Intent.UNKNOWN
+                                )
+                            else:
+                                pending_question_type = PendingQuestionType.NONE
+                                pending_question_context = {}
+                                forced_intent = interrupt_classification.intent
+                        if forced_intent is None:
+                            planner_turn = await self._advance_creative_brief_planner(
+                                payload=payload,
+                                audit_repo=audit_repo,
+                                current_draft=current_draft,
+                                operator=operator,
+                                history=history,
+                                pending_question_context=pending_question_context,
+                                source_intent=last_user_intent_hint,
+                                latest_user_message=sanitized_text,
+                            )
+                            llm_used = self._llm_gateway.uses_external_llm or llm_used
+                            pending_question_type = planner_turn.pending_question_type
+                            pending_question_context = planner_turn.pending_question_context
+                            if planner_turn.reply_text is not None:
+                                reply_text = planner_turn.reply_text
+                                deterministic_action = "generation_gate_blocked"
+                                classification = IntentClassification(intent=Intent.UNKNOWN)
+                            else:
+                                brief_instruction_override = planner_turn.brief_instruction_text
+                                forced_intent = (
+                                    planner_turn.resume_intent
+                                    or Intent.REGENERATE_FROM_SCRATCH
+                                )
                     pending_question_key = question_policy.pending_question_key(
                         pending_question_type=pending_question_type,
                         pending_question_context=pending_question_context,
                     )
                     if (
                         reply_text is None
+                        and not _is_creative_brief_pending(
+                            pending_question_type=pending_question_type,
+                            pending_question_context=pending_question_context,
+                        )
                         and pending_question_key is not None
                         and pending_question_type
                         in {
@@ -974,54 +1071,68 @@ class InboundTaskProcessor:
                                     classification = IntentClassification(intent=Intent.UNKNOWN)
                                 pending_handled = True
                         elif pending_question_type == PendingQuestionType.MISSING_INFO:
-                            classification = await self._llm_gateway.classify_intent(
-                                message_text=sanitized_text,
-                                language=operator.language,
+                            (
+                                current_draft,
+                                transition_status,
+                                pending_reply_text,
+                                llm_used_in_pending,
+                            ) = await self._resolve_pending_missing_info_answer(
+                                payload=payload,
+                                draft_repo=draft_repo,
+                                operator_repo=operator_repo,
+                                audit_repo=audit_repo,
+                                current_draft=current_draft,
+                                operator=operator,
                                 history=history,
+                                pending_question_context=pending_question_context,
+                                message_text=sanitized_text,
                             )
-                            llm_used = self._llm_gateway.uses_external_llm or llm_used
+                            llm_used = llm_used or llm_used_in_pending
+                            if pending_reply_text is not None:
+                                reply_text = pending_reply_text
+                            classification = IntentClassification(intent=Intent.UNKNOWN)
                             if (
-                                classification.intent
-                                in question_policy.INTERRUPT_PENDING_QUESTION_INTENTS
+                                transition_status
+                                == question_policy.PendingResolutionStatus.UNRESOLVED
                             ):
-                                transition_status = (
-                                    question_policy.PendingResolutionStatus.INTERRUPTED
-                                )
-                                pending_handled = True
-                            else:
-                                (
-                                    current_draft,
-                                    transition_status,
-                                    pending_reply_text,
-                                    llm_used_in_pending,
-                                ) = await self._resolve_pending_missing_info_answer(
-                                    payload=payload,
-                                    draft_repo=draft_repo,
-                                    operator_repo=operator_repo,
-                                    audit_repo=audit_repo,
-                                    current_draft=current_draft,
-                                    operator=operator,
-                                    history=history,
-                                    pending_question_context=pending_question_context,
+                                classification = await self._llm_gateway.classify_intent(
                                     message_text=sanitized_text,
+                                    language=operator.language,
+                                    history=history,
                                 )
-                                llm_used = llm_used or llm_used_in_pending
-                                if pending_reply_text is not None:
-                                    reply_text = pending_reply_text
-                                classification = IntentClassification(intent=Intent.UNKNOWN)
-                                pending_handled = True
+                                llm_used = self._llm_gateway.uses_external_llm or llm_used
+                                if (
+                                    classification.intent
+                                    in question_policy.INTERRUPT_PENDING_QUESTION_INTENTS
+                                ):
+                                    if (
+                                        classification.intent == Intent.CREATE_AD
+                                        and not _is_explicit_new_ad_interrupt(sanitized_text)
+                                    ):
+                                        classification = IntentClassification(intent=Intent.UNKNOWN)
+                                    else:
+                                        transition_status = (
+                                            question_policy.PendingResolutionStatus.INTERRUPTED
+                                        )
+                                else:
+                                    classification = IntentClassification(intent=Intent.UNKNOWN)
+                            pending_handled = True
                         if pending_handled and transition_status is not None:
                             next_question = None
+                            is_pre_generation_phase = False
                             if (
                                 transition_status
                                 == question_policy.PendingResolutionStatus.RESOLVED
                                 and forced_intent is None
                             ):
+                                phase = pending_question_context.get(
+                                    question_policy.QUESTION_CONTEXT_PHASE
+                                )
                                 is_post_preview_phase = (
-                                    pending_question_context.get(
-                                        question_policy.QUESTION_CONTEXT_PHASE
-                                    )
-                                    == question_policy.QUESTION_PHASE_POST_PREVIEW
+                                    phase == question_policy.QUESTION_PHASE_POST_PREVIEW
+                                )
+                                is_pre_generation_phase = (
+                                    phase == question_policy.QUESTION_PHASE_PRE_GENERATION
                                 )
                                 if is_post_preview_phase:
                                     next_question = self._select_next_question(
@@ -1029,7 +1140,20 @@ class InboundTaskProcessor:
                                         operator=operator,
                                         after_preview_generation=True,
                                         allow_regenerate_confirmation=True,
+                                        current_pending_question_context=pending_question_context,
                                     )
+                                elif is_pre_generation_phase:
+                                    next_question = self._select_next_question(
+                                        current_draft=current_draft,
+                                        operator=operator,
+                                        after_preview_generation=False,
+                                        allow_regenerate_confirmation=False,
+                                        current_pending_question_context=pending_question_context,
+                                    )
+                                    if next_question is None and reply_text is None:
+                                        clarification_budget_context_override = dict(
+                                            pending_question_context
+                                        )
                             pending_transition = question_policy.resolve_pending_question(
                                 pending_question_type=pending_question_type,
                                 pending_question_context=pending_question_context,
@@ -1041,6 +1165,17 @@ class InboundTaskProcessor:
                             pending_question_context = pending_transition.pending_question_context
                             if reply_text is None and pending_transition.reply_text is not None:
                                 reply_text = pending_transition.reply_text
+                            if (
+                                transition_status
+                                == question_policy.PendingResolutionStatus.RESOLVED
+                                and forced_intent is None
+                                and is_pre_generation_phase
+                                and next_question is None
+                                and reply_text is None
+                            ):
+                                # Continue immediately to generation once pre-generation
+                                # clarification handling is complete.
+                                forced_intent = Intent.REGENERATE_FROM_SCRATCH
 
                     if forced_intent is not None:
                         classification = IntentClassification(intent=forced_intent)
@@ -1361,6 +1496,13 @@ class InboundTaskProcessor:
                         )
                         enrichment_notice = None
 
+                    readiness_context = (
+                        clarification_budget_context_override
+                        if clarification_budget_context_override is not None
+                        else pending_question_context
+                    )
+                    planner_allowed = _can_run_creative_brief_planner(current_draft=current_draft)
+
                     if (
                         reply_text is None
                         and classification.intent
@@ -1372,7 +1514,80 @@ class InboundTaskProcessor:
                         and self._ad_generation_service.enabled
                     ):
                         mode = _generation_mode_for_intent(classification.intent)
-                        if _is_ready_for_generation(current_draft):
+                        if planner_allowed and brief_instruction_override is None:
+                            planner_turn = await self._advance_creative_brief_planner(
+                                payload=payload,
+                                audit_repo=audit_repo,
+                                current_draft=current_draft,
+                                operator=operator,
+                                history=history,
+                                pending_question_context=readiness_context,
+                                source_intent=classification.intent,
+                                latest_user_message=sanitized_text,
+                            )
+                            llm_used = self._llm_gateway.uses_external_llm or llm_used
+                            pending_question_type = planner_turn.pending_question_type
+                            pending_question_context = planner_turn.pending_question_context
+                            if planner_turn.reply_text is not None:
+                                reply_text = planner_turn.reply_text
+                                deterministic_action = "generation_gate_blocked"
+                            else:
+                                brief_instruction_override = (
+                                    planner_turn.brief_instruction_text
+                                    or brief_instruction_override
+                                )
+                                generation_result = await self._execute_generation(
+                                    session=session,
+                                    payload=payload,
+                                    draft_repo=draft_repo,
+                                    audit_repo=audit_repo,
+                                    current_draft=current_draft,
+                                    operator=operator,
+                                    mode=mode,
+                                    instruction_text=(
+                                        brief_instruction_override or sanitized_text
+                                    ),
+                                    followup_regen_requested=followup_regen_requested,
+                                )
+                                current_draft = generation_result.draft
+                                reply_text = generation_result.reply_text
+                                generated_image_url = generation_result.generated_image_url
+                                variant_image_urls = generation_result.variant_image_urls
+                                pending_question_type = generation_result.pending_question_type
+                                pending_question_context = generation_result.pending_question_context
+                                publish_buttons_prompt = generation_result.publish_buttons_prompt
+                                action_buttons_prompt = generation_result.action_buttons_prompt
+                                action_buttons = generation_result.action_buttons
+                                if generation_result.deterministic_action is not None:
+                                    deterministic_action = generation_result.deterministic_action
+                        elif planner_allowed:
+                            generation_result = await self._execute_generation(
+                                session=session,
+                                payload=payload,
+                                draft_repo=draft_repo,
+                                audit_repo=audit_repo,
+                                current_draft=current_draft,
+                                operator=operator,
+                                mode=mode,
+                                instruction_text=brief_instruction_override or sanitized_text,
+                                followup_regen_requested=followup_regen_requested,
+                            )
+                            current_draft = generation_result.draft
+                            reply_text = generation_result.reply_text
+                            generated_image_url = generation_result.generated_image_url
+                            variant_image_urls = generation_result.variant_image_urls
+                            pending_question_type = generation_result.pending_question_type
+                            pending_question_context = generation_result.pending_question_context
+                            publish_buttons_prompt = generation_result.publish_buttons_prompt
+                            action_buttons_prompt = generation_result.action_buttons_prompt
+                            action_buttons = generation_result.action_buttons
+                            if generation_result.deterministic_action is not None:
+                                deterministic_action = generation_result.deterministic_action
+                        elif _is_ready_for_generation(
+                            current_draft,
+                            operator=operator,
+                            pending_question_context=readiness_context,
+                        ):
                             generation_result = await self._execute_generation(
                                 session=session,
                                 payload=payload,
@@ -1401,6 +1616,7 @@ class InboundTaskProcessor:
                                 operator=operator,
                                 after_preview_generation=False,
                                 allow_regenerate_confirmation=False,
+                                current_pending_question_context=readiness_context,
                             )
                             if pre_generation_question is not None:
                                 pending_question_type = (
@@ -1417,12 +1633,17 @@ class InboundTaskProcessor:
                             Intent.CREATE_AD,
                             Intent.REGENERATE_WITH_REFERENCE,
                             Intent.REGENERATE_FROM_SCRATCH,
-                        } and not _is_ready_for_generation(current_draft):
+                        } and not planner_allowed and not _is_ready_for_generation(
+                            current_draft,
+                            operator=operator,
+                            pending_question_context=readiness_context,
+                        ):
                             pre_generation_question = self._select_next_question(
                                 current_draft=current_draft,
                                 operator=operator,
                                 after_preview_generation=False,
                                 allow_regenerate_confirmation=False,
+                                current_pending_question_context=readiness_context,
                             )
                             if pre_generation_question is not None:
                                 pending_question_type = (
@@ -2213,6 +2434,7 @@ class InboundTaskProcessor:
         operator: Operator,
         after_preview_generation: bool,
         allow_regenerate_confirmation: bool,
+        current_pending_question_context: dict[str, Any] | None = None,
     ) -> question_policy.QuestionSelection | None:
         return question_policy.select_next_question(
             request_type=current_draft.request_type,
@@ -2225,6 +2447,237 @@ class InboundTaskProcessor:
             language=operator.language,
             after_preview_generation=after_preview_generation,
             allow_regenerate_confirmation=allow_regenerate_confirmation,
+            clarification_question_count=question_policy.clarification_count_from_context(
+                pending_question_context=current_pending_question_context
+            ),
+        )
+
+    async def _advance_creative_brief_planner(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        operator: Operator,
+        history: list[dict[str, str]],
+        pending_question_context: dict[str, Any] | None,
+        source_intent: Intent | str | None,
+        latest_user_message: str | None,
+    ) -> _CreativeBriefPlannerTurnResult:
+        context_payload = pending_question_context or {}
+        session_payload = (
+            context_payload.get(creative_brief_planner.SESSION_CONTEXT_KEY)
+            if isinstance(context_payload, dict)
+            else None
+        )
+        session_state: creative_brief_planner.CreativeBriefSessionState
+        if (
+            _is_creative_brief_pending(
+                pending_question_type=PendingQuestionType.MISSING_INFO,
+                pending_question_context=context_payload,
+            )
+            and isinstance(session_payload, dict)
+        ):
+            session_state = creative_brief_planner.CreativeBriefSessionState.model_validate(
+                session_payload
+            )
+        else:
+            confirmed_product = {
+                "product_name": current_draft.product_name,
+                "brand": current_draft.product_brand or current_draft.enriched_brand,
+                "category": current_draft.enriched_category,
+                "image_url": current_draft.photo_url or current_draft.enriched_image_url,
+                "retailer_title": current_draft.enriched_description,
+                "ean": current_draft.ean,
+            }
+            user_memory_context = {
+                "business_name": operator.business_name,
+                "store_type": operator.store_type,
+                "creative_guidance": operator.creative_guidance,
+                "brand_colors": operator.brand_colors or [],
+                "logo_url": operator.logo_url,
+            }
+            planner_history_window = 5
+            planner_history_item_max_chars = 180
+            history_context: list[str] = []
+            for item in history[-planner_history_window:]:
+                role = item.get("role", "unknown")
+                text = _truncate(item.get("text"), planner_history_item_max_chars)
+                if text is not None:
+                    history_context.append(f"{role}: {text}")
+            source_intent_value = (
+                source_intent.value if isinstance(source_intent, Intent) else source_intent
+            )
+            session_state = creative_brief_planner.initialize_session_state(
+                confirmed_product=confirmed_product,
+                user_memory_context=user_memory_context,
+                conversation_context=history_context,
+                source_intent=source_intent_value,
+            )
+
+        source_intent_value = source_intent.value if isinstance(source_intent, Intent) else source_intent
+        if source_intent_value is not None:
+            session_state.source_intent = source_intent_value
+
+        planner_context = creative_brief_planner.CreativeBriefPlannerContext(
+            language=operator.language,
+            source_intent=session_state.source_intent,
+            latest_user_message=latest_user_message,
+            session_state=session_state,
+        )
+        # Release any pending DB write lock before waiting on external LLM I/O.
+        await audit_repo.session.commit()
+        planner_method = getattr(self._llm_gateway, "plan_creative_brief", None)
+        planner_output = creative_brief_planner.noop_plan_creative_brief(
+            context=planner_context
+        )
+        planner_call_failed = False
+        planner_failure_type: str | None = None
+        planner_failure_message: str | None = None
+        if callable(planner_method):
+            try:
+                planner_output = await planner_method(context=planner_context)
+            except Exception as exc:
+                planner_call_failed = True
+                planner_failure_type = exc.__class__.__name__
+                planner_failure_message = _truncate(str(exc), 300)
+                logger.warning(
+                    "Creative brief planner failed; falling back to noop planner "
+                    "(operator_phone=%s, wamid=%s)",
+                    payload.operator_phone,
+                    payload.wamid,
+                    exc_info=True,
+                )
+
+        if planner_call_failed:
+            await audit_repo.log(
+                actor="system",
+                action="creative_brief_planner_validation_fallback",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "reason": "planner_call_failed",
+                    "error_type": planner_failure_type,
+                    "error_message": planner_failure_message,
+                    "question_count": session_state.question_count,
+                },
+            )
+
+        resolution = creative_brief_planner.apply_planner_output(
+            session_state=session_state,
+            planner_output=planner_output,
+            latest_user_message=latest_user_message,
+            language=operator.language,
+            question_cap=creative_brief_planner.DEFAULT_SOFT_QUESTION_CAP,
+        )
+        resolved_state = resolution.state
+        if resolved_state.is_brief_ready:
+            final_brief = resolved_state.final_brief
+            if final_brief is None:
+                final_brief = creative_brief_planner.synthesize_final_brief(
+                    resolved_state,
+                    confidence=planner_output.confidence,
+                )
+            instruction_text = creative_brief_planner.render_brief_instruction(final_brief)
+            resume_intent = _intent_from_value(resolved_state.source_intent)
+            action = "creative_brief_planner_brief_ready"
+            if resolution.forced_reason == "cap":
+                action = "creative_brief_planner_forced_ready_cap"
+            elif resolution.validation_fallback:
+                action = "creative_brief_planner_validation_fallback"
+            await audit_repo.log(
+                actor="system",
+                action=action,
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "missing_dimensions": resolved_state.missing_dimensions,
+                    "question_count": resolved_state.question_count,
+                    "confidence": final_brief.confidence,
+                },
+            )
+            return _CreativeBriefPlannerTurnResult(
+                pending_question_type=PendingQuestionType.NONE,
+                pending_question_context={},
+                reply_text=None,
+                brief_instruction_text=instruction_text,
+                resume_intent=resume_intent,
+                forced_reason=resolution.forced_reason,
+                validation_fallback=resolution.validation_fallback,
+            )
+
+        next_question = resolved_state.pending_question
+        if next_question is None:
+            # Deterministic fallback if the planner returned an inconsistent state.
+            fallback_output = creative_brief_planner.noop_plan_creative_brief(context=planner_context)
+            fallback_resolution = creative_brief_planner.apply_planner_output(
+                session_state=resolved_state,
+                planner_output=fallback_output,
+                latest_user_message=None,
+                language=operator.language,
+                question_cap=creative_brief_planner.DEFAULT_SOFT_QUESTION_CAP,
+            )
+            resolved_state = fallback_resolution.state
+            next_question = resolved_state.pending_question
+            resolution = fallback_resolution
+            await audit_repo.log(
+                actor="system",
+                action="creative_brief_planner_validation_fallback",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "reason": "missing_pending_question",
+                    "question_count": resolved_state.question_count,
+                },
+            )
+        if next_question is None:
+            # Final safety net: force ready with synthesized brief.
+            forced_brief = creative_brief_planner.synthesize_final_brief(
+                resolved_state,
+                confidence=0.4,
+            )
+            instruction_text = creative_brief_planner.render_brief_instruction(forced_brief)
+            return _CreativeBriefPlannerTurnResult(
+                pending_question_type=PendingQuestionType.NONE,
+                pending_question_context={},
+                reply_text=None,
+                brief_instruction_text=instruction_text,
+                resume_intent=_intent_from_value(resolved_state.source_intent),
+                forced_reason="validation_fallback",
+                validation_fallback=True,
+            )
+
+        pending_context = {
+            "stage": creative_brief_planner.STAGE_NAME,
+            creative_brief_planner.SESSION_CONTEXT_KEY: resolved_state.model_dump(mode="json"),
+        }
+        action = "creative_brief_planner_question_asked"
+        if resolution.validation_fallback:
+            action = "creative_brief_planner_validation_fallback"
+        await audit_repo.log(
+            actor="system",
+            action=action,
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "draft_id": str(current_draft.id),
+                "question_key": next_question.key,
+                "missing_dimensions": resolved_state.missing_dimensions,
+                "question_count": resolved_state.question_count,
+                "confidence": planner_output.confidence,
+            },
+        )
+        return _CreativeBriefPlannerTurnResult(
+            pending_question_type=PendingQuestionType.MISSING_INFO,
+            pending_question_context=pending_context,
+            reply_text=next_question.question_text,
+            brief_instruction_text=None,
+            resume_intent=None,
+            forced_reason=resolution.forced_reason,
+            validation_fallback=resolution.validation_fallback,
         )
 
     async def _execute_generation(
@@ -3166,12 +3619,51 @@ def _generation_mode_for_intent(intent: Intent) -> GenerationMode:
     return GenerationMode.FRESH
 
 
-def _is_ready_for_generation(draft: AdDraft) -> bool:
+def _intent_from_value(value: str | None) -> Intent | None:
+    if value is None:
+        return None
+    try:
+        return Intent(value)
+    except ValueError:
+        return None
+
+
+def _is_creative_brief_pending(
+    *,
+    pending_question_type: PendingQuestionType,
+    pending_question_context: dict[str, Any] | None,
+) -> bool:
+    if pending_question_type != PendingQuestionType.MISSING_INFO:
+        return False
+    context = pending_question_context or {}
+    return context.get("stage") == creative_brief_planner.STAGE_NAME
+
+
+def _can_run_creative_brief_planner(*, current_draft: AdDraft) -> bool:
+    return (
+        current_draft.is_classification_resolved
+        and current_draft.request_type != AdRequestType.UNSET
+        and not current_draft.awaiting_product_confirmation
+    )
+
+
+def _is_ready_for_generation(
+    draft: AdDraft,
+    *,
+    operator: Operator,
+    pending_question_context: dict[str, Any] | None,
+) -> bool:
     return question_policy.is_generation_ready(
         request_type=draft.request_type,
         classification_resolved=draft.is_classification_resolved,
         awaiting_product_confirmation=draft.awaiting_product_confirmation,
         has_product_name=draft.product_name is not None,
+        has_price=draft.price is not None,
+        has_store_type=_normalize_brand_value(operator.store_type) is not None,
+        has_creative_guidance=_normalize_brand_value(operator.creative_guidance) is not None,
+        clarification_question_count=question_policy.clarification_count_from_context(
+            pending_question_context=pending_question_context
+        ),
     )
 
 

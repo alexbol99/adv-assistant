@@ -1,9 +1,10 @@
+import asyncio
 import uuid
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy import delete, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from adv_assistant.db.base import utcnow
@@ -30,6 +31,12 @@ from adv_assistant.db.models import (
 )
 
 _UNSET = object()
+_SQLITE_LOCK_RETRY_COUNT = 2
+_SQLITE_LOCK_RETRY_BASE_SECONDS = 0.2
+
+
+def _is_sqlite_locked_error(exc: OperationalError) -> bool:
+    return "database is locked" in str(exc).lower()
 
 
 class OperatorRepository:
@@ -689,14 +696,22 @@ class ProcessedInboundMessageRepository:
         self.session = session
 
     async def mark_processed(self, *, wamid: str, operator_phone: str | None = None) -> bool:
-        message = ProcessedInboundMessage(wamid=wamid, operator_phone=operator_phone)
-        try:
-            async with self.session.begin_nested():
-                self.session.add(message)
-                await self.session.flush()
-        except IntegrityError:
-            return False
-        return True
+        for attempt in range(_SQLITE_LOCK_RETRY_COUNT + 1):
+            message = ProcessedInboundMessage(wamid=wamid, operator_phone=operator_phone)
+            try:
+                async with self.session.begin_nested():
+                    self.session.add(message)
+                    await self.session.flush()
+            except IntegrityError:
+                return False
+            except OperationalError as exc:
+                if not _is_sqlite_locked_error(exc) or attempt >= _SQLITE_LOCK_RETRY_COUNT:
+                    raise
+                await self.session.rollback()
+                await asyncio.sleep(_SQLITE_LOCK_RETRY_BASE_SECONDS * (2**attempt))
+                continue
+            return True
+        return False
 
     async def exists(self, wamid: str) -> bool:
         result = await self.session.execute(

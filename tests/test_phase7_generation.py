@@ -10,6 +10,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adv_assistant import creative_brief_planner
 from adv_assistant.ad_generation import (
     AdGenerationError,
     GeminiFlashImageAdGenerationService,
@@ -31,10 +32,12 @@ from adv_assistant.enrichment import EnrichedProduct
 from adv_assistant.llm_gateway import (
     BUTTON_CONFIRM_PRODUCT_SELECTION,
     BUTTON_REJECT_PRODUCT_SELECTION,
+    BUTTON_SELECT_VARIANT_A,
     ExtractedAdFields,
     ExtractedProductQuery,
     Intent,
     IntentClassification,
+    LLMGatewayError,
     ReplyGeneration,
 )
 from adv_assistant.media_ingest import IngestedOperatorPhoto
@@ -91,6 +94,32 @@ class FakeGateway:
         self.reply_calls += 1
         return ReplyGeneration(reply_text="LLM reply fallback")
 
+    async def plan_creative_brief(
+        self,
+        *,
+        context: creative_brief_planner.CreativeBriefPlannerContext,
+    ) -> creative_brief_planner.CreativeBriefPlannerOutput:
+        base_state = context.session_state.inferred_brief_fields.model_copy(deep=True)
+        if base_state.goal is None:
+            base_state.goal = "Drive immediate product purchase"
+        if base_state.scene is None:
+            base_state.scene = "Clean hero product shot with strong product focus"
+        if base_state.style is None:
+            base_state.style = "Modern retail style with bold product emphasis"
+        enriched_state = context.session_state.model_copy(deep=True)
+        enriched_state.inferred_brief_fields = base_state
+        final_brief = creative_brief_planner.synthesize_final_brief(
+            enriched_state,
+            confidence=0.88,
+        )
+        return creative_brief_planner.CreativeBriefPlannerOutput(
+            decision=creative_brief_planner.CreativeBriefDecision.BRIEF_READY,
+            current_brief_state=base_state,
+            missing_dimensions=[],
+            final_brief=final_brief,
+            confidence=0.88,
+        )
+
 
 class FakeGatewayNoPrice(FakeGateway):
     async def extract_ad_fields(
@@ -107,6 +136,31 @@ class FakeGatewayNoPrice(FakeGateway):
         )
 
 
+class FakeGatewayPriceFollowupInterruptProne(FakeGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self._extract_calls = 0
+
+    async def extract_ad_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> ExtractedAdFields:
+        self._extract_calls += 1
+        if self._extract_calls == 1:
+            return ExtractedAdFields(
+                product_name="Cottage Cheese",
+                currency="ILS",
+                promo_text="Fresh and tasty",
+            )
+        normalized = message_text.replace(",", ".")
+        if "7.90" in normalized:
+            return ExtractedAdFields(price=Decimal("7.90"), currency="ILS")
+        return ExtractedAdFields()
+
+
 class FakeGatewayNoProductName(FakeGateway):
     async def extract_ad_fields(
         self,
@@ -120,6 +174,133 @@ class FakeGatewayNoProductName(FakeGateway):
             currency="ILS",
             promo_text="Fresh and tasty",
         )
+
+
+class FakeGatewayClarificationBudget(FakeGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self._intents = [
+            Intent.CREATE_AD,
+            Intent.UNKNOWN,
+            Intent.UNKNOWN,
+            Intent.UNKNOWN,
+        ]
+
+    async def classify_intent(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> IntentClassification:
+        if self._intents:
+            return IntentClassification(intent=self._intents.pop(0))
+        return IntentClassification(intent=Intent.UNKNOWN)
+
+    async def extract_ad_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> ExtractedAdFields:
+        normalized = message_text.replace(",", ".")
+        if "7.90" in normalized:
+            return ExtractedAdFields(price=Decimal("7.90"), currency="ILS")
+        return ExtractedAdFields()
+
+
+class FakeGatewayPlannerAskThenReady(FakeGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self.plan_calls = 0
+
+    async def plan_creative_brief(
+        self,
+        *,
+        context: creative_brief_planner.CreativeBriefPlannerContext,
+    ) -> creative_brief_planner.CreativeBriefPlannerOutput:
+        self.plan_calls += 1
+        if self.plan_calls == 1:
+            return creative_brief_planner.CreativeBriefPlannerOutput(
+                decision=creative_brief_planner.CreativeBriefDecision.ASK_QUESTION,
+                next_question=creative_brief_planner.NextQuestion(
+                    key="scene",
+                    question_text="איזו סצנה תרצה למודעה?",
+                ),
+                current_brief_state=creative_brief_planner.CurrentBriefState(),
+                missing_dimensions=["creative_direction", "style_context"],
+                confidence=0.6,
+            )
+        enriched_state = context.session_state.model_copy(deep=True)
+        enriched_state.inferred_brief_fields.goal = (
+            enriched_state.inferred_brief_fields.goal
+            or "Increase immediate purchase intent"
+        )
+        enriched_state.inferred_brief_fields.scene = (
+            context.latest_user_message or "Close-up hero scene"
+        )
+        enriched_state.inferred_brief_fields.style = (
+            enriched_state.inferred_brief_fields.style or "Retail commercial style"
+        )
+        final_brief = creative_brief_planner.synthesize_final_brief(
+            enriched_state,
+            confidence=0.9,
+        )
+        return creative_brief_planner.CreativeBriefPlannerOutput(
+            decision=creative_brief_planner.CreativeBriefDecision.BRIEF_READY,
+            current_brief_state=enriched_state.inferred_brief_fields,
+            missing_dimensions=[],
+            final_brief=final_brief,
+            confidence=0.9,
+        )
+
+
+class FakeGatewayPlannerMemoryAware(FakeGateway):
+    async def plan_creative_brief(
+        self,
+        *,
+        context: creative_brief_planner.CreativeBriefPlannerContext,
+    ) -> creative_brief_planner.CreativeBriefPlannerOutput:
+        memory_style = context.session_state.user_memory_context.get("creative_guidance")
+        if memory_style:
+            state = context.session_state.model_copy(deep=True)
+            state.inferred_brief_fields.goal = (
+                state.inferred_brief_fields.goal or "Promote featured product"
+            )
+            state.inferred_brief_fields.scene = (
+                state.inferred_brief_fields.scene or "Product hero close-up"
+            )
+            state.inferred_brief_fields.style = str(memory_style)
+            return creative_brief_planner.CreativeBriefPlannerOutput(
+                decision=creative_brief_planner.CreativeBriefDecision.BRIEF_READY,
+                current_brief_state=state.inferred_brief_fields,
+                missing_dimensions=[],
+                final_brief=creative_brief_planner.synthesize_final_brief(
+                    state,
+                    confidence=0.86,
+                ),
+                confidence=0.86,
+            )
+        return creative_brief_planner.CreativeBriefPlannerOutput(
+            decision=creative_brief_planner.CreativeBriefDecision.ASK_QUESTION,
+            next_question=creative_brief_planner.NextQuestion(
+                key="style",
+                question_text="איזה סגנון חזותי תרצה למודעה?",
+            ),
+            current_brief_state=context.session_state.inferred_brief_fields,
+            missing_dimensions=["style_context"],
+            confidence=0.65,
+        )
+
+
+class FakeGatewayPlannerTimeout(FakeGateway):
+    async def plan_creative_brief(
+        self,
+        *,
+        context: creative_brief_planner.CreativeBriefPlannerContext,
+    ) -> creative_brief_planner.CreativeBriefPlannerOutput:
+        raise LLMGatewayError("OpenAI request failed: Request timed out.")
 
 
 class FakeGatewayBrandConflict(FakeGateway):
@@ -372,7 +553,12 @@ async def session_factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[As
 
 
 async def _seed_operator(
-    factory: async_sessionmaker[AsyncSession], phone: str, *, language: str = "en"
+    factory: async_sessionmaker[AsyncSession],
+    phone: str,
+    *,
+    language: str = "en",
+    store_type: str | None = None,
+    creative_guidance: str | None = None,
 ) -> None:
     async with session_scope(factory) as session:
         await OperatorRepository(session).create(
@@ -381,6 +567,8 @@ async def _seed_operator(
             active=True,
             business_name="Test Biz",
             logo_url="https://example.com/logo.png",
+            store_type=store_type,
+            creative_guidance=creative_guidance,
         )
 
 
@@ -1579,7 +1767,7 @@ async def test_pipeline_product_confirmation_button_rejects_and_clears_photo(
         assert session_obj.pending_question_type == PendingQuestionType.NONE
 
 
-async def test_pipeline_product_confirmation_approved_without_product_name_prompts_missing_info(
+async def test_pipeline_creative_brief_planner_asks_one_question_then_generates(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     phone = "+972500000731"
@@ -1592,7 +1780,7 @@ async def test_pipeline_product_confirmation_approved_without_product_name_promp
     )
     processor = InboundTaskProcessor(
         session_factory,
-        llm_gateway=FakeGatewayNoProductName(),
+        llm_gateway=FakeGatewayPlannerAskThenReady(),
         ad_generation_service=fake_generation,
         product_resolution_service=FakeResolvedProductResolutionServiceMissingTitle(),
     )
@@ -1629,20 +1817,98 @@ async def test_pipeline_product_confirmation_approved_without_product_name_promp
     assert approve_result.deterministic_action == "generation_gate_blocked"
     assert approve_result.generated_image_url is None
     assert approve_result.reply_text is not None
-    assert "שם המוצר" in approve_result.reply_text
+    assert "סצנה" in approve_result.reply_text
+    assert "שם המוצר" not in approve_result.reply_text
     assert fake_generation.calls == 0
     assert fake_generation.wait_calls == 0
 
-    async with session_scope(session_factory) as session:
-        draft = (
-            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
-            .scalars()
-            .first()
+    answer_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-no-name-step3",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "צילום מוצר על רקע ים קיצי"}},
         )
-        assert draft is not None
-        assert draft.awaiting_product_confirmation is False
-        assert draft.product_name is None
+    )
+    assert answer_result.status == "processed"
+    assert answer_result.deterministic_action == "generation_completed"
+    assert answer_result.generated_image_url is not None
+    assert fake_generation.calls == 2
+    assert fake_generation.wait_calls == 2
 
+
+async def test_pipeline_creative_brief_reuses_memory_and_skips_style_reask(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000732"
+    await _seed_operator(
+        session_factory,
+        phone,
+        language="he",
+        store_type="סופרמרקט שכונתי",
+        creative_guidance="סגנון נקי ובהיר",
+    )
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-cap-3.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=FakeGatewayPlannerMemoryAware(),
+        ad_generation_service=fake_generation,
+    )
+
+    first_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-cap3-step1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "אני רוצה מודעה לקוטג"}},
+        )
+    )
+    assert first_result.status == "processed"
+    assert first_result.deterministic_action == "generation_completed"
+    assert (
+        first_result.generated_image_url
+        == "https://storage.googleapis.com/media/preview-cap-3.png"
+    )
+    assert first_result.reply_text is not None
+    assert "איזה סגנון חזותי" not in first_result.reply_text
+    assert fake_generation.calls == 2
+    assert fake_generation.wait_calls == 2
+
+
+async def test_pipeline_creative_brief_planner_timeout_falls_back_without_crash(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000742"
+    await _seed_operator(session_factory, phone, language="he")
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-timeout-fallback.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=FakeGatewayPlannerTimeout(),
+        ad_generation_service=fake_generation,
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-planner-timeout-step1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "אני רוצה מודעה לקוטג"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.deterministic_action == "generation_gate_blocked"
+    assert result.reply_text is not None
+    assert fake_generation.calls == 0
+
+    async with session_scope(session_factory) as session:
         session_obj = (
             (
                 await session.execute(
@@ -1654,8 +1920,112 @@ async def test_pipeline_product_confirmation_approved_without_product_name_promp
         )
         assert session_obj is not None
         assert session_obj.pending_question_type == PendingQuestionType.MISSING_INFO
-        assert session_obj.pending_question_context["question_key"] == "product_name"
-        assert session_obj.pending_question_context["required"] is True
+        assert isinstance(session_obj.pending_question_context, dict)
+        assert session_obj.pending_question_context.get("stage") == "creative_brief"
+
+        fallback_events = (
+            (
+                await session.execute(
+                    select(AuditEvent).where(
+                        AuditEvent.operator_phone == phone,
+                        AuditEvent.action == "creative_brief_planner_validation_fallback",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert fallback_events
+        assert any(
+            (event.metadata_json or {}).get("reason") == "planner_call_failed"
+            for event in fallback_events
+        )
+
+
+async def test_pipeline_missing_info_price_answer_does_not_start_new_create_flow(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000733"
+    await _seed_operator(session_factory, phone)
+    gateway = FakeGatewayPriceFollowupInterruptProne()
+    generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-no-research.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=gateway,
+        ad_generation_service=generation,
+    )
+
+    first = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-no-research-1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "create ad for cottage"}},
+        )
+    )
+    assert first.deterministic_action == "generation_completed"
+    assert generation.calls == 2
+
+    second = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-no-research-2",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {"button_reply": {"id": BUTTON_SELECT_VARIANT_A}},
+            },
+        )
+    )
+    assert second.deterministic_action == "variant_selected"
+    assert second.reply_text is not None
+    assert "what exact price should i display in the ad?" in second.reply_text.lower()
+    assert generation.calls == 2
+
+    third = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-no-research-3",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "price 7.90"}},
+        )
+    )
+    assert third.reply_text is not None
+    assert "what is your store type?" in third.reply_text.lower()
+    assert generation.calls == 2
+    assert gateway._extract_calls >= 2
+
+    async with session_scope(session_factory) as session:
+        active_draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert active_draft is not None
+        assert active_draft.price == Decimal("7.90")
+
+        drafts = (
+            (
+                await session.execute(
+                    select(AdDraft.id).where(AdDraft.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(drafts) == 1
+
+        stale_draft_events = (
+            await session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.operator_phone == phone,
+                    AuditEvent.action == "draft_created_for_new_ad",
+                )
+            )
+        ).scalars()
+        assert len(list(stale_draft_events)) == 0
 
 
 async def test_pipeline_brand_conflict_uses_operator_brand_and_logs_audit(

@@ -57,6 +57,10 @@ def test_required_question_is_selected_before_optional() -> None:
         question_policy.QUESTION_KEY_PRODUCT_NAME
     )
     assert selection.pending_question_context[question_policy.QUESTION_CONTEXT_REQUIRED] is True
+    assert (
+        selection.pending_question_context[question_policy.QUESTION_CONTEXT_CLARIFICATION_COUNT]
+        == 1
+    )
     assert selection.is_blocking_for_generation is True
 
 
@@ -153,3 +157,63 @@ def test_reprompt_limit_safeguard_clears_pending_question() -> None:
     assert transition.exhausted_reprompts is True
     assert transition.reply_text is not None
     assert "אפשר להמשיך" in transition.reply_text
+
+
+def test_pre_generation_clarification_budget_blocks_fourth_question(monkeypatch) -> None:
+    monkeypatch.setitem(
+        question_policy.REQUEST_TYPE_QUESTION_RULES,
+        AdRequestType.SINGLE_PRODUCT,
+        question_policy.RequestTypeQuestionRules(
+            required_before_generation=(
+                question_policy.QUESTION_KEY_PRODUCT_NAME,
+                question_policy.QUESTION_KEY_PRICE,
+                question_policy.QUESTION_KEY_STORE_TYPE,
+                question_policy.QUESTION_KEY_CREATIVE_GUIDANCE,
+            ),
+            optional_after_preview=(),
+        ),
+    )
+
+    selection = question_policy.select_next_question(
+        request_type=AdRequestType.SINGLE_PRODUCT,
+        classification_resolved=True,
+        awaiting_product_confirmation=False,
+        has_product_name=True,
+        has_price=True,
+        has_store_type=True,
+        has_creative_guidance=False,
+        language="he",
+        after_preview_generation=False,
+        clarification_question_count=3,
+    )
+
+    assert selection is None
+
+
+def test_generation_ready_when_budget_reached_even_if_required_field_missing(monkeypatch) -> None:
+    monkeypatch.setitem(
+        question_policy.REQUEST_TYPE_QUESTION_RULES,
+        AdRequestType.SINGLE_PRODUCT,
+        question_policy.RequestTypeQuestionRules(
+            required_before_generation=(
+                question_policy.QUESTION_KEY_PRODUCT_NAME,
+                question_policy.QUESTION_KEY_PRICE,
+                question_policy.QUESTION_KEY_STORE_TYPE,
+                question_policy.QUESTION_KEY_CREATIVE_GUIDANCE,
+            ),
+            optional_after_preview=(),
+        ),
+    )
+
+    ready = question_policy.is_generation_ready(
+        request_type=AdRequestType.SINGLE_PRODUCT,
+        classification_resolved=True,
+        awaiting_product_confirmation=False,
+        has_product_name=True,
+        has_price=True,
+        has_store_type=True,
+        has_creative_guidance=False,
+        clarification_question_count=3,
+    )
+
+    assert ready is True

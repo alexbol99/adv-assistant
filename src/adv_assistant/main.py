@@ -506,7 +506,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):
-        result = await task_processor.process(payload)
+        try:
+            result = await task_processor.process(payload)
+        except Exception as exc:
+            logger.exception(
+                "Inbound processing failed after dedupe mark (wamid=%s, operator_phone=%s)",
+                payload.wamid,
+                payload.operator_phone,
+            )
+            async with session_scope(session_factory) as cleanup_session:
+                processed_repo = ProcessedInboundMessageRepository(cleanup_session)
+                audit_repo = AuditEventRepository(cleanup_session)
+                deleted = await processed_repo.delete_by_wamid(payload.wamid)
+                await audit_repo.log(
+                    actor="system",
+                    action="inbound_processing_failed",
+                    operator_phone=payload.operator_phone,
+                    metadata={
+                        "wamid": payload.wamid,
+                        "dedup_deleted": deleted,
+                        "error": str(exc),
+                    },
+                )
+            raise
         if (
             (
                 result.generated_image_url
