@@ -7,8 +7,7 @@ from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from adv_assistant import creative_brief_planner
-from adv_assistant import question_policy
+from adv_assistant import creative_brief_planner, question_policy
 from adv_assistant.ad_generation import (
     AdGenerationError,
     AdGenerationService,
@@ -1554,7 +1553,9 @@ class InboundTaskProcessor:
                                 generated_image_url = generation_result.generated_image_url
                                 variant_image_urls = generation_result.variant_image_urls
                                 pending_question_type = generation_result.pending_question_type
-                                pending_question_context = generation_result.pending_question_context
+                                pending_question_context = (
+                                    generation_result.pending_question_context
+                                )
                                 publish_buttons_prompt = generation_result.publish_buttons_prompt
                                 action_buttons_prompt = generation_result.action_buttons_prompt
                                 action_buttons = generation_result.action_buttons
@@ -2515,7 +2516,9 @@ class InboundTaskProcessor:
                 source_intent=source_intent_value,
             )
 
-        source_intent_value = source_intent.value if isinstance(source_intent, Intent) else source_intent
+        source_intent_value = (
+            source_intent.value if isinstance(source_intent, Intent) else source_intent
+        )
         if source_intent_value is not None:
             session_state.source_intent = source_intent_value
 
@@ -2611,7 +2614,9 @@ class InboundTaskProcessor:
         next_question = resolved_state.pending_question
         if next_question is None:
             # Deterministic fallback if the planner returned an inconsistent state.
-            fallback_output = creative_brief_planner.noop_plan_creative_brief(context=planner_context)
+            fallback_output = creative_brief_planner.noop_plan_creative_brief(
+                context=planner_context
+            )
             fallback_resolution = creative_brief_planner.apply_planner_output(
                 session_state=resolved_state,
                 planner_output=fallback_output,

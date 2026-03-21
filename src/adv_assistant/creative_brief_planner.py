@@ -282,14 +282,24 @@ def _coerce_next_question_payload(payload: dict[str, Any]) -> dict[str, str] | N
             "question_text": question_text,
         }
     if isinstance(raw_question, str):
+        question_key = (
+            payload.get("next_question_key")
+            or payload.get("question_key")
+            or "creative_direction"
+        )
         return {
-            "key": payload.get("next_question_key") or payload.get("question_key") or "creative_direction",
+            "key": question_key,
             "question_text": raw_question,
         }
     top_level_question = payload.get("question_text") or payload.get("question")
     if isinstance(top_level_question, str):
+        question_key = (
+            payload.get("next_question_key")
+            or payload.get("question_key")
+            or "creative_direction"
+        )
         return {
-            "key": payload.get("next_question_key") or payload.get("question_key") or "creative_direction",
+            "key": question_key,
             "question_text": top_level_question,
         }
     return None
@@ -518,7 +528,10 @@ def _default_question_for_dimension(dimension: str, language: str) -> NextQuesti
             question_text=(
                 "איזה סגנון חזותי תרצה? למשל נקי, יוקרתי, צבעוני או דרמטי."
                 if he
-                else "What visual style do you want (for example clean, premium, colorful, dramatic)?"
+                else (
+                    "What visual style do you want "
+                    "(for example clean, premium, colorful, dramatic)?"
+                )
             ),
         )
     return NextQuestion(

@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adv_assistant import creative_brief_planner
 from adv_assistant.ad_generation import (
     GenerationDraftInput,
     GenerationMode,
@@ -39,7 +40,6 @@ from adv_assistant.llm_gateway import (
     IntentClassification,
     ReplyGeneration,
 )
-from adv_assistant import creative_brief_planner
 from adv_assistant.pipeline import InboundTaskProcessor
 from adv_assistant.tasks_queue import InboundTaskPayload
 
@@ -105,7 +105,6 @@ class SequencedGateway:
         *,
         context: creative_brief_planner.CreativeBriefPlannerContext,
     ) -> creative_brief_planner.CreativeBriefPlannerOutput:
-        state = context.session_state
         current_state = creative_brief_planner.CurrentBriefState(
             scene="Clean product hero shot in a supermarket aisle",
         )

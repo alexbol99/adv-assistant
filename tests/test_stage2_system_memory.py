@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from adv_assistant import creative_brief_planner
 from adv_assistant.ad_generation import (
     GenerationDraftInput,
     GenerationMode,
@@ -14,7 +15,6 @@ from adv_assistant.ad_generation import (
     NanoBananaJobStatus,
     build_generation_prompt,
 )
-from adv_assistant import creative_brief_planner
 from adv_assistant.db.base import Base
 from adv_assistant.db.repositories import ConversationSessionRepository, OperatorRepository
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
