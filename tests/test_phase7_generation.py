@@ -577,9 +577,7 @@ async def test_gemini_service_submit_and_poll_variant_pair() -> None:
         body = json.loads(request.content.decode("utf-8"))
         parts = body["contents"][0]["parts"]
         observed["prompts"].append(parts[0]["text"])
-        encoded_png = base64.b64encode(f"png-{observed['post_calls']}".encode()).decode(
-            "ascii"
-        )
+        encoded_png = base64.b64encode(f"png-{observed['post_calls']}".encode()).decode("ascii")
         return httpx.Response(
             status_code=200,
             json={
