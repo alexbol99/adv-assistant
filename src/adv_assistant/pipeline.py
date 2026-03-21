@@ -525,32 +525,50 @@ class InboundTaskProcessor:
                                     "photo_url": current_draft.photo_url,
                                 },
                             )
-                            generation_result = await self._execute_generation(
-                                session=session,
-                                payload=payload,
-                                draft_repo=draft_repo,
-                                audit_repo=audit_repo,
+                            pre_generation_question = self._select_next_question(
                                 current_draft=current_draft,
                                 operator=operator,
-                                mode=GenerationMode.FRESH,
-                                instruction_text=_product_confirmation_generation_instruction(
-                                    operator.language
-                                ),
-                                followup_regen_requested=False,
+                                after_preview_generation=False,
+                                allow_regenerate_confirmation=False,
                             )
-                            current_draft = generation_result.draft
-                            reply_text = generation_result.reply_text
-                            generated_image_url = generation_result.generated_image_url
-                            variant_image_urls = generation_result.variant_image_urls
-                            pending_question_type = generation_result.pending_question_type
-                            pending_question_context = generation_result.pending_question_context
-                            publish_buttons_prompt = generation_result.publish_buttons_prompt
-                            action_buttons_prompt = generation_result.action_buttons_prompt
-                            action_buttons = generation_result.action_buttons
-                            deterministic_action = (
-                                generation_result.deterministic_action
-                                or "product_confirmation_approved"
-                            )
+                            if pre_generation_question is not None:
+                                pending_question_type = (
+                                    pre_generation_question.pending_question_type
+                                )
+                                pending_question_context = (
+                                    pre_generation_question.pending_question_context
+                                )
+                                reply_text = pre_generation_question.prompt_text
+                                deterministic_action = "generation_gate_blocked"
+                            else:
+                                generation_result = await self._execute_generation(
+                                    session=session,
+                                    payload=payload,
+                                    draft_repo=draft_repo,
+                                    audit_repo=audit_repo,
+                                    current_draft=current_draft,
+                                    operator=operator,
+                                    mode=GenerationMode.FRESH,
+                                    instruction_text=_product_confirmation_generation_instruction(
+                                        operator.language
+                                    ),
+                                    followup_regen_requested=False,
+                                )
+                                current_draft = generation_result.draft
+                                reply_text = generation_result.reply_text
+                                generated_image_url = generation_result.generated_image_url
+                                variant_image_urls = generation_result.variant_image_urls
+                                pending_question_type = generation_result.pending_question_type
+                                pending_question_context = (
+                                    generation_result.pending_question_context
+                                )
+                                publish_buttons_prompt = generation_result.publish_buttons_prompt
+                                action_buttons_prompt = generation_result.action_buttons_prompt
+                                action_buttons = generation_result.action_buttons
+                                deterministic_action = (
+                                    generation_result.deterministic_action
+                                    or "product_confirmation_approved"
+                                )
                     elif button_payload_id == BUTTON_REJECT_PRODUCT_SELECTION:
                         intent_value = button_payload_id
                         pending_question_type = PendingQuestionType.NONE
@@ -810,34 +828,52 @@ class InboundTaskProcessor:
                                         "photo_url": current_draft.photo_url,
                                     },
                                 )
-                                generation_result = await self._execute_generation(
-                                    session=session,
-                                    payload=payload,
-                                    draft_repo=draft_repo,
-                                    audit_repo=audit_repo,
+                                pre_generation_question = self._select_next_question(
                                     current_draft=current_draft,
                                     operator=operator,
-                                    mode=GenerationMode.FRESH,
-                                    instruction_text=_product_confirmation_generation_instruction(
-                                        operator.language
-                                    ),
-                                    followup_regen_requested=False,
+                                    after_preview_generation=False,
+                                    allow_regenerate_confirmation=False,
                                 )
-                                current_draft = generation_result.draft
-                                reply_text = generation_result.reply_text
-                                generated_image_url = generation_result.generated_image_url
-                                variant_image_urls = generation_result.variant_image_urls
-                                pending_question_type = generation_result.pending_question_type
-                                pending_question_context = (
-                                    generation_result.pending_question_context
-                                )
-                                publish_buttons_prompt = generation_result.publish_buttons_prompt
-                                action_buttons_prompt = generation_result.action_buttons_prompt
-                                action_buttons = generation_result.action_buttons
-                                deterministic_action = (
-                                    generation_result.deterministic_action
-                                    or "product_confirmation_approved"
-                                )
+                                if pre_generation_question is not None:
+                                    pending_question_type = (
+                                        pre_generation_question.pending_question_type
+                                    )
+                                    pending_question_context = (
+                                        pre_generation_question.pending_question_context
+                                    )
+                                    reply_text = pre_generation_question.prompt_text
+                                    deterministic_action = "generation_gate_blocked"
+                                else:
+                                    generation_result = await self._execute_generation(
+                                        session=session,
+                                        payload=payload,
+                                        draft_repo=draft_repo,
+                                        audit_repo=audit_repo,
+                                        current_draft=current_draft,
+                                        operator=operator,
+                                        mode=GenerationMode.FRESH,
+                                        instruction_text=_product_confirmation_generation_instruction(
+                                            operator.language
+                                        ),
+                                        followup_regen_requested=False,
+                                    )
+                                    current_draft = generation_result.draft
+                                    reply_text = generation_result.reply_text
+                                    generated_image_url = generation_result.generated_image_url
+                                    variant_image_urls = generation_result.variant_image_urls
+                                    pending_question_type = generation_result.pending_question_type
+                                    pending_question_context = (
+                                        generation_result.pending_question_context
+                                    )
+                                    publish_buttons_prompt = (
+                                        generation_result.publish_buttons_prompt
+                                    )
+                                    action_buttons_prompt = generation_result.action_buttons_prompt
+                                    action_buttons = generation_result.action_buttons
+                                    deterministic_action = (
+                                        generation_result.deterministic_action
+                                        or "product_confirmation_approved"
+                                    )
                         classification = IntentClassification(intent=Intent.UNKNOWN)
                     clear_fields = _parse_operator_clear_request(sanitized_text)
                     if clear_fields:
@@ -1359,6 +1395,22 @@ class InboundTaskProcessor:
                             action_buttons = generation_result.action_buttons
                             if generation_result.deterministic_action is not None:
                                 deterministic_action = generation_result.deterministic_action
+                        else:
+                            pre_generation_question = self._select_next_question(
+                                current_draft=current_draft,
+                                operator=operator,
+                                after_preview_generation=False,
+                                allow_regenerate_confirmation=False,
+                            )
+                            if pre_generation_question is not None:
+                                pending_question_type = (
+                                    pre_generation_question.pending_question_type
+                                )
+                                pending_question_context = (
+                                    pre_generation_question.pending_question_context
+                                )
+                                reply_text = pre_generation_question.prompt_text
+                                deterministic_action = "generation_gate_blocked"
 
                     if reply_text is None:
                         if classification.intent in {
@@ -1366,7 +1418,25 @@ class InboundTaskProcessor:
                             Intent.REGENERATE_WITH_REFERENCE,
                             Intent.REGENERATE_FROM_SCRATCH,
                         } and not _is_ready_for_generation(current_draft):
-                            reply_text = _missing_product_name_reply(operator.language)
+                            pre_generation_question = self._select_next_question(
+                                current_draft=current_draft,
+                                operator=operator,
+                                after_preview_generation=False,
+                                allow_regenerate_confirmation=False,
+                            )
+                            if pre_generation_question is not None:
+                                pending_question_type = (
+                                    pre_generation_question.pending_question_type
+                                )
+                                pending_question_context = (
+                                    pre_generation_question.pending_question_context
+                                )
+                                reply_text = pre_generation_question.prompt_text
+                                deterministic_action = (
+                                    deterministic_action or "generation_gate_blocked"
+                                )
+                            else:
+                                reply_text = _missing_product_name_reply(operator.language)
                         elif classification.intent == Intent.SET_BRANDING:
                             branding = await self._llm_gateway.extract_branding_fields(
                                 message_text=sanitized_text,

@@ -483,6 +483,12 @@ Objective: complete MVP feature behavior for product-image control and clarifica
 | `SP-11` | P1 | Add audit/trace events for new paths (image override request/confirm/cancel, clarification budget reached, regenerate after precise description). | Audit event tests confirm expected events and metadata in each path. |
 | `SP-12` | P1 | Run stabilization + release checks for updated MVP behavior. | `ruff` and `pytest` are green; staging smoke verifies image override, 3-question cap, and publish flow regression-free. |
 
+### Sprint Progress Update (March 21, 2026)
+
+- `SP-02` completed on `main`-compatible branch: generation is now blocked until the product is confirmed and `product_name` exists; when missing, the flow persists a blocking `missing_info` question instead of attempting generation.
+- Runtime compatibility fix completed: `GeminiFlashImageAdGenerationService` now supports the two-variant contract (`submit_variant_pair` / `poll_variant_pair`) used by the V1 pipeline.
+- Local developer reliability improvement completed: `make run` now limits reload watching to `src` to avoid reload loops from `.venv` and nested worktree directories.
+
 ### Explicit Post-MVP Scope (Unchanged)
 
 - `list_ads` and `delete_all` side-effect execution remain Post-MVP scope.

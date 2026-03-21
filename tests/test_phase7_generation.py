@@ -107,6 +107,21 @@ class FakeGatewayNoPrice(FakeGateway):
         )
 
 
+class FakeGatewayNoProductName(FakeGateway):
+    async def extract_ad_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> ExtractedAdFields:
+        return ExtractedAdFields(
+            price=Decimal("19.90"),
+            currency="ILS",
+            promo_text="Fresh and tasty",
+        )
+
+
 class FakeGatewayBrandConflict(FakeGateway):
     async def extract_ad_fields(
         self,
@@ -184,6 +199,34 @@ class FakeResolvedProductResolutionServiceUnsafeImage:
                 title="גלידת מגנום",
                 description="Magnum ice cream",
                 image_url="https://www.tiktok.com/api/img/?itemId=123",
+                product_url="https://example.com/magnum",
+                source="fake",
+                search_method="retailer",
+            ),
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeResolvedProductResolutionServiceMissingTitle:
+    enabled = True
+
+    async def resolve(
+        self,
+        *,
+        message_text: str,
+        language: str,
+    ) -> ProductResolutionResult:
+        return ProductResolutionResult(
+            status="resolved",
+            brand="Magnum",
+            product_query="גלידת מגנום",
+            raw_user_text=message_text,
+            selected_result=SelectedProductResult(
+                title="",
+                description="Magnum ice cream",
+                image_url="https://example.com/magnum.png",
                 product_url="https://example.com/magnum",
                 source="fake",
                 search_method="retailer",
@@ -521,6 +564,84 @@ async def test_gemini_service_generates_image_and_uploads_to_media_store() -> No
     assert media_store.upload_calls[0][2] == ".png"
     assert result.status == NanoBananaJobStatus.COMPLETED
     assert result.output_image_url == "https://storage.example/generated/preview.png"
+    await client.aclose()
+
+
+async def test_gemini_service_submit_and_poll_variant_pair() -> None:
+    observed: dict[str, object] = {"prompts": [], "post_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method != "POST":
+            return httpx.Response(status_code=404)
+        observed["post_calls"] = int(observed["post_calls"]) + 1
+        body = json.loads(request.content.decode("utf-8"))
+        parts = body["contents"][0]["parts"]
+        observed["prompts"].append(parts[0]["text"])
+        encoded_png = base64.b64encode(f"png-{observed['post_calls']}".encode()).decode("ascii")
+        return httpx.Response(
+            status_code=200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "mimeType": "image/png",
+                                        "data": encoded_png,
+                                    }
+                                }
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    media_store = FakeMediaStore()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = GeminiFlashImageAdGenerationService(
+        api_key="gemini-test-key",
+        model="gemini-3.1-flash-image-preview",
+        media_store=media_store,
+        client=client,
+    )
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="קוטג",
+        price=Decimal("19.90"),
+        currency="ILS",
+        promo_text="מבצע",
+        ean=None,
+        photo_url=None,
+        enriched_brand=None,
+        enriched_category=None,
+        enriched_description=None,
+        preview_reference_url=None,
+        rendered_image_url=None,
+    )
+
+    submissions = await service.submit_variant_pair(
+        draft=draft,
+        mode=GenerationMode.FRESH,
+        instruction_text="generate ad image",
+        wamid="wamid-gemini-pair-1",
+        width=1920,
+        height=1080,
+    )
+    results = await service.poll_variant_pair(submissions=submissions)
+
+    assert len(submissions) == 2
+    assert submissions[0].idempotency_key != submissions[1].idempotency_key
+    assert len(results) == 2
+    assert all(result.status == NanoBananaJobStatus.COMPLETED for result in results)
+    assert int(observed["post_calls"]) == 2
+    assert len(media_store.upload_calls) == 2
+    prompts = observed["prompts"]
+    assert any("Style A" in prompt for prompt in prompts)
+    assert any("Style B" in prompt for prompt in prompts)
     await client.aclose()
 
 
@@ -1456,6 +1577,85 @@ async def test_pipeline_product_confirmation_button_rejects_and_clears_photo(
         )
         assert session_obj is not None
         assert session_obj.pending_question_type == PendingQuestionType.NONE
+
+
+async def test_pipeline_product_confirmation_approved_without_product_name_prompts_missing_info(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000731"
+    await _seed_operator(session_factory, phone, language="he")
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-after-approve.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=FakeGatewayNoProductName(),
+        ad_generation_service=fake_generation,
+        product_resolution_service=FakeResolvedProductResolutionServiceMissingTitle(),
+    )
+
+    first_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-no-name-step1",
+            operator_phone=phone,
+            raw_message={
+                "type": "text",
+                "text": {"body": "אני רוצה מודעה למוצר אחד גלידת מגנום"},
+            },
+        )
+    )
+    assert first_result.deterministic_action == "product_confirmation_requested"
+    assert fake_generation.calls == 0
+
+    approve_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-no-name-step2",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {
+                    "button_reply": {
+                        "id": BUTTON_CONFIRM_PRODUCT_SELECTION,
+                    }
+                },
+            },
+        )
+    )
+
+    assert approve_result.status == "processed"
+    assert approve_result.deterministic_action == "generation_gate_blocked"
+    assert approve_result.generated_image_url is None
+    assert approve_result.reply_text is not None
+    assert "שם המוצר" in approve_result.reply_text
+    assert fake_generation.calls == 0
+    assert fake_generation.wait_calls == 0
+
+    async with session_scope(session_factory) as session:
+        draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert draft is not None
+        assert draft.awaiting_product_confirmation is False
+        assert draft.product_name is None
+
+        session_obj = (
+            (
+                await session.execute(
+                    select(ConversationSession).where(ConversationSession.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert session_obj is not None
+        assert session_obj.pending_question_type == PendingQuestionType.MISSING_INFO
+        assert session_obj.pending_question_context["question_key"] == "product_name"
+        assert session_obj.pending_question_context["required"] is True
 
 
 async def test_pipeline_brand_conflict_uses_operator_brand_and_logs_audit(
