@@ -361,6 +361,7 @@ class InboundTaskProcessor:
                 wamid=payload.wamid,
                 trace_sink=trace_sink,
             )
+            resolve_after_confirm = self._resolve_generation_instruction_after_product_confirmation
 
             inserted = await processed_repo.mark_processed(
                 wamid=payload.wamid,
@@ -603,14 +604,11 @@ class InboundTaskProcessor:
                                 reply_text = planner_turn.reply_text
                                 deterministic_action = "generation_gate_blocked"
                             else:
-                                resolve_instruction = (
-                                    self._resolve_generation_instruction_after_product_confirmation
-                                )
                                 (
                                     current_draft,
                                     marketing_instruction_text,
                                     brief_llm_used,
-                                ) = await resolve_instruction(
+                                ) = await resolve_after_confirm(
                                     payload=payload,
                                     draft_repo=draft_repo,
                                     audit_repo=audit_repo,
@@ -933,14 +931,11 @@ class InboundTaskProcessor:
                                     reply_text = planner_turn.reply_text
                                     deterministic_action = "generation_gate_blocked"
                                 else:
-                                    resolve_instruction = (
-                                        self._resolve_generation_instruction_after_product_confirmation
-                                    )
                                     (
                                         current_draft,
                                         marketing_instruction_text,
                                         brief_llm_used,
-                                    ) = await resolve_instruction(
+                                    ) = await resolve_after_confirm(
                                         payload=payload,
                                         draft_repo=draft_repo,
                                         audit_repo=audit_repo,
@@ -949,7 +944,9 @@ class InboundTaskProcessor:
                                     )
                                     llm_used = llm_used or brief_llm_used
                                     fallback_instruction = (
-                                        _product_confirmation_generation_instruction(operator.language)
+                                        _product_confirmation_generation_instruction(
+                                            operator.language
+                                        )
                                     )
                                     planner_instruction_text = (
                                         planner_turn.brief_instruction_text or fallback_instruction
