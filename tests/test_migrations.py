@@ -40,6 +40,7 @@ def test_alembic_upgrade_creates_phase1_tables(tmp_path: Path, monkeypatch) -> N
     assert "enrichment_source" in ad_draft_columns
     assert "request_type" in ad_draft_columns
     assert "generation_ready" in ad_draft_columns
+    assert "marketing_brief" in ad_draft_columns
 
     conversation_columns = {
         column["name"] for column in inspector.get_columns("conversation_session")
@@ -163,3 +164,25 @@ def test_alembic_downgrade_removes_pending_followup_question(
         column["name"] for column in inspector.get_columns("conversation_session")
     }
     assert "pending_followup_question" not in conversation_columns
+
+
+def test_alembic_downgrade_removes_marketing_brief(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "alembic_marketing_brief_downgrade.db"
+    database_url = f"sqlite:///{db_path}"
+
+    monkeypatch.delenv("ALEMBIC_DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    alembic_cfg = Config("alembic.ini")
+    alembic_cfg.set_main_option("sqlalchemy.url", database_url)
+
+    command.upgrade(alembic_cfg, "head")
+    command.downgrade(alembic_cfg, "20260316_0009")
+
+    engine = create_engine(database_url)
+    inspector = inspect(engine)
+    ad_draft_columns = {column["name"] for column in inspector.get_columns("ad_draft")}
+    assert "marketing_brief" not in ad_draft_columns

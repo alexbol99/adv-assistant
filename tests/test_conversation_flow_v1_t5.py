@@ -17,6 +17,7 @@ from adv_assistant.llm_gateway import (
     ReplyGeneration,
 )
 from adv_assistant.pipeline import InboundTaskProcessor
+from adv_assistant.product_resolution_models import ProductResolutionResult
 from adv_assistant.tasks_queue import InboundTaskPayload
 
 pytestmark = pytest.mark.anyio
@@ -78,6 +79,31 @@ class RequestTypeGateway:
         extracted_fields: ExtractedAdFields | None,
     ) -> ReplyGeneration:
         return ReplyGeneration(reply_text="fallback")
+
+
+class ProductResolutionProbeService:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def resolve(
+        self,
+        *,
+        message_text: str,
+        language: str,
+    ) -> ProductResolutionResult:
+        self.calls.append(message_text)
+        return ProductResolutionResult(
+            status="needs_clarification",
+            brand=None,
+            product_query=message_text,
+            raw_user_text=message_text,
+            clarification_question="מה שם המוצר המדויק?",
+        )
+
+    async def close(self) -> None:
+        return None
 
 
 @pytest.fixture()
@@ -218,3 +244,42 @@ async def test_non_text_reply_during_classification_is_reprompted_without_photo_
         draft = session_obj.current_draft
         assert draft is not None
         assert draft.photo_url is None
+
+
+async def test_classification_followup_preserves_original_product_request_for_resolution(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500001003"
+    await _seed_operator(session_factory, phone)
+    gateway = RequestTypeGateway(
+        intents=[Intent.CREATE_AD],
+        ad_fields=[ExtractedAdFields(), ExtractedAdFields()],
+    )
+    resolution_probe = ProductResolutionProbeService()
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=gateway,
+        product_resolution_service=resolution_probe,
+    )
+
+    first = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-t5-4a",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "תעשה לי פרסומת לנביעות"}},
+        )
+    )
+    assert "מוצר אחד" in (first.reply_text or "")
+
+    second = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-t5-4b",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "מוצר אחד"}},
+        )
+    )
+
+    assert second.reply_text == "מה שם המוצר המדויק?"
+    assert len(resolution_probe.calls) == 1
+    assert "נביעות" in resolution_probe.calls[0]
+    assert "מוצר אחד" in resolution_probe.calls[0]

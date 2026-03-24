@@ -151,6 +151,7 @@ _CONFIRMATION_SAFE_IMAGE_SUFFIXES = (
     ".webp",
     ".gif",
 )
+_CLASSIFICATION_SOURCE_USER_TEXT_KEY = "source_user_text"
 
 
 @dataclass(slots=True)
@@ -259,6 +260,38 @@ def _is_explicit_new_ad_interrupt(message_text: str) -> bool:
     return _contains_any_keyword(message_text, _EXPLICIT_NEW_AD_INTERRUPT_KEYWORDS)
 
 
+def _classification_source_user_text(
+    *,
+    pending_question_type: PendingQuestionType,
+    pending_question_context: dict[str, Any],
+    current_message_text: str,
+) -> str:
+    if pending_question_type != PendingQuestionType.CLASSIFICATION:
+        return current_message_text
+    source = pending_question_context.get(_CLASSIFICATION_SOURCE_USER_TEXT_KEY)
+    if isinstance(source, str):
+        normalized = sanitize_user_text(source, max_chars=2000)
+        if normalized:
+            return normalized
+    return current_message_text
+
+
+def _classification_context_message_text(
+    *,
+    source_user_text: str,
+    current_message_text: str,
+) -> str:
+    normalized_current = sanitize_user_text(current_message_text, max_chars=2000)
+    normalized_source = sanitize_user_text(source_user_text, max_chars=2000)
+    if not normalized_source:
+        return normalized_current
+    if normalized_source == normalized_current:
+        return normalized_current
+    # Keep both so we preserve the original product request while also
+    # retaining the explicit classification follow-up answer.
+    return f"{normalized_source}\n{normalized_current}"
+
+
 def _classification_prompt(language: str) -> str:
     return question_policy.classification_prompt(language)
 
@@ -328,6 +361,7 @@ class InboundTaskProcessor:
                 wamid=payload.wamid,
                 trace_sink=trace_sink,
             )
+            resolve_after_confirm = self._resolve_generation_instruction_after_product_confirmation
 
             inserted = await processed_repo.mark_processed(
                 wamid=payload.wamid,
@@ -570,6 +604,30 @@ class InboundTaskProcessor:
                                 reply_text = planner_turn.reply_text
                                 deterministic_action = "generation_gate_blocked"
                             else:
+                                (
+                                    current_draft,
+                                    marketing_instruction_text,
+                                    brief_llm_used,
+                                ) = await resolve_after_confirm(
+                                    payload=payload,
+                                    draft_repo=draft_repo,
+                                    audit_repo=audit_repo,
+                                    current_draft=current_draft,
+                                    operator=operator,
+                                )
+                                llm_used = llm_used or brief_llm_used
+                                fallback_instruction = _product_confirmation_generation_instruction(
+                                    operator.language
+                                )
+                                planner_instruction_text = (
+                                    planner_turn.brief_instruction_text or fallback_instruction
+                                )
+                                generation_instruction_text = marketing_instruction_text
+                                if (
+                                    marketing_instruction_text.strip()
+                                    == fallback_instruction.strip()
+                                ):
+                                    generation_instruction_text = planner_instruction_text
                                 generation_result = await self._execute_generation(
                                     session=session,
                                     payload=payload,
@@ -578,12 +636,7 @@ class InboundTaskProcessor:
                                     current_draft=current_draft,
                                     operator=operator,
                                     mode=GenerationMode.FRESH,
-                                    instruction_text=(
-                                        planner_turn.brief_instruction_text
-                                        or _product_confirmation_generation_instruction(
-                                            operator.language
-                                        )
-                                    ),
+                                    instruction_text=generation_instruction_text,
                                     followup_regen_requested=False,
                                 )
                                 current_draft = generation_result.draft
@@ -878,6 +931,32 @@ class InboundTaskProcessor:
                                     reply_text = planner_turn.reply_text
                                     deterministic_action = "generation_gate_blocked"
                                 else:
+                                    (
+                                        current_draft,
+                                        marketing_instruction_text,
+                                        brief_llm_used,
+                                    ) = await resolve_after_confirm(
+                                        payload=payload,
+                                        draft_repo=draft_repo,
+                                        audit_repo=audit_repo,
+                                        current_draft=current_draft,
+                                        operator=operator,
+                                    )
+                                    llm_used = llm_used or brief_llm_used
+                                    fallback_instruction = (
+                                        _product_confirmation_generation_instruction(
+                                            operator.language
+                                        )
+                                    )
+                                    planner_instruction_text = (
+                                        planner_turn.brief_instruction_text or fallback_instruction
+                                    )
+                                    generation_instruction_text = marketing_instruction_text
+                                    if (
+                                        marketing_instruction_text.strip()
+                                        == fallback_instruction.strip()
+                                    ):
+                                        generation_instruction_text = planner_instruction_text
                                     generation_result = await self._execute_generation(
                                         session=session,
                                         payload=payload,
@@ -886,12 +965,7 @@ class InboundTaskProcessor:
                                         current_draft=current_draft,
                                         operator=operator,
                                         mode=GenerationMode.FRESH,
-                                        instruction_text=(
-                                            planner_turn.brief_instruction_text
-                                            or _product_confirmation_generation_instruction(
-                                                operator.language
-                                            )
-                                        ),
+                                        instruction_text=generation_instruction_text,
                                         followup_regen_requested=False,
                                     )
                                     current_draft = generation_result.draft
@@ -1234,9 +1308,18 @@ class InboundTaskProcessor:
                                     },
                                 )
 
+                        classification_source_text = _classification_source_user_text(
+                            pending_question_type=pending_question_type,
+                            pending_question_context=pending_question_context,
+                            current_message_text=sanitized_text,
+                        )
+                        classification_context_text = _classification_context_message_text(
+                            source_user_text=classification_source_text,
+                            current_message_text=sanitized_text,
+                        )
                         request_type_decision = await self._decide_request_type(
                             current_draft=current_draft,
-                            message_text=sanitized_text,
+                            message_text=classification_context_text,
                             language=operator.language,
                             history=history,
                             pending_classification=(
@@ -1254,6 +1337,7 @@ class InboundTaskProcessor:
                             resolved=request_type_decision.resolved,
                             last_active_at=now,
                             source_intent=classification.intent.value,
+                            source_user_text=classification_source_text,
                         )
                         if not request_type_decision.resolved:
                             pending_question_type = PendingQuestionType.CLASSIFICATION
@@ -1264,6 +1348,7 @@ class InboundTaskProcessor:
                                     AdRequestType.MULTI_PRODUCT.value,
                                     AdRequestType.STORE_GENERAL.value,
                                 ],
+                                _CLASSIFICATION_SOURCE_USER_TEXT_KEY: classification_source_text,
                             }
                             reply_text = _classification_prompt(operator.language)
                         else:
@@ -1282,7 +1367,7 @@ class InboundTaskProcessor:
                         if reply_text is None:
                             if extracted_fields is None:
                                 extracted_fields = await self._llm_gateway.extract_ad_fields(
-                                    message_text=sanitized_text,
+                                    message_text=classification_context_text,
                                     language=operator.language,
                                     history=history,
                                 )
@@ -1324,7 +1409,7 @@ class InboundTaskProcessor:
                                 language=operator.language,
                                 classification_intent=classification.intent,
                                 request_type=request_type_decision.request_type,
-                                message_text=sanitized_text,
+                                message_text=classification_context_text,
                                 reply_text=reply_text,
                             )
                             if followup_regen_requested:
@@ -1919,6 +2004,7 @@ class InboundTaskProcessor:
         resolved: bool,
         last_active_at: Any,
         source_intent: str | None,
+        source_user_text: str,
     ) -> AdDraft:
         updated_draft = await draft_repo.update_for_operator_with_version(
             draft_id=current_draft.id,
@@ -1964,6 +2050,7 @@ class InboundTaskProcessor:
                     AdRequestType.MULTI_PRODUCT.value,
                     AdRequestType.STORE_GENERAL.value,
                 ],
+                _CLASSIFICATION_SOURCE_USER_TEXT_KEY: source_user_text,
             },
             last_active_at=last_active_at,
         )
@@ -2676,6 +2763,112 @@ class InboundTaskProcessor:
             forced_reason=resolution.forced_reason,
             validation_fallback=resolution.validation_fallback,
         )
+
+    async def _resolve_generation_instruction_after_product_confirmation(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        operator: Operator,
+    ) -> tuple[AdDraft, str, bool]:
+        fallback_instruction = _product_confirmation_generation_instruction(operator.language)
+        brief_llm_used = self._llm_gateway.uses_external_llm
+        draft_fields = self._marketing_brief_draft_fields(current_draft)
+        operator_fields = self._marketing_brief_operator_fields(operator)
+
+        try:
+            brief = await self._llm_gateway.build_marketing_brief(
+                language=operator.language,
+                draft_fields=draft_fields,
+                operator_fields=operator_fields,
+            )
+        except (LLMGatewayError, LLMSchemaError) as exc:
+            await audit_repo.log(
+                actor="system",
+                action="marketing_brief_generation_failed",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "error": str(exc),
+                },
+            )
+            return current_draft, fallback_instruction, brief_llm_used
+
+        brief_payload = brief.model_dump(exclude_none=True)
+        brief_text = brief.to_prompt_text().strip()
+        if not brief_payload or not brief_text:
+            await audit_repo.log(
+                actor="system",
+                action="marketing_brief_generation_empty",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                },
+            )
+            return current_draft, fallback_instruction, brief_llm_used
+
+        updated_draft = await draft_repo.update_for_operator_with_version(
+            draft_id=current_draft.id,
+            operator_phone=payload.operator_phone,
+            expected_version=current_draft.version,
+            marketing_brief=brief_payload,
+        )
+        if updated_draft is None:
+            await audit_repo.log(
+                actor="system",
+                action="marketing_brief_persist_skipped",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "reason": "stale_version",
+                },
+            )
+        else:
+            current_draft = updated_draft
+
+        await audit_repo.log(
+            actor="system",
+            action="marketing_brief_generated",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "draft_id": str(current_draft.id),
+                "brief_keys": sorted(brief_payload.keys()),
+            },
+        )
+        instruction_text = f"{fallback_instruction}\n{brief_text}"
+        return current_draft, instruction_text, brief_llm_used
+
+    def _marketing_brief_draft_fields(self, draft: AdDraft) -> dict[str, Any]:
+        return {
+            "product_name": draft.product_name,
+            "product_brand": draft.product_brand,
+            "price": str(draft.price) if draft.price is not None else None,
+            "currency": draft.currency,
+            "promo_text": draft.promo_text,
+            "ean": draft.ean,
+            "photo_url": draft.photo_url,
+            "enriched_brand": draft.enriched_brand,
+            "enriched_category": draft.enriched_category,
+            "enriched_description": draft.enriched_description,
+            "enriched_image_url": draft.enriched_image_url,
+        }
+
+    def _marketing_brief_operator_fields(self, operator: Operator) -> dict[str, Any]:
+        return {
+            "business_name": operator.business_name,
+            "store_type": operator.store_type,
+            "creative_guidance": operator.creative_guidance,
+            "brand_colors": operator.brand_colors,
+            "logo_url": operator.logo_url,
+            "language": operator.language,
+            "currency": operator.currency,
+        }
 
     async def _execute_generation(
         self,
@@ -3690,6 +3883,7 @@ def _to_generation_draft_input(
         brand_colors=operator.brand_colors,
         store_type=operator.store_type,
         creative_guidance=operator.creative_guidance,
+        marketing_brief=draft.marketing_brief,
     )
 
 
