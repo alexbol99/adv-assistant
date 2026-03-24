@@ -71,6 +71,7 @@ class GenerationDraftInput:
     brand_colors: list[str] | None = None
     store_type: str | None = None
     creative_guidance: str | None = None
+    marketing_brief: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -1134,6 +1135,12 @@ def build_generation_prompt(
         sections.append("=== SUPPORTING DETAILS ===")
         sections.extend(supporting)
 
+    brief_text = _marketing_brief_to_prompt_text(draft.marketing_brief)
+    if brief_text:
+        sections.append("")
+        sections.append("=== MARKETING BRIEF ===")
+        sections.extend(brief_text.splitlines())
+
     # --- Reference mode ---
     if mode == GenerationMode.REFERENCE and (
         draft.preview_reference_url or draft.rendered_image_url
@@ -1154,6 +1161,55 @@ def build_generation_prompt(
         sections.append(f"Operator instruction: {cleaned_instruction}.")
 
     return "\n".join(sections)
+
+
+def _marketing_brief_to_prompt_text(marketing_brief: dict[str, Any] | None) -> str:
+    if not isinstance(marketing_brief, dict):
+        return ""
+
+    def _text(key: str, label: str) -> str | None:
+        value = marketing_brief.get(key)
+        if not isinstance(value, str):
+            return None
+        normalized = " ".join(value.split()).strip()
+        if not normalized:
+            return None
+        return f"{label}: {normalized}."
+
+    def _list_text(key: str, label: str) -> str | None:
+        value = marketing_brief.get(key)
+        if not isinstance(value, list):
+            return None
+        cleaned: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            normalized = " ".join(item.split()).strip()
+            if normalized:
+                cleaned.append(normalized)
+        if not cleaned:
+            return None
+        return f"{label}: {', '.join(cleaned)}."
+
+    lines: list[str] = []
+    for key, label in (
+        ("target_audience", "Target Audience"),
+        ("core_message", "Core Message"),
+        ("tone", "Tone"),
+        ("visual_style", "Visual Style"),
+        ("call_to_action", "Call To Action"),
+    ):
+        line = _text(key, label)
+        if line:
+            lines.append(line)
+    for key, label in (
+        ("mandatory_elements", "Must Include"),
+        ("avoid_elements", "Avoid"),
+    ):
+        line = _list_text(key, label)
+        if line:
+            lines.append(line)
+    return "\n".join(lines)
 
 
 def _resolve_generation_api_url(*, api_url: str | None, base_url: str | None) -> str:

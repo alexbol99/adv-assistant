@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 from adv_assistant.product_resolution_models import ProductCandidate
 
@@ -22,6 +23,19 @@ _GENERIC_PAGE_TERMS = {
     "מוצרים",
     "באתר",
     "אונליין",
+}
+_UNSAFE_SOURCE_HOSTS = {
+    "tiktok.com",
+    "instagram.com",
+    "lookaside.instagram.com",
+    "l.instagram.com",
+    "facebook.com",
+    "fbcdn.net",
+    "youtube.com",
+    "youtu.be",
+    "pinterest.com",
+    "x.com",
+    "twitter.com",
 }
 
 
@@ -74,6 +88,8 @@ class CandidateSelector:
         query_tokens: list[str],
     ) -> bool:
         if not candidate.title or not candidate.image_url:
+            return False
+        if _candidate_has_unsafe_source(candidate):
             return False
         if _looks_templated(candidate.title):
             return False
@@ -135,6 +151,47 @@ class CandidateSelector:
 def _looks_templated(value: str) -> bool:
     lowered = value.casefold()
     return "{{" in lowered or "}}" in lowered
+
+
+def _candidate_has_unsafe_source(candidate: ProductCandidate) -> bool:
+    hosts = {
+        _extract_host(candidate.source),
+        _extract_host(candidate.product_url),
+        _extract_host(candidate.image_url),
+    }
+    for host in hosts:
+        if host is None:
+            continue
+        if _is_unsafe_host(host):
+            return True
+    return False
+
+
+def _extract_host(value: str | None) -> str | None:
+    if not value:
+        return None
+    raw = value.strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return None
+    host = parsed.netloc.strip().lower()
+    if not host and "://" not in raw:
+        host = raw.split("/")[0].strip().lower()
+    if not host:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
+    return host or None
+
+
+def _is_unsafe_host(host: str) -> bool:
+    normalized = host.casefold()
+    if normalized in _UNSAFE_SOURCE_HOSTS:
+        return True
+    return any(normalized.endswith(f".{blocked}") for blocked in _UNSAFE_SOURCE_HOSTS)
 
 
 def _is_generic_page_title(title: str, *, query_tokens: list[str]) -> bool:

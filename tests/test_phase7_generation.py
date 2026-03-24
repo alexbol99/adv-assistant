@@ -38,6 +38,7 @@ from adv_assistant.llm_gateway import (
     Intent,
     IntentClassification,
     LLMGatewayError,
+    MarketingBrief,
     ReplyGeneration,
 )
 from adv_assistant.media_ingest import IngestedOperatorPhoto
@@ -54,6 +55,7 @@ class FakeGateway:
 
     def __init__(self) -> None:
         self.reply_calls = 0
+        self.brief_calls = 0
 
     async def classify_intent(
         self,
@@ -118,6 +120,22 @@ class FakeGateway:
             missing_dimensions=[],
             final_brief=final_brief,
             confidence=0.88,
+        )
+
+    async def build_marketing_brief(
+        self,
+        *,
+        language: str,
+        draft_fields: dict[str, object],
+        operator_fields: dict[str, object],
+    ) -> MarketingBrief:
+        self.brief_calls += 1
+        return MarketingBrief(
+            target_audience="Shoppers looking for chocolate snacks",
+            core_message="Great value snack for a quick indulgence",
+            tone="Energetic and persuasive",
+            call_to_action="Buy now while the price is special",
+            mandatory_elements=["Prominent product shot", "Clear price badge"],
         )
 
 
@@ -1642,6 +1660,7 @@ async def test_pipeline_product_confirmation_button_approves_and_generates(
     )
     assert first_result.deterministic_action == "product_confirmation_requested"
     assert fake_generation.calls == 0
+    assert fake_gateway.brief_calls == 0
 
     approve_result = await processor.process(
         InboundTaskPayload(
@@ -1665,6 +1684,7 @@ async def test_pipeline_product_confirmation_button_approves_and_generates(
     )
     assert fake_generation.calls == 2  # two variant slots
     assert fake_generation.wait_calls == 2  # polled both variants
+    assert fake_gateway.brief_calls == 1
 
     async with session_scope(session_factory) as session:
         draft = (
@@ -1675,6 +1695,84 @@ async def test_pipeline_product_confirmation_button_approves_and_generates(
         assert draft is not None
         assert draft.status == AdDraftStatus.PREVIEW_READY
         assert draft.awaiting_product_confirmation is False
+        assert draft.marketing_brief is not None
+        assert draft.marketing_brief.get("core_message") == (
+            "Great value snack for a quick indulgence"
+        )
+
+        session_obj = (
+            (
+                await session.execute(
+                    select(ConversationSession).where(ConversationSession.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert session_obj is not None
+        assert session_obj.pending_question_type == PendingQuestionType.VARIANT_SELECTION
+
+
+async def test_pipeline_product_confirmation_text_approves_and_generates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000760"
+    await _seed_operator(session_factory, phone, language="he")
+    fake_gateway = FakeGateway()
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-after-text-approve.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=fake_gateway,
+        ad_generation_service=fake_generation,
+        product_resolution_service=FakeResolvedProductResolutionService(),
+    )
+
+    first_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-text-approve-step1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "תעשה מודעה לגלידת מגנום"}},
+        )
+    )
+    assert first_result.deterministic_action == "product_confirmation_requested"
+    assert fake_generation.calls == 0
+    assert fake_gateway.brief_calls == 0
+
+    approve_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-product-confirm-text-approve-step2",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "כן"}},
+        )
+    )
+
+    assert approve_result.status == "processed"
+    assert approve_result.deterministic_action == "generation_completed"
+    assert approve_result.generated_image_url == (
+        "https://storage.googleapis.com/media/preview-after-text-approve.png"
+    )
+    assert fake_generation.calls == 2  # two variant slots
+    assert fake_generation.wait_calls == 2  # polled both variants
+    assert fake_gateway.brief_calls == 1
+
+    async with session_scope(session_factory) as session:
+        draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert draft is not None
+        assert draft.status == AdDraftStatus.PREVIEW_READY
+        assert draft.awaiting_product_confirmation is False
+        assert draft.marketing_brief is not None
+        assert draft.marketing_brief.get("core_message") == (
+            "Great value snack for a quick indulgence"
+        )
 
         session_obj = (
             (
@@ -1717,6 +1815,7 @@ async def test_pipeline_product_confirmation_button_rejects_and_clears_photo(
     )
     assert first_result.deterministic_action == "product_confirmation_requested"
     assert fake_generation.calls == 0
+    assert fake_gateway.brief_calls == 0
 
     reject_result = await processor.process(
         InboundTaskPayload(
@@ -1740,6 +1839,7 @@ async def test_pipeline_product_confirmation_button_rejects_and_clears_photo(
     assert "לא אשתמש" in reject_result.reply_text
     assert fake_generation.calls == 0
     assert fake_generation.wait_calls == 0
+    assert fake_gateway.brief_calls == 0
 
     async with session_scope(session_factory) as session:
         draft = (

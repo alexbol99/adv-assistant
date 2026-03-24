@@ -158,6 +158,38 @@ def test_candidate_selector_rejects_generic_search_pages() -> None:
     assert selected is None
 
 
+def test_candidate_selector_skips_social_media_sources() -> None:
+    selector = CandidateSelector()
+    query = "קליק אדום"
+    candidates = [
+        ProductCandidate(
+            title="קליק אדום",
+            description="Social post result",
+            image_url="https://www.tiktok.com/api/img/?itemId=123",
+            product_url="https://www.tiktok.com/@demo/video/123",
+            source="tiktok.com",
+            search_method="serper_fallback",
+        ),
+        ProductCandidate(
+            title="קליק אדום 500 מ\"ל",
+            description="Retail product page",
+            image_url="https://retailer.example/images/click-red.jpg",
+            product_url="https://retailer.example/products/click-red",
+            source="retailer.example",
+            search_method="serper_fallback",
+        ),
+    ]
+
+    selected = selector.select_best(
+        product_query=query,
+        brand="קליק",
+        candidates=candidates,
+    )
+
+    assert selected is not None
+    assert selected.source == "retailer.example"
+
+
 async def test_product_resolution_falls_back_to_serper_when_retailers_empty() -> None:
     service = DefaultProductResolutionService(
         ai_extractor=StaticExtractor(),

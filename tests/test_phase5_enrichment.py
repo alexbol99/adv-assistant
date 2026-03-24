@@ -23,6 +23,7 @@ from adv_assistant.llm_gateway import (
     ExtractedProductQuery,
     Intent,
     IntentClassification,
+    MarketingBrief,
     ReplyGeneration,
 )
 from adv_assistant.pipeline import InboundTaskProcessor
@@ -87,6 +88,15 @@ class FakeGateway:
     ) -> ReplyGeneration:
         return ReplyGeneration(reply_text="Draft updated.")
 
+    async def build_marketing_brief(
+        self,
+        *,
+        language: str,
+        draft_fields: dict[str, object],
+        operator_fields: dict[str, object],
+    ) -> MarketingBrief:
+        return MarketingBrief()
+
 
 class UnknownIntentGateway:
     uses_external_llm = True
@@ -115,6 +125,15 @@ class UnknownIntentGateway:
         extracted_fields: ExtractedAdFields | None,
     ) -> ReplyGeneration:
         return ReplyGeneration(reply_text="fallback unknown reply")
+
+    async def build_marketing_brief(
+        self,
+        *,
+        language: str,
+        draft_fields: dict[str, object],
+        operator_fields: dict[str, object],
+    ) -> MarketingBrief:
+        return MarketingBrief()
 
 
 class StaticEnrichmentService:
@@ -185,6 +204,15 @@ class TwoCreateAdGateway:
     ) -> ReplyGeneration:
         return ReplyGeneration(reply_text="Draft updated.")
 
+    async def build_marketing_brief(
+        self,
+        *,
+        language: str,
+        draft_fields: dict[str, object],
+        operator_fields: dict[str, object],
+    ) -> MarketingBrief:
+        return MarketingBrief()
+
 
 class BrandConflictGateway:
     uses_external_llm = False
@@ -227,6 +255,15 @@ class BrandConflictGateway:
         extracted_fields: ExtractedAdFields | None,
     ) -> ReplyGeneration:
         return ReplyGeneration(reply_text="Draft updated.")
+
+    async def build_marketing_brief(
+        self,
+        *,
+        language: str,
+        draft_fields: dict[str, object],
+        operator_fields: dict[str, object],
+    ) -> MarketingBrief:
+        return MarketingBrief()
 
 
 @pytest.fixture()

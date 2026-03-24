@@ -272,6 +272,7 @@ async def test_reset_product_fields_clears_v1_classification_state(
     draft = await draft_repo.create(
         operator_phone=operator.phone,
         product_name="Milk",
+        marketing_brief={"tone": "energetic", "core_message": "fresh milk promo"},
         request_type=AdRequestType.SINGLE_PRODUCT,
         classification_status=ClassificationStatus.RESOLVED,
         is_classification_resolved=True,
@@ -291,6 +292,7 @@ async def test_reset_product_fields_clears_v1_classification_state(
     assert reset_draft.is_classification_resolved is False
     assert reset_draft.awaiting_product_confirmation is False
     assert reset_draft.generation_ready is False
+    assert reset_draft.marketing_brief is None
 
 
 async def test_variant_round_replacement_supersedes_previous_active(
