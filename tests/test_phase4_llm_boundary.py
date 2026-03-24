@@ -19,6 +19,7 @@ from adv_assistant.llm_gateway import (
     IntentClassification,
     LLMGatewayError,
     LLMSchemaError,
+    MarketingBrief,
     OpenAILLMGateway,
     ReplyGeneration,
     sanitize_user_text,
@@ -80,6 +81,15 @@ class FakeGateway:
     ) -> ReplyGeneration:
         self.reply_calls += 1
         return self.reply
+
+    async def build_marketing_brief(
+        self,
+        *,
+        language: str,
+        draft_fields: dict[str, object],
+        operator_fields: dict[str, object],
+    ) -> MarketingBrief:
+        return MarketingBrief()
 
 
 @pytest.fixture()

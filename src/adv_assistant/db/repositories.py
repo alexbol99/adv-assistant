@@ -395,6 +395,7 @@ class AdDraftRepository:
             generation_job_id=None,
             preview_reference_url=None,
             rendered_image_url=None,
+            marketing_brief=None,
             status=AdDraftStatus.DRAFT,
             request_type=AdRequestType.UNSET,
             classification_status=ClassificationStatus.PENDING,

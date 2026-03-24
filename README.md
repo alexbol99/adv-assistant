@@ -71,7 +71,7 @@
 - LLM configuration (Phase 4):
   - `OPENAI_API_KEY`
   - optional `OPENAI_BASE_URL`
-  - `LLM_CLASSIFICATION_MODEL`, `LLM_EXTRACTION_MODEL`, `LLM_REPLY_MODEL`
+  - `LLM_CLASSIFICATION_MODEL`, `LLM_EXTRACTION_MODEL`, `LLM_REPLY_MODEL`, `LLM_BRIEF_MODEL` (optional; falls back to extraction model when unset)
   - `LLM_MAX_RETRIES` (schema mismatch retry count, default `1`)
   - `LLM_TIMEOUT_SECONDS` (default `15`)
   - `LLM_MAX_INPUT_CHARS` (default `2000`)

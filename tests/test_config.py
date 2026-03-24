@@ -65,6 +65,18 @@ def test_llm_trace_settings_are_loaded(monkeypatch) -> None:
     assert settings.llm_trace_max_chars == 1234
 
 
+def test_blank_llm_brief_model_is_normalized_to_none(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_BRIEF_MODEL", "   ")
+    settings = Settings.from_env()
+    assert settings.llm_brief_model is None
+
+
+def test_llm_brief_model_preserves_non_empty_value(monkeypatch) -> None:
+    monkeypatch.setenv("LLM_BRIEF_MODEL", "gpt-5-mini")
+    settings = Settings.from_env()
+    assert settings.llm_brief_model == "gpt-5-mini"
+
+
 def test_enrichment_retry_settings_are_loaded(monkeypatch) -> None:
     monkeypatch.setenv("ENRICHMENT_MAX_ATTEMPTS", "4")
     monkeypatch.setenv("ENRICHMENT_RETRY_BASE_SECONDS", "0.25")

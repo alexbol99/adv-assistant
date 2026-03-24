@@ -81,6 +81,7 @@ class Settings:
     llm_classification_model: str = "gpt-4o-mini"
     llm_extraction_model: str = "gpt-4o-mini"
     llm_reply_model: str = "gpt-4o-mini"
+    llm_brief_model: str | None = None
     llm_max_retries: int = 1
     llm_timeout_seconds: int = 15
     llm_max_input_chars: int = 2000
@@ -187,6 +188,7 @@ class Settings:
             llm_classification_model=os.getenv("LLM_CLASSIFICATION_MODEL", "gpt-4o-mini"),
             llm_extraction_model=os.getenv("LLM_EXTRACTION_MODEL", "gpt-4o-mini"),
             llm_reply_model=os.getenv("LLM_REPLY_MODEL", "gpt-4o-mini"),
+            llm_brief_model=_optional_env("LLM_BRIEF_MODEL"),
             llm_max_retries=_int_env("LLM_MAX_RETRIES", 1),
             llm_timeout_seconds=_int_env("LLM_TIMEOUT_SECONDS", 15),
             llm_max_input_chars=_int_env("LLM_MAX_INPUT_CHARS", 2000),

@@ -131,6 +131,7 @@ class AdDraft(TimestampMixin, Base):
     generation_job_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     preview_reference_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     rendered_image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    marketing_brief: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[AdDraftStatus] = mapped_column(
         Enum(AdDraftStatus, name="ad_draft_status", native_enum=False),

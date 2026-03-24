@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -382,7 +383,7 @@ async def _validate_schema_compatibility(
             "pending_question_type",
             "pending_question_context",
         },
-        "ad_draft": {"product_brand"},
+        "ad_draft": {"product_brand", "marketing_brief"},
     }
     if settings.enrichment_enabled:
         required_columns_by_table["ad_draft"].update(
@@ -466,6 +467,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             classification_model=current_settings.llm_classification_model,
             extraction_model=current_settings.llm_extraction_model,
             reply_model=current_settings.llm_reply_model,
+            brief_model=current_settings.llm_brief_model,
             max_retries=current_settings.llm_max_retries,
             timeout_seconds=current_settings.llm_timeout_seconds,
             max_input_chars=current_settings.llm_max_input_chars,
@@ -504,9 +506,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         product_resolution_service=product_resolution_service,
         pipeline_v1_enabled=current_settings.pipeline_v1_enabled,
     )
+    sqlite_inline_processing_lock: asyncio.Lock | None = None
+    if (
+        current_settings.tasks_mode == "inline"
+        and current_settings.database_url.startswith("sqlite")
+    ):
+        # SQLite allows only a single writer at a time. In inline mode,
+        # concurrent webhook requests can overlap and hit "database is locked".
+        sqlite_inline_processing_lock = asyncio.Lock()
 
     async def process_and_maybe_send_reply(payload: InboundTaskPayload):
-        result = await task_processor.process(payload)
+        if sqlite_inline_processing_lock is not None:
+            async with sqlite_inline_processing_lock:
+                result = await task_processor.process(payload)
+        else:
+            result = await task_processor.process(payload)
         if (
             (
                 result.generated_image_url
