@@ -507,9 +507,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pipeline_v1_enabled=current_settings.pipeline_v1_enabled,
     )
     sqlite_inline_processing_lock: asyncio.Lock | None = None
-    if (
-        current_settings.tasks_mode == "inline"
-        and current_settings.database_url.startswith("sqlite")
+    if current_settings.tasks_mode == "inline" and current_settings.database_url.startswith(
+        "sqlite"
     ):
         # SQLite allows only a single writer at a time. In inline mode,
         # concurrent webhook requests can overlap and hit "database is locked".

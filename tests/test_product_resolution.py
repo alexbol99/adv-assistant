@@ -171,7 +171,7 @@ def test_candidate_selector_skips_social_media_sources() -> None:
             search_method="serper_fallback",
         ),
         ProductCandidate(
-            title="קליק אדום 500 מ\"ל",
+            title='קליק אדום 500 מ"ל',
             description="Retail product page",
             image_url="https://retailer.example/images/click-red.jpg",
             product_url="https://retailer.example/products/click-red",
