@@ -109,6 +109,8 @@ class FakeGateway:
         self,
         *,
         context: creative_brief_planner.CreativeBriefPlannerContext,
+        questions_asked_so_far: int,
+        missing_mandatory_fields: list[str],
     ) -> creative_brief_planner.CreativeBriefPlannerOutput:
         base_state = context.session_state.inferred_brief_fields.model_copy(deep=True)
         if base_state.goal is None:
@@ -160,6 +162,19 @@ class FakeGatewayNoPrice(FakeGateway):
             product_name="Cottage Cheese",
             currency="ILS",
             promo_text="Fresh and tasty",
+        )
+
+
+class FakeGatewayNoPricePlannerMustNotRun(FakeGatewayNoPrice):
+    async def plan_creative_brief(
+        self,
+        *,
+        context: creative_brief_planner.CreativeBriefPlannerContext,
+        questions_asked_so_far: int,
+        missing_mandatory_fields: list[str],
+    ) -> creative_brief_planner.CreativeBriefPlannerOutput:
+        raise AssertionError(
+            "plan_creative_brief should not run when mandatory fields are missing"
         )
 
 
@@ -241,13 +256,17 @@ class FakeGatewayPlannerAskThenReady(FakeGateway):
     def __init__(self) -> None:
         super().__init__()
         self.plan_calls = 0
+        self.plan_inputs: list[tuple[int, list[str]]] = []
 
     async def plan_creative_brief(
         self,
         *,
         context: creative_brief_planner.CreativeBriefPlannerContext,
+        questions_asked_so_far: int,
+        missing_mandatory_fields: list[str],
     ) -> creative_brief_planner.CreativeBriefPlannerOutput:
         self.plan_calls += 1
+        self.plan_inputs.append((questions_asked_so_far, list(missing_mandatory_fields)))
         if self.plan_calls == 1:
             return creative_brief_planner.CreativeBriefPlannerOutput(
                 decision=creative_brief_planner.CreativeBriefDecision.ASK_QUESTION,
@@ -287,6 +306,8 @@ class FakeGatewayPlannerMemoryAware(FakeGateway):
         self,
         *,
         context: creative_brief_planner.CreativeBriefPlannerContext,
+        questions_asked_so_far: int,
+        missing_mandatory_fields: list[str],
     ) -> creative_brief_planner.CreativeBriefPlannerOutput:
         memory_style = context.session_state.user_memory_context.get("creative_guidance")
         if memory_style:
@@ -325,6 +346,8 @@ class FakeGatewayPlannerTimeout(FakeGateway):
         self,
         *,
         context: creative_brief_planner.CreativeBriefPlannerContext,
+        questions_asked_so_far: int,
+        missing_mandatory_fields: list[str],
     ) -> creative_brief_planner.CreativeBriefPlannerOutput:
         raise LLMGatewayError("OpenAI request failed: Request timed out.")
 
@@ -351,6 +374,8 @@ class FakeGatewayPlannerAskThenTimeoutWithUnknownIntent(FakeGateway):
         self,
         *,
         context: creative_brief_planner.CreativeBriefPlannerContext,
+        questions_asked_so_far: int,
+        missing_mandatory_fields: list[str],
     ) -> creative_brief_planner.CreativeBriefPlannerOutput:
         self._plan_calls += 1
         if self._plan_calls == 1:
@@ -696,6 +721,36 @@ def test_build_generation_prompt_marks_primary_elements_prominent() -> None:
     assert "operator-provided brand as the final displayed brand" in prompt
 
 
+def test_build_generation_prompt_includes_discovered_product_photo_url() -> None:
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="גבינה לבנה",
+        price=Decimal("14.90"),
+        currency="ILS",
+        promo_text=None,
+        ean=None,
+        photo_url="https://assets.example/operator-photo.jpg",
+        enriched_brand="תנובה",
+        enriched_category=None,
+        enriched_description=None,
+        preview_reference_url=None,
+        rendered_image_url=None,
+        enriched_image_url="https://assets.example/discovered-photo.jpg",
+    )
+    prompt = build_generation_prompt(
+        draft=draft,
+        mode=GenerationMode.FRESH,
+        instruction_text="make it clean",
+    )
+
+    assert "Product Photo URL: https://assets.example/operator-photo.jpg." in prompt
+    assert (
+        "Discovered Product Photo URL: https://assets.example/discovered-photo.jpg." in prompt
+    )
+
+
 async def test_nano_banana_service_submits_expected_payload() -> None:
     draft_id = uuid.uuid4()
     observed: dict[str, object] = {}
@@ -762,6 +817,58 @@ async def test_nano_banana_service_submits_expected_payload() -> None:
     assert body["metadata"]["draft_id"] == str(draft_id)
     assert first.job_id == "job-server-1"
     assert first.idempotency_key == second.idempotency_key
+    await client.aclose()
+
+
+async def test_nano_banana_service_sends_discovered_product_image_url() -> None:
+    observed: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            status_code=200,
+            json={"code": 200, "msg": "ok", "data": {"taskId": "job-server-2"}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = NanoBananaAdGenerationService(
+        api_key="test-key",
+        api_url="https://nano.example/api/v1/nanobanana/generate-2",
+        status_api_url_template="https://nano.example/api/v1/nanobanana/jobs/{job_id}",
+        client=client,
+    )
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="קוטג",
+        price=Decimal("19.90"),
+        currency="ILS",
+        promo_text="מבצע",
+        ean="7290004127326",
+        photo_url="https://assets.example/operator-photo.jpg",
+        enriched_brand="תנובה",
+        enriched_category="Dairy",
+        enriched_description="גבינה לבנה",
+        preview_reference_url=None,
+        rendered_image_url=None,
+        enriched_image_url="https://assets.example/discovered-photo.jpg",
+    )
+
+    await service.submit_for_draft(
+        draft=draft,
+        mode=GenerationMode.FRESH,
+        instruction_text="generate ad",
+        wamid="wamid-2",
+        width=1920,
+        height=1080,
+    )
+    body = observed["body"]
+    assert isinstance(body, dict)
+    assert body.get("imageUrls") == [
+        "https://assets.example/operator-photo.jpg",
+        "https://assets.example/discovered-photo.jpg",
+    ]
     await client.aclose()
 
 
@@ -841,6 +948,108 @@ async def test_gemini_service_generates_image_and_uploads_to_media_store() -> No
     assert media_store.upload_calls[0][2] == ".png"
     assert result.status == NanoBananaJobStatus.COMPLETED
     assert result.output_image_url == "https://storage.example/generated/preview.png"
+    await client.aclose()
+
+
+async def test_gemini_service_includes_discovered_product_image_inline() -> None:
+    observed: dict[str, object] = {"get_urls": []}
+    encoded_png = base64.b64encode(b"png-binary").decode("ascii")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            observed["get_urls"].append(str(request.url))
+            url = str(request.url)
+            if url.endswith("operator.jpg"):
+                return httpx.Response(
+                    status_code=200,
+                    content=b"operator-image",
+                    headers={"Content-Type": "image/jpeg"},
+                )
+            if url.endswith("discovered.jpg"):
+                return httpx.Response(
+                    status_code=200,
+                    content=b"discovered-image",
+                    headers={"Content-Type": "image/jpeg"},
+                )
+            if url.endswith("logo.png"):
+                return httpx.Response(
+                    status_code=200,
+                    content=b"logo-image",
+                    headers={"Content-Type": "image/png"},
+                )
+            return httpx.Response(status_code=404)
+        observed["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            status_code=200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "inlineData": {
+                                        "mimeType": "image/png",
+                                        "data": encoded_png,
+                                    }
+                                },
+                            ]
+                        }
+                    }
+                ]
+            },
+        )
+
+    media_store = FakeMediaStore()
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    service = GeminiFlashImageAdGenerationService(
+        api_key="gemini-test-key",
+        model="gemini-3.1-flash-image-preview",
+        media_store=media_store,
+        client=client,
+    )
+    draft = GenerationDraftInput(
+        draft_id=uuid.uuid4(),
+        operator_phone="+972526508861",
+        language="he",
+        product_name="קוטג",
+        price=Decimal("19.90"),
+        currency="ILS",
+        promo_text="מבצע",
+        ean=None,
+        photo_url="https://assets.example/operator.jpg",
+        enriched_brand=None,
+        enriched_category=None,
+        enriched_description=None,
+        preview_reference_url=None,
+        rendered_image_url=None,
+        logo_url="https://assets.example/logo.png",
+        enriched_image_url="https://assets.example/discovered.jpg",
+    )
+
+    submission = await service.submit_for_draft(
+        draft=draft,
+        mode=GenerationMode.FRESH,
+        instruction_text="generate ad image",
+        wamid="wamid-gemini-discovered-1",
+        width=1920,
+        height=1080,
+    )
+    result = await service.wait_for_completion(job_id=submission.job_id)
+
+    get_urls = observed["get_urls"]
+    assert isinstance(get_urls, list)
+    assert "https://assets.example/operator.jpg" in get_urls
+    assert "https://assets.example/discovered.jpg" in get_urls
+    assert "https://assets.example/logo.png" in get_urls
+    body = observed["body"]
+    assert isinstance(body, dict)
+    parts = body["contents"][0]["parts"]
+    inline_parts = [part["inline_data"] for part in parts if "inline_data" in part]
+    assert len(inline_parts) == 3
+    assert inline_parts[0]["mime_type"] == "image/jpeg"
+    assert inline_parts[1]["mime_type"] == "image/jpeg"
+    assert inline_parts[2]["mime_type"] == "image/png"
+    assert result.status == NanoBananaJobStatus.COMPLETED
     await client.aclose()
 
 
@@ -1949,9 +2158,10 @@ async def test_pipeline_creative_brief_planner_asks_one_question_then_generates(
             output_image_url="https://storage.googleapis.com/media/preview-after-approve.png",
         )
     )
+    planner_gateway = FakeGatewayPlannerAskThenReady()
     processor = InboundTaskProcessor(
         session_factory,
-        llm_gateway=FakeGatewayPlannerAskThenReady(),
+        llm_gateway=planner_gateway,
         ad_generation_service=fake_generation,
         product_resolution_service=FakeResolvedProductResolutionServiceMissingTitle(),
     )
@@ -1992,6 +2202,26 @@ async def test_pipeline_creative_brief_planner_asks_one_question_then_generates(
     assert "שם המוצר" not in approve_result.reply_text
     assert fake_generation.calls == 0
     assert fake_generation.wait_calls == 0
+    assert planner_gateway.plan_inputs
+    assert planner_gateway.plan_inputs[0][0] == 0
+    assert planner_gateway.plan_inputs[0][1] == []
+
+    async with session_scope(session_factory) as session:
+        session_obj = (
+            (
+                await session.execute(
+                    select(ConversationSession).where(ConversationSession.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert session_obj is not None
+        planner_context = session_obj.pending_question_context.get(
+            creative_brief_planner.SESSION_CONTEXT_KEY
+        )
+        assert isinstance(planner_context, dict)
+        assert planner_context.get("question_count") == 1
 
     answer_result = await processor.process(
         InboundTaskPayload(
@@ -2005,6 +2235,40 @@ async def test_pipeline_creative_brief_planner_asks_one_question_then_generates(
     assert answer_result.generated_image_url is not None
     assert fake_generation.calls == 2
     assert fake_generation.wait_calls == 2
+    assert len(planner_gateway.plan_inputs) >= 2
+    assert planner_gateway.plan_inputs[1][0] == 1
+
+
+async def test_pipeline_mandatory_short_circuit_skips_planner_llm(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000790"
+    await _seed_operator(session_factory, phone, language="he")
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-short-circuit.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=FakeGatewayNoPricePlannerMustNotRun(),
+        ad_generation_service=fake_generation,
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-mandatory-short-circuit",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "תיצור מודעה לקוטג"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.deterministic_action == "generation_gate_blocked"
+    assert result.reply_text is not None
+    assert "מה מחיר המבצע" in result.reply_text
+    assert fake_generation.calls == 0
 
 
 async def test_pipeline_creative_brief_reuses_memory_and_skips_style_reask(
@@ -2432,35 +2696,21 @@ async def test_pipeline_missing_info_price_answer_does_not_start_new_create_flow
             raw_message={"type": "text", "text": {"body": "create ad for cottage"}},
         )
     )
-    assert first.deterministic_action == "generation_completed"
-    assert generation.calls == 2
+    assert first.deterministic_action == "generation_gate_blocked"
+    assert first.reply_text is not None
+    assert "sale price" in first.reply_text.lower()
+    assert generation.calls == 0
 
     second = await processor.process(
         InboundTaskPayload(
             wamid="wamid-phase7-no-research-2",
             operator_phone=phone,
-            raw_message={
-                "type": "interactive",
-                "interactive": {"button_reply": {"id": BUTTON_SELECT_VARIANT_A}},
-            },
-        )
-    )
-    assert second.deterministic_action == "variant_selected"
-    assert second.reply_text is not None
-    assert "what exact price should i display in the ad?" in second.reply_text.lower()
-    assert "selected" not in second.reply_text.lower()
-    assert second.publish_buttons_prompt is None
-    assert generation.calls == 2
-
-    third = await processor.process(
-        InboundTaskPayload(
-            wamid="wamid-phase7-no-research-3",
-            operator_phone=phone,
             raw_message={"type": "text", "text": {"body": "price 7.90"}},
         )
     )
-    assert third.reply_text is not None
-    assert "what is your store type?" in third.reply_text.lower()
+    assert second.status == "processed"
+    assert second.deterministic_action == "generation_completed"
+    assert second.generated_image_url is not None
     assert generation.calls == 2
     assert gateway._extract_calls >= 2
 
@@ -2522,35 +2772,22 @@ async def test_missing_price_shows_publish_only_after_price_answer(
             raw_message={"type": "text", "text": {"body": "create ad for cottage"}},
         )
     )
-    assert first.deterministic_action == "generation_completed"
-    assert generation.calls == 2
+    assert first.deterministic_action == "generation_gate_blocked"
+    assert first.reply_text is not None
+    assert "מה מחיר המבצע" in first.reply_text
+    assert generation.calls == 0
 
     second = await processor.process(
         InboundTaskPayload(
             wamid="wamid-phase7-price-publish-timing-2",
             operator_phone=phone,
-            raw_message={
-                "type": "interactive",
-                "interactive": {"button_reply": {"id": BUTTON_SELECT_VARIANT_A}},
-            },
-        )
-    )
-    assert second.deterministic_action == "variant_selected"
-    assert second.reply_text is not None
-    assert "מה המחיר המדויק" in second.reply_text
-    assert second.publish_buttons_prompt is None
-    assert generation.calls == 2
-
-    third = await processor.process(
-        InboundTaskPayload(
-            wamid="wamid-phase7-price-publish-timing-3",
-            operator_phone=phone,
             raw_message={"type": "text", "text": {"body": "7.90"}},
         )
     )
-    assert third.reply_text is not None
-    assert "לפרס" in third.reply_text
-    assert third.publish_buttons_prompt is not None
+    assert second.deterministic_action == "generation_completed"
+    assert second.generated_image_url is not None
+    assert second.action_buttons_prompt is not None
+    assert second.publish_buttons_prompt is None
     assert generation.calls == 2
 
 
@@ -2617,7 +2854,7 @@ async def test_pipeline_brand_conflict_uses_operator_brand_and_logs_audit(
         assert len(list(conflict_events)) == 1
 
 
-async def test_pipeline_generates_preview_without_price_and_requests_followup(
+async def test_pipeline_blocks_generation_without_price_and_asks_mandatory_question(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     phone = "+972500000703"
@@ -2644,15 +2881,15 @@ async def test_pipeline_generates_preview_without_price_and_requests_followup(
     )
 
     assert result.status == "processed"
-    assert result.deterministic_action == "generation_completed"
-    assert result.generated_image_url == "https://storage.googleapis.com/media/preview-no-price.png"
+    assert result.deterministic_action == "generation_gate_blocked"
+    assert result.generated_image_url is None
     assert result.reply_text is not None
-    assert result.action_buttons_prompt is not None  # variant selection shown
-    assert result.action_buttons is not None
-    assert result.publish_buttons_prompt is None  # deferred until after variant selection
-    assert fake_generation.calls == 2  # two variant slots
-    assert fake_generation.last_draft is not None
-    assert fake_generation.last_draft.price is None
+    assert "sale price" in result.reply_text.lower()
+    assert result.action_buttons_prompt is None
+    assert result.action_buttons is None
+    assert result.publish_buttons_prompt is None
+    assert fake_generation.calls == 0
+    assert fake_generation.last_draft is None
 
     async with session_scope(session_factory) as session:
         draft = (
@@ -2661,7 +2898,7 @@ async def test_pipeline_generates_preview_without_price_and_requests_followup(
             .first()
         )
         assert draft is not None
-        assert draft.status == AdDraftStatus.PREVIEW_READY
+        assert draft.status == AdDraftStatus.DRAFT
         assert draft.price is None
 
 

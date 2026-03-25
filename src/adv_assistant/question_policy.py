@@ -21,6 +21,12 @@ QUESTION_PHASE_PRE_GENERATION = "pre_generation"
 QUESTION_PHASE_POST_PREVIEW = "post_preview"
 MAX_REPROMPTS_DEFAULT = 2
 MAX_PRE_GENERATION_CLARIFICATION_QUESTIONS = 3
+_ALLOWED_MANDATORY_QUESTION_KEYS = frozenset(
+    {
+        QUESTION_KEY_PRODUCT_NAME,
+        QUESTION_KEY_PRICE,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,9 +41,11 @@ REQUEST_TYPE_QUESTION_RULES: dict[AdRequestType, RequestTypeQuestionRules] = {
         optional_after_preview=(),
     ),
     AdRequestType.SINGLE_PRODUCT: RequestTypeQuestionRules(
-        required_before_generation=(QUESTION_KEY_PRODUCT_NAME,),
-        optional_after_preview=(
+        required_before_generation=(
+            QUESTION_KEY_PRODUCT_NAME,
             QUESTION_KEY_PRICE,
+        ),
+        optional_after_preview=(
             QUESTION_KEY_STORE_TYPE,
             QUESTION_KEY_CREATIVE_GUIDANCE,
         ),
@@ -125,12 +133,8 @@ def is_generation_ready(
         return False
     if awaiting_product_confirmation:
         return False
-    rules = REQUEST_TYPE_QUESTION_RULES.get(
-        request_type,
-        REQUEST_TYPE_QUESTION_RULES[AdRequestType.UNSET],
-    )
     asked_clarifications = max(clarification_question_count, 0)
-    for required_key in rules.required_before_generation:
+    for required_key in _required_before_generation_keys(request_type=request_type):
         if _is_missing(
             question_key=required_key,
             has_product_name=has_product_name,
@@ -148,6 +152,27 @@ def clarification_count_from_context(
 ) -> int:
     context = pending_question_context or {}
     return _parse_reprompt_count(context.get(QUESTION_CONTEXT_CLARIFICATION_COUNT))
+
+
+def missing_mandatory_fields(
+    *,
+    request_type: AdRequestType,
+    has_product_name: bool,
+    has_price: bool,
+    has_store_type: bool,
+    has_creative_guidance: bool,
+) -> list[str]:
+    missing: list[str] = []
+    for required_key in _required_before_generation_keys(request_type=request_type):
+        if _is_missing(
+            question_key=required_key,
+            has_product_name=has_product_name,
+            has_price=has_price,
+            has_store_type=has_store_type,
+            has_creative_guidance=has_creative_guidance,
+        ):
+            missing.append(required_key)
+    return missing
 
 
 def select_next_question(
@@ -181,12 +206,8 @@ def select_next_question(
             is_blocking_for_generation=True,
         )
 
-    rules = REQUEST_TYPE_QUESTION_RULES.get(
-        request_type,
-        REQUEST_TYPE_QUESTION_RULES[AdRequestType.UNSET],
-    )
     asked_clarifications = max(clarification_question_count, 0)
-    for required_key in rules.required_before_generation:
+    for required_key in _required_before_generation_keys(request_type=request_type):
         if _is_missing(
             question_key=required_key,
             has_product_name=has_product_name,
@@ -212,6 +233,10 @@ def select_next_question(
     if not after_preview_generation:
         return None
 
+    rules = REQUEST_TYPE_QUESTION_RULES.get(
+        request_type,
+        REQUEST_TYPE_QUESTION_RULES[AdRequestType.UNSET],
+    )
     for optional_key in rules.optional_after_preview:
         if _is_missing(
             question_key=optional_key,
@@ -439,6 +464,18 @@ def _parse_reprompt_count(value: Any) -> int:
     if isinstance(value, str) and value.isdigit():
         return int(value)
     return 0
+
+
+def _required_before_generation_keys(*, request_type: AdRequestType) -> tuple[str, ...]:
+    rules = REQUEST_TYPE_QUESTION_RULES.get(
+        request_type,
+        REQUEST_TYPE_QUESTION_RULES[AdRequestType.UNSET],
+    )
+    return tuple(
+        key
+        for key in rules.required_before_generation
+        if key in _ALLOWED_MANDATORY_QUESTION_KEYS
+    )
 
 
 def _is_missing(
