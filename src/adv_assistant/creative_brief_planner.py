@@ -561,6 +561,11 @@ def apply_planner_output(
                 answer_text=latest_user_message,
             )
         )
+        _apply_pending_answer_fallback(
+            state=state,
+            question_key=state.pending_question.key,
+            answer_text=latest_user_message,
+        )
 
     provided_missing = []
     for dimension in planner_output.missing_dimensions:
@@ -636,6 +641,61 @@ def apply_planner_output(
             validation_fallback=True,
         )
     return PlannerResolution(state=state)
+
+
+def _apply_pending_answer_fallback(
+    *,
+    state: CreativeBriefSessionState,
+    question_key: str | None,
+    answer_text: str | None,
+) -> None:
+    answer = _normalize_text(answer_text, max_length=500)
+    if answer is None:
+        return
+
+    key = _normalize_text(question_key, max_length=80)
+    normalized_key = (key or "").lower()
+    fields = state.inferred_brief_fields
+
+    if normalized_key in {
+        "creative_direction",
+        "scene",
+        "goal",
+        "marketing_angle",
+        "value_proposition",
+    }:
+        if fields.marketing_angle is None:
+            fields.marketing_angle = answer
+        elif fields.goal is None:
+            fields.goal = answer
+        elif fields.scene is None:
+            fields.scene = answer
+        return
+
+    if normalized_key in {"style", "style_context", "visual_style", "tone"}:
+        if fields.style is None:
+            fields.style = answer
+        return
+
+    if normalized_key in {"product_identity", "product_name"}:
+        existing_product_name = _normalize_text(
+            state.confirmed_product.get("product_name"),
+            max_length=240,
+        )
+        if existing_product_name is None:
+            state.confirmed_product = dict(state.confirmed_product)
+            state.confirmed_product["product_name"] = answer
+        return
+
+    if normalized_key in {"text_overlay", "ad_text", "headline"}:
+        if fields.text_overlay is None:
+            fields.text_overlay = answer
+        return
+
+    if fields.marketing_angle is None:
+        # Conservative fallback: keep the answer as a high-level direction
+        # so repeated asks are avoided when planner output is degraded.
+        fields.marketing_angle = answer
 
 
 def render_brief_instruction(final_brief: FinalCreativeBrief) -> str:

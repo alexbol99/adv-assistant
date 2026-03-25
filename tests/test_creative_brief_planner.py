@@ -154,3 +154,40 @@ def test_soft_cap_forces_ready_with_defaults() -> None:
     assert resolution.state.is_brief_ready is True
     assert resolution.state.final_brief is not None
     assert resolution.forced_reason == "cap"
+
+
+def test_fallback_uses_pending_creative_direction_answer() -> None:
+    state = _base_state(
+        creative_guidance="clean premium style",
+        store_type="Neighborhood grocery",
+    )
+    state.pending_question = creative_brief_planner.NextQuestion(
+        key="creative_direction",
+        question_text="What is the main creative direction?",
+    )
+    state.asked_question_keys = ["creative_direction"]
+    state.question_count = 1
+
+    degraded_output = creative_brief_planner.CreativeBriefPlannerOutput(
+        decision=creative_brief_planner.CreativeBriefDecision.ASK_QUESTION,
+        next_question=creative_brief_planner.NextQuestion(
+            key="creative_direction",
+            question_text="What is the main creative direction?",
+        ),
+        current_brief_state=creative_brief_planner.CurrentBriefState(),
+        missing_dimensions=["creative_direction"],
+        confidence=0.4,
+    )
+
+    resolution = creative_brief_planner.apply_planner_output(
+        session_state=state,
+        planner_output=degraded_output,
+        latest_user_message="Strong marketing message about value",
+        language="en",
+        question_cap=4,
+    )
+
+    assert resolution.state.is_brief_ready is True
+    assert resolution.forced_reason == "already_sufficient"
+    assert resolution.state.pending_question is None
+    assert resolution.state.inferred_brief_fields.marketing_angle is not None
