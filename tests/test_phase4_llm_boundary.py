@@ -375,6 +375,10 @@ async def test_openai_gateway_coerces_creative_brief_schema_variants(
         operation: str,
         timeout_seconds: int | None = None,
     ) -> str:
+        assert (
+            "CONTEXT RULE: This ad is for a DIGITAL SIGNAGE SCREEN INSIDE A SUPERMARKET"
+            in system_prompt
+        )
         return (
             '{"decision":"need_more_info","next_question":"האם יש טקסט פרסומי?"'
             ',"current_brief_state":{"scene":"מוצר על רקע נקי"}}'
@@ -394,12 +398,63 @@ async def test_openai_gateway_coerces_creative_brief_schema_variants(
             source_intent="create_ad",
             latest_user_message="תעשה מודעה לחלב",
             session_state=state,
-        )
+        ),
+        questions_asked_so_far=0,
+        missing_mandatory_fields=[],
     )
 
     assert output.decision == creative_brief_planner.CreativeBriefDecision.ASK_QUESTION
     assert output.next_question is not None
     assert output.next_question.question_text == "האם יש טקסט פרסומי?"
+
+
+async def test_openai_gateway_truncates_multi_question_planner_response(
+    monkeypatch: Any,
+) -> None:
+    gateway = OpenAILLMGateway(
+        api_key="test-key",
+        classification_model="gpt-5-mini",
+        extraction_model="gpt-5-mini",
+        reply_model="gpt-5-mini",
+        max_retries=0,
+        timeout_seconds=5,
+        max_input_chars=2000,
+    )
+
+    async def fake_chat_json(
+        *,
+        model_name: str,
+        system_prompt: str,
+        user_prompt: str,
+        operation: str,
+        timeout_seconds: int | None = None,
+    ) -> str:
+        return (
+            '{"decision":"ask_question","next_question":"מה הכיוון היצירתי? ומה לגבי טקסט?"'
+            ',"current_brief_state":{"scene":"מוצר על רקע נקי"}}'
+        )
+
+    monkeypatch.setattr(gateway, "_chat_json", fake_chat_json)
+
+    state = creative_brief_planner.initialize_session_state(
+        confirmed_product={"product_name": "Milk"},
+        user_memory_context={},
+        conversation_context=[],
+        source_intent="create_ad",
+    )
+    output = await gateway.plan_creative_brief(
+        context=creative_brief_planner.CreativeBriefPlannerContext(
+            language="he",
+            source_intent="create_ad",
+            latest_user_message="תעשה מודעה לחלב",
+            session_state=state,
+        ),
+        questions_asked_so_far=1,
+        missing_mandatory_fields=[],
+    )
+
+    assert output.next_question is not None
+    assert output.next_question.question_text == "מה הכיוון היצירתי?"
 
 
 async def test_openai_gateway_emits_trace_event_when_enabled(monkeypatch: Any) -> None:

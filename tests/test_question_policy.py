@@ -77,7 +77,13 @@ def test_optional_question_not_asked_before_preview_when_generation_can_proceed(
         after_preview_generation=False,
     )
 
-    assert selection is None
+    assert selection is not None
+    assert selection.pending_question_type == PendingQuestionType.MISSING_INFO
+    assert selection.pending_question_context[question_policy.QUESTION_CONTEXT_KEY] == (
+        question_policy.QUESTION_KEY_PRICE
+    )
+    assert selection.pending_question_context[question_policy.QUESTION_CONTEXT_REQUIRED] is True
+    assert selection.is_blocking_for_generation is True
 
 
 def test_optional_followup_is_selected_after_preview_only() -> None:
@@ -86,7 +92,7 @@ def test_optional_followup_is_selected_after_preview_only() -> None:
         classification_resolved=True,
         awaiting_product_confirmation=False,
         has_product_name=True,
-        has_price=False,
+        has_price=True,
         has_store_type=False,
         has_creative_guidance=False,
         language="he",
@@ -96,7 +102,7 @@ def test_optional_followup_is_selected_after_preview_only() -> None:
     assert selection is not None
     assert selection.pending_question_type == PendingQuestionType.MISSING_INFO
     assert selection.pending_question_context[question_policy.QUESTION_CONTEXT_KEY] == (
-        question_policy.QUESTION_KEY_PRICE
+        question_policy.QUESTION_KEY_STORE_TYPE
     )
     assert selection.pending_question_context[question_policy.QUESTION_CONTEXT_REQUIRED] is False
     assert selection.is_blocking_for_generation is False
@@ -217,3 +223,57 @@ def test_generation_ready_when_budget_reached_even_if_required_field_missing(mon
     )
 
     assert ready is True
+
+
+def test_missing_mandatory_fields_returns_required_keys_only() -> None:
+    missing = question_policy.missing_mandatory_fields(
+        request_type=AdRequestType.SINGLE_PRODUCT,
+        has_product_name=False,
+        has_price=False,
+        has_store_type=False,
+        has_creative_guidance=False,
+    )
+
+    assert missing == [
+        question_policy.QUESTION_KEY_PRODUCT_NAME,
+        question_policy.QUESTION_KEY_PRICE,
+    ]
+
+
+def test_missing_mandatory_fields_empty_when_all_required_present() -> None:
+    missing = question_policy.missing_mandatory_fields(
+        request_type=AdRequestType.SINGLE_PRODUCT,
+        has_product_name=True,
+        has_price=True,
+        has_store_type=False,
+        has_creative_guidance=False,
+    )
+
+    assert missing == []
+
+
+def test_missing_mandatory_fields_ignores_unknown_required_keys(monkeypatch) -> None:
+    monkeypatch.setitem(
+        question_policy.REQUEST_TYPE_QUESTION_RULES,
+        AdRequestType.SINGLE_PRODUCT,
+        question_policy.RequestTypeQuestionRules(
+            required_before_generation=(
+                question_policy.QUESTION_KEY_PRODUCT_NAME,
+                "expiration_date",
+                question_policy.QUESTION_KEY_PRICE,
+            ),
+            optional_after_preview=(),
+        ),
+    )
+    missing = question_policy.missing_mandatory_fields(
+        request_type=AdRequestType.SINGLE_PRODUCT,
+        has_product_name=False,
+        has_price=False,
+        has_store_type=False,
+        has_creative_guidance=False,
+    )
+
+    assert missing == [
+        question_policy.QUESTION_KEY_PRODUCT_NAME,
+        question_policy.QUESTION_KEY_PRICE,
+    ]

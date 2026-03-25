@@ -325,6 +325,14 @@ def _request_type_resolved_reply(*, request_type: AdRequestType, language: str) 
     return None
 
 
+def _mandatory_short_circuit_question(*, question_key: str, language: str) -> str:
+    if question_key == question_policy.QUESTION_KEY_PRICE:
+        if language.lower() == "he":
+            return "מה מחיר המבצע?"
+        return "What is the sale price?"
+    return question_policy.question_prompt(question_key, language)
+
+
 class InboundTaskProcessor:
     def __init__(
         self,
@@ -611,6 +619,7 @@ class InboundTaskProcessor:
                                 operator=operator,
                                 history=history,
                                 pending_question_context=pending_question_context,
+                                conversation_session=session_obj,
                                 source_intent=Intent.CREATE_AD,
                                 latest_user_message=None,
                             )
@@ -962,6 +971,7 @@ class InboundTaskProcessor:
                                     operator=operator,
                                     history=history,
                                     pending_question_context=pending_question_context,
+                                    conversation_session=session_obj,
                                     source_intent=Intent.CREATE_AD,
                                     latest_user_message=None,
                                 )
@@ -1106,6 +1116,7 @@ class InboundTaskProcessor:
                                 operator=operator,
                                 history=history,
                                 pending_question_context=pending_question_context,
+                                conversation_session=session_obj,
                                 source_intent=last_user_intent_hint,
                                 latest_user_message=sanitized_text,
                             )
@@ -1681,6 +1692,7 @@ class InboundTaskProcessor:
                                 operator=operator,
                                 history=history,
                                 pending_question_context=readiness_context,
+                                conversation_session=session_obj,
                                 source_intent=classification.intent,
                                 latest_user_message=sanitized_text,
                             )
@@ -2627,6 +2639,7 @@ class InboundTaskProcessor:
         operator: Operator,
         history: list[dict[str, str]],
         pending_question_context: dict[str, Any] | None,
+        conversation_session: ConversationSession | None,
         source_intent: Intent | str | None,
         latest_user_message: str | None,
     ) -> _CreativeBriefPlannerTurnResult:
@@ -2678,6 +2691,92 @@ class InboundTaskProcessor:
                 source_intent=source_intent_value,
             )
 
+        image_candidates = [current_draft.photo_url, current_draft.enriched_image_url]
+        confirmed_image_urls: list[str] = []
+        for candidate in image_candidates:
+            normalized = _truncate(candidate, 2000)
+            if normalized is None or normalized in confirmed_image_urls:
+                continue
+            confirmed_image_urls.append(normalized)
+        refreshed_confirmed_product = dict(session_state.confirmed_product or {})
+        refreshed_confirmed_product["product_name"] = (
+            current_draft.product_name or refreshed_confirmed_product.get("product_name")
+        )
+        refreshed_confirmed_product["brand"] = (
+            current_draft.product_brand
+            or current_draft.enriched_brand
+            or refreshed_confirmed_product.get("brand")
+        )
+        refreshed_confirmed_product["category"] = (
+            current_draft.enriched_category or refreshed_confirmed_product.get("category")
+        )
+        refreshed_confirmed_product["retailer_title"] = (
+            current_draft.enriched_description or refreshed_confirmed_product.get("retailer_title")
+        )
+        refreshed_confirmed_product["ean"] = current_draft.ean or refreshed_confirmed_product.get(
+            "ean"
+        )
+        if confirmed_image_urls:
+            refreshed_confirmed_product["image_url"] = confirmed_image_urls[0]
+            refreshed_confirmed_product["image_urls"] = confirmed_image_urls
+            refreshed_confirmed_product["discovered_image_url"] = current_draft.enriched_image_url
+        session_state.confirmed_product = refreshed_confirmed_product
+
+        question_count_from_session = max(
+            _creative_brief_question_count_from_pending_context(
+                conversation_session.pending_question_context
+                if conversation_session is not None
+                else None
+            ),
+            _creative_brief_question_count_from_pending_context(context_payload),
+            max(0, session_state.question_count),
+        )
+        session_state.question_count = question_count_from_session
+        missing_mandatory_fields = question_policy.missing_mandatory_fields(
+            request_type=current_draft.request_type,
+            has_product_name=current_draft.product_name is not None,
+            has_price=current_draft.price is not None,
+            has_store_type=_normalize_brand_value(operator.store_type) is not None,
+            has_creative_guidance=_normalize_brand_value(operator.creative_guidance) is not None,
+        )
+        if missing_mandatory_fields:
+            missing_key = missing_mandatory_fields[0]
+            clarification_count = question_policy.clarification_count_from_context(
+                pending_question_context=context_payload,
+            )
+            pending_context = {
+                question_policy.QUESTION_CONTEXT_KEY: missing_key,
+                question_policy.QUESTION_CONTEXT_REQUIRED: True,
+                question_policy.QUESTION_CONTEXT_PHASE: (
+                    question_policy.QUESTION_PHASE_PRE_GENERATION
+                ),
+                question_policy.QUESTION_CONTEXT_REPROMPT_COUNT: 0,
+                question_policy.QUESTION_CONTEXT_CLARIFICATION_COUNT: clarification_count + 1,
+            }
+            await audit_repo.log(
+                actor="system",
+                action="creative_brief_planner_mandatory_short_circuit",
+                operator_phone=payload.operator_phone,
+                metadata={
+                    "wamid": payload.wamid,
+                    "draft_id": str(current_draft.id),
+                    "question_key": missing_key,
+                    "question_count": question_count_from_session,
+                },
+            )
+            return _CreativeBriefPlannerTurnResult(
+                pending_question_type=PendingQuestionType.MISSING_INFO,
+                pending_question_context=pending_context,
+                reply_text=_mandatory_short_circuit_question(
+                    question_key=missing_key,
+                    language=operator.language,
+                ),
+                brief_instruction_text=None,
+                resume_intent=None,
+                forced_reason="mandatory_short_circuit",
+                validation_fallback=False,
+            )
+
         source_intent_value = (
             source_intent.value if isinstance(source_intent, Intent) else source_intent
         )
@@ -2699,7 +2798,11 @@ class InboundTaskProcessor:
         planner_failure_message: str | None = None
         if callable(planner_method):
             try:
-                planner_output = await planner_method(context=planner_context)
+                planner_output = await planner_method(
+                    context=planner_context,
+                    questions_asked_so_far=question_count_from_session,
+                    missing_mandatory_fields=missing_mandatory_fields,
+                )
             except Exception as exc:
                 planner_call_failed = True
                 planner_failure_type = exc.__class__.__name__
@@ -2814,6 +2917,9 @@ class InboundTaskProcessor:
                 forced_reason="validation_fallback",
                 validation_fallback=True,
             )
+
+        if resolved_state.question_count <= question_count_from_session:
+            resolved_state.question_count = question_count_from_session + 1
 
         pending_context = {
             "stage": creative_brief_planner.STAGE_NAME,
@@ -3910,6 +4016,24 @@ def _is_creative_brief_pending(
     return context.get("stage") == creative_brief_planner.STAGE_NAME
 
 
+def _creative_brief_question_count_from_pending_context(
+    pending_question_context: dict[str, Any] | None,
+) -> int:
+    if not isinstance(pending_question_context, dict):
+        return 0
+    if pending_question_context.get("stage") != creative_brief_planner.STAGE_NAME:
+        return 0
+    session_payload = pending_question_context.get(creative_brief_planner.SESSION_CONTEXT_KEY)
+    if not isinstance(session_payload, dict):
+        return 0
+    raw_count = session_payload.get("question_count")
+    if isinstance(raw_count, int):
+        return max(raw_count, 0)
+    if isinstance(raw_count, str) and raw_count.isdigit():
+        return int(raw_count)
+    return 0
+
+
 def _can_run_creative_brief_planner(*, current_draft: AdDraft) -> bool:
     return (
         current_draft.is_classification_resolved
@@ -3965,6 +4089,7 @@ def _to_generation_draft_input(
         store_type=operator.store_type,
         creative_guidance=operator.creative_guidance,
         marketing_brief=draft.marketing_brief,
+        enriched_image_url=draft.enriched_image_url,
     )
 
 

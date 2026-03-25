@@ -72,6 +72,7 @@ class GenerationDraftInput:
     store_type: str | None = None
     creative_guidance: str | None = None
     marketing_brief: dict[str, Any] | None = None
+    enriched_image_url: str | None = None
 
 
 @dataclass(slots=True)
@@ -581,6 +582,12 @@ class GeminiFlashImageAdGenerationService:
         # Include operator product photo as inline image data so the model
         # can actually "see" the product.
         await append_inline_image(url=draft.photo_url, label="product photo")
+        # Include discovered product photo when available (and different),
+        # so generation can use the best catalog match too.
+        await append_inline_image(
+            url=draft.enriched_image_url,
+            label="discovered product photo",
+        )
         # Include business logo as inline image data so logo styling can be grounded.
         await append_inline_image(url=draft.logo_url, label="business logo")
 
@@ -707,6 +714,8 @@ class NanoBananaAdGenerationService:
             image_urls.append(reference_image_url)
         if draft.photo_url and draft.photo_url not in image_urls:
             image_urls.append(draft.photo_url)
+        if draft.enriched_image_url and draft.enriched_image_url not in image_urls:
+            image_urls.append(draft.enriched_image_url)
         if image_urls:
             payload["imageUrls"] = image_urls
 
@@ -1126,6 +1135,8 @@ def build_generation_prompt(
         supporting.append(f"EAN: {draft.ean}.")
     if draft.photo_url:
         supporting.append(f"Product Photo URL: {draft.photo_url}.")
+    if draft.enriched_image_url and draft.enriched_image_url != draft.photo_url:
+        supporting.append(f"Discovered Product Photo URL: {draft.enriched_image_url}.")
     if draft.enriched_category:
         supporting.append(f"Category: {draft.enriched_category}.")
     if draft.enriched_description:
