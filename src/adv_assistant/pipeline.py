@@ -2681,10 +2681,7 @@ class InboundTaskProcessor:
         source_intent_value = (
             source_intent.value if isinstance(source_intent, Intent) else source_intent
         )
-        if (
-            source_intent_value is not None
-            and source_intent_value != Intent.UNKNOWN.value
-        ):
+        if source_intent_value is not None and source_intent_value != Intent.UNKNOWN.value:
             session_state.source_intent = source_intent_value
 
         planner_context = creative_brief_planner.CreativeBriefPlannerContext(
