@@ -30,6 +30,8 @@ dist/
 
 # Local databases
 *.db
+*.db-shm
+*.db-wal
 
 # Local environment files
 .env

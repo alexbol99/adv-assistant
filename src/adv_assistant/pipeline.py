@@ -138,6 +138,19 @@ _EXPLICIT_NEW_AD_INTERRUPT_KEYWORDS = {
     "צור מודעה חדשה",
     "להתחיל מודעה חדשה",
 }
+_LIKELY_CREATE_AD_REQUEST_KEYWORDS = {
+    "create ad",
+    "create an ad",
+    "ad for",
+    "i want an ad",
+    "i need an ad",
+    "מודעה ל",
+    "מודעה עבור",
+    "צור מודעה",
+    "תיצור מודעה",
+    "אני רוצה מודעה",
+    "אני צריך מודעה",
+}
 _CONFIRMATION_UNSAFE_IMAGE_HOSTS = {
     "tiktok.com",
     "www.tiktok.com",
@@ -258,6 +271,10 @@ def _contains_any_keyword(message_text: str, keywords: set[str]) -> bool:
 
 def _is_explicit_new_ad_interrupt(message_text: str) -> bool:
     return _contains_any_keyword(message_text, _EXPLICIT_NEW_AD_INTERRUPT_KEYWORDS)
+
+
+def _is_likely_create_ad_request(message_text: str) -> bool:
+    return _contains_any_keyword(message_text, _LIKELY_CREATE_AD_REQUEST_KEYWORDS)
 
 
 def _classification_source_user_text(
@@ -732,7 +749,6 @@ class InboundTaskProcessor:
                                 current_draft = updated_draft
                                 deterministic_action = "variant_selected"
                                 base_reply = _variant_selected_reply(operator.language, slot_label)
-                                publish_buttons_prompt = _publish_buttons_prompt(operator.language)
                                 # Check for follow-up questions after selection.
                                 next_q = self._select_next_question(
                                     current_draft=current_draft,
@@ -744,11 +760,36 @@ class InboundTaskProcessor:
                                 if next_q is not None:
                                     pending_question_type = next_q.pending_question_type
                                     pending_question_context = next_q.pending_question_context
-                                    reply_text = f"{base_reply}\n\n{next_q.prompt_text}"
+                                    if (
+                                        next_q.pending_question_type
+                                        == PendingQuestionType.MISSING_INFO
+                                    ):
+                                        # Keep missing-info clarifications separate. For missing
+                                        # price specifically, defer publish actions until the
+                                        # operator provides the price.
+                                        reply_text = next_q.prompt_text
+                                        next_question_key = question_policy.pending_question_key(
+                                            pending_question_type=next_q.pending_question_type,
+                                            pending_question_context=next_q.pending_question_context,
+                                        )
+                                        if next_question_key == question_policy.QUESTION_KEY_PRICE:
+                                            publish_buttons_prompt = None
+                                        else:
+                                            publish_buttons_prompt = _publish_buttons_prompt(
+                                                operator.language
+                                            )
+                                    else:
+                                        reply_text = f"{base_reply}\n\n{next_q.prompt_text}"
+                                        publish_buttons_prompt = _publish_buttons_prompt(
+                                            operator.language
+                                        )
                                 else:
                                     pending_question_type = PendingQuestionType.NONE
                                     pending_question_context = {}
                                     reply_text = base_reply
+                                    publish_buttons_prompt = _publish_buttons_prompt(
+                                        operator.language
+                                    )
                                 await audit_repo.log(
                                     actor="system",
                                     action="variant_selected",
@@ -1077,9 +1118,11 @@ class InboundTaskProcessor:
                                 classification = IntentClassification(intent=Intent.UNKNOWN)
                             else:
                                 brief_instruction_override = planner_turn.brief_instruction_text
-                                forced_intent = (
-                                    planner_turn.resume_intent or Intent.REGENERATE_FROM_SCRATCH
-                                )
+                                resume_intent = planner_turn.resume_intent
+                                if resume_intent in {None, Intent.UNKNOWN}:
+                                    forced_intent = Intent.REGENERATE_FROM_SCRATCH
+                                else:
+                                    forced_intent = resume_intent
                     pending_question_key = question_policy.pending_question_key(
                         pending_question_type=pending_question_type,
                         pending_question_context=pending_question_context,
@@ -1125,6 +1168,19 @@ class InboundTaskProcessor:
                                 )
                                 llm_used = self._llm_gateway.uses_external_llm or llm_used
                                 if (
+                                    classification.intent == Intent.CREATE_AD
+                                    and not _is_explicit_new_ad_interrupt(sanitized_text)
+                                    and not _is_likely_create_ad_request(sanitized_text)
+                                ):
+                                    # In the "regenerate again?" follow-up, free-text feedback
+                                    # should continue the current draft instead of starting a
+                                    # brand-new ad flow.
+                                    followup_regen_requested = True
+                                    forced_intent = Intent.REGENERATE_WITH_REFERENCE
+                                    transition_status = (
+                                        question_policy.PendingResolutionStatus.RESOLVED
+                                    )
+                                elif (
                                     classification.intent
                                     in question_policy.INTERRUPT_PENDING_QUESTION_INTENTS
                                 ):
@@ -1209,6 +1265,18 @@ class InboundTaskProcessor:
                                         allow_regenerate_confirmation=True,
                                         current_pending_question_context=pending_question_context,
                                     )
+                                    if (
+                                        pending_question_type == PendingQuestionType.MISSING_INFO
+                                        and pending_question_key
+                                        == question_policy.QUESTION_KEY_PRICE
+                                        and next_question is not None
+                                        and next_question.pending_question_type
+                                        == PendingQuestionType.GENERATION_RETRY
+                                    ):
+                                        # After a missing-price answer is resolved, surface
+                                        # publish confirmation directly.
+                                        next_question = None
+                                        forced_intent = Intent.PUBLISH_AD
                                 elif is_pre_generation_phase:
                                     next_question = self._select_next_question(
                                         current_draft=current_draft,
@@ -1255,6 +1323,19 @@ class InboundTaskProcessor:
                         llm_used = self._llm_gateway.uses_external_llm or llm_used
                     elif classification is None:
                         classification = IntentClassification(intent=Intent.UNKNOWN)
+
+                    if (
+                        pending_question_type == PendingQuestionType.VARIANT_SELECTION
+                        and classification.intent == Intent.CREATE_AD
+                        and not _is_explicit_new_ad_interrupt(sanitized_text)
+                        and not _is_likely_create_ad_request(sanitized_text)
+                    ):
+                        # Free-text edits after preview generation should stay on the
+                        # current draft unless the operator explicitly asks for a new ad.
+                        followup_regen_requested = True
+                        classification = IntentClassification(
+                            intent=Intent.REGENERATE_WITH_REFERENCE
+                        )
 
                     intent_value = classification.intent.value
 
@@ -2600,7 +2681,7 @@ class InboundTaskProcessor:
         source_intent_value = (
             source_intent.value if isinstance(source_intent, Intent) else source_intent
         )
-        if source_intent_value is not None:
+        if source_intent_value is not None and source_intent_value != Intent.UNKNOWN.value:
             session_state.source_intent = source_intent_value
 
         planner_context = creative_brief_planner.CreativeBriefPlannerContext(

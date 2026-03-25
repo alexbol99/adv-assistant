@@ -34,6 +34,7 @@ from adv_assistant.llm_gateway import (
     BUTTON_REJECT_PRODUCT_SELECTION,
     BUTTON_SELECT_VARIANT_A,
     ExtractedAdFields,
+    ExtractedBrandingFields,
     ExtractedProductQuery,
     Intent,
     IntentClassification,
@@ -84,6 +85,14 @@ class FakeGateway:
         self, *, message_text: str, language: str
     ) -> ExtractedProductQuery:
         return ExtractedProductQuery()
+
+    async def extract_branding_fields(
+        self,
+        *,
+        message_text: str,
+        language: str,
+    ) -> ExtractedBrandingFields:
+        return ExtractedBrandingFields()
 
     async def generate_reply(
         self,
@@ -318,6 +327,69 @@ class FakeGatewayPlannerTimeout(FakeGateway):
         context: creative_brief_planner.CreativeBriefPlannerContext,
     ) -> creative_brief_planner.CreativeBriefPlannerOutput:
         raise LLMGatewayError("OpenAI request failed: Request timed out.")
+
+
+class FakeGatewayPlannerAskThenTimeoutWithUnknownIntent(FakeGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self._intent_calls = 0
+        self._plan_calls = 0
+
+    async def classify_intent(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> IntentClassification:
+        self._intent_calls += 1
+        if self._intent_calls == 1:
+            return IntentClassification(intent=Intent.CREATE_AD)
+        return IntentClassification(intent=Intent.UNKNOWN)
+
+    async def plan_creative_brief(
+        self,
+        *,
+        context: creative_brief_planner.CreativeBriefPlannerContext,
+    ) -> creative_brief_planner.CreativeBriefPlannerOutput:
+        self._plan_calls += 1
+        if self._plan_calls == 1:
+            return creative_brief_planner.CreativeBriefPlannerOutput(
+                decision=creative_brief_planner.CreativeBriefDecision.ASK_QUESTION,
+                next_question=creative_brief_planner.NextQuestion(
+                    key="creative_direction",
+                    question_text="מה הכיוון היצירתי המרכזי למודעה?",
+                ),
+                current_brief_state=creative_brief_planner.CurrentBriefState(),
+                missing_dimensions=["creative_direction"],
+                confidence=0.75,
+            )
+        if self._plan_calls == 2:
+            # Emulate a weak planner turn that marks ready but leaves the brief insufficient.
+            return creative_brief_planner.CreativeBriefPlannerOutput(
+                decision=creative_brief_planner.CreativeBriefDecision.BRIEF_READY,
+                current_brief_state=creative_brief_planner.CurrentBriefState(),
+                missing_dimensions=["creative_direction"],
+                confidence=0.65,
+            )
+        raise LLMGatewayError("OpenAI request failed: Request timed out.")
+
+
+class FakeGatewayGenerationRetryCreateAdInterrupt(FakeGateway):
+    def __init__(self) -> None:
+        super().__init__()
+        self._intents = [Intent.CREATE_AD, Intent.CREATE_AD, Intent.CREATE_AD]
+
+    async def classify_intent(
+        self,
+        *,
+        message_text: str,
+        language: str,
+        history: list[dict[str, str]],
+    ) -> IntentClassification:
+        if self._intents:
+            return IntentClassification(intent=self._intents.pop(0))
+        return IntentClassification(intent=Intent.CREATE_AD)
 
 
 class FakeGatewayBrandConflict(FakeGateway):
@@ -2040,6 +2112,301 @@ async def test_pipeline_creative_brief_planner_timeout_falls_back_without_crash(
         )
 
 
+async def test_pipeline_creative_brief_timeout_uses_answer_instead_of_reasking(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000753"
+    await _seed_operator(
+        session_factory,
+        phone,
+        language="he",
+        store_type="סופרמרקט",
+        creative_guidance="סגנון נקי",
+    )
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-timeout-answer-reuse.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=FakeGatewayPlannerTimeout(),
+        ad_generation_service=fake_generation,
+    )
+
+    first = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-timeout-answer-reuse-1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "אני רוצה מודעה לקוטג"}},
+        )
+    )
+    assert first.status == "processed"
+    assert first.deterministic_action == "generation_gate_blocked"
+    assert first.reply_text is not None
+    assert fake_generation.calls == 0
+
+    second = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-timeout-answer-reuse-2",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "מסר שיווקי"}},
+        )
+    )
+    assert second.status == "processed"
+    assert second.deterministic_action == "generation_completed"
+    assert second.generated_image_url is not None
+    assert fake_generation.calls == 2
+    assert fake_generation.wait_calls == 2
+
+
+async def test_pipeline_creative_brief_timeout_after_unknown_intent_still_generates(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000752"
+    await _seed_operator(session_factory, phone, language="he")
+    fake_generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-timeout-unknown-intent.png",
+        )
+    )
+    gateway = FakeGatewayPlannerAskThenTimeoutWithUnknownIntent()
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=gateway,
+        ad_generation_service=fake_generation,
+        product_resolution_service=FakeResolvedProductResolutionServiceMissingTitle(),
+    )
+
+    first_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-timeout-unknown-intent-step1",
+            operator_phone=phone,
+            raw_message={
+                "type": "text",
+                "text": {"body": "אני רוצה מודעה למוצר אחד גלידת מגנום"},
+            },
+        )
+    )
+    assert first_result.deterministic_action == "product_confirmation_requested"
+
+    approve_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-timeout-unknown-intent-step2",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {
+                    "button_reply": {
+                        "id": BUTTON_CONFIRM_PRODUCT_SELECTION,
+                    }
+                },
+            },
+        )
+    )
+    assert approve_result.deterministic_action == "generation_gate_blocked"
+
+    first_answer_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-timeout-unknown-intent-step3",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "מסר שיווקי"}},
+        )
+    )
+    assert first_answer_result.deterministic_action == "generation_gate_blocked"
+
+    second_answer_result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-timeout-unknown-intent-step4",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "מסר שיווקי"}},
+        )
+    )
+    assert second_answer_result.status == "processed"
+    assert second_answer_result.deterministic_action == "generation_completed"
+    assert second_answer_result.generated_image_url is not None
+    assert gateway.reply_calls == 0
+    assert fake_generation.calls == 2
+    assert fake_generation.wait_calls == 2
+
+    async with session_scope(session_factory) as session:
+        session_obj = (
+            (
+                await session.execute(
+                    select(ConversationSession).where(ConversationSession.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert session_obj is not None
+        assert session_obj.last_user_intent_hint != Intent.UNKNOWN.value
+
+
+async def test_generation_retry_feedback_does_not_start_new_create_flow(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000754"
+    await _seed_operator(
+        session_factory,
+        phone,
+        language="he",
+        store_type="סופרמרקט",
+        creative_guidance="סגנון נקי",
+    )
+    gateway = FakeGatewayGenerationRetryCreateAdInterrupt()
+    generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-retry-feedback.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=gateway,
+        ad_generation_service=generation,
+    )
+
+    first = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-retry-feedback-1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "create ad for ketchup 9.90"}},
+        )
+    )
+    assert first.deterministic_action == "generation_completed"
+    assert generation.calls == 2
+
+    second = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-retry-feedback-2",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {"button_reply": {"id": BUTTON_SELECT_VARIANT_A}},
+            },
+        )
+    )
+    assert second.deterministic_action == "variant_selected"
+
+    third = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-retry-feedback-3",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "make the bottle centered"}},
+        )
+    )
+    assert third.deterministic_action == "generation_completed"
+    assert generation.calls == 4
+    assert generation.wait_calls == 4
+
+    async with session_scope(session_factory) as session:
+        drafts = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .all()
+        )
+        assert len(drafts) == 1
+
+        new_draft_events = (
+            await session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.operator_phone == phone,
+                    AuditEvent.action == "draft_created_for_new_ad",
+                )
+            )
+        ).scalars()
+        assert len(list(new_draft_events)) == 0
+
+
+async def test_variant_selection_feedback_twice_does_not_start_new_create_flow(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000755"
+    await _seed_operator(
+        session_factory,
+        phone,
+        language="he",
+        store_type="סופרמרקט",
+        creative_guidance="סגנון נקי",
+    )
+    gateway = FakeGatewayGenerationRetryCreateAdInterrupt()
+    generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-retry-feedback-twice.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=gateway,
+        ad_generation_service=generation,
+    )
+
+    first = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-retry-feedback-twice-1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "create ad for ketchup 9.90"}},
+        )
+    )
+    assert first.deterministic_action == "generation_completed"
+    assert generation.calls == 2
+
+    second = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-retry-feedback-twice-2",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {"button_reply": {"id": BUTTON_SELECT_VARIANT_A}},
+            },
+        )
+    )
+    assert second.deterministic_action == "variant_selected"
+
+    third = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-retry-feedback-twice-3",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "make the bottle centered"}},
+        )
+    )
+    assert third.deterministic_action == "generation_completed"
+    assert generation.calls == 4
+
+    fourth = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-retry-feedback-twice-4",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "add more contrast"}},
+        )
+    )
+    assert fourth.deterministic_action == "generation_completed"
+    assert generation.calls == 6
+    assert generation.wait_calls == 6
+
+    async with session_scope(session_factory) as session:
+        drafts = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .all()
+        )
+        assert len(drafts) == 1
+
+        new_draft_events = (
+            await session.execute(
+                select(AuditEvent).where(
+                    AuditEvent.operator_phone == phone,
+                    AuditEvent.action == "draft_created_for_new_ad",
+                )
+            )
+        ).scalars()
+        assert len(list(new_draft_events)) == 0
+
+
 async def test_pipeline_missing_info_price_answer_does_not_start_new_create_flow(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -2081,6 +2448,8 @@ async def test_pipeline_missing_info_price_answer_does_not_start_new_create_flow
     assert second.deterministic_action == "variant_selected"
     assert second.reply_text is not None
     assert "what exact price should i display in the ad?" in second.reply_text.lower()
+    assert "selected" not in second.reply_text.lower()
+    assert second.publish_buttons_prompt is None
     assert generation.calls == 2
 
     third = await processor.process(
@@ -2120,6 +2489,69 @@ async def test_pipeline_missing_info_price_answer_does_not_start_new_create_flow
             )
         ).scalars()
         assert len(list(stale_draft_events)) == 0
+
+
+async def test_missing_price_shows_publish_only_after_price_answer(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000756"
+    await _seed_operator(
+        session_factory,
+        phone,
+        language="he",
+        store_type="סופרמרקט",
+        creative_guidance="סגנון נקי",
+    )
+    gateway = FakeGatewayPriceFollowupInterruptProne()
+    generation = FakeGenerationService(
+        poll_result=GenerationPollResult(
+            status=NanoBananaJobStatus.COMPLETED,
+            output_image_url="https://storage.googleapis.com/media/preview-price-publish-timing.png",
+        )
+    )
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=gateway,
+        ad_generation_service=generation,
+    )
+
+    first = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-price-publish-timing-1",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "create ad for cottage"}},
+        )
+    )
+    assert first.deterministic_action == "generation_completed"
+    assert generation.calls == 2
+
+    second = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-price-publish-timing-2",
+            operator_phone=phone,
+            raw_message={
+                "type": "interactive",
+                "interactive": {"button_reply": {"id": BUTTON_SELECT_VARIANT_A}},
+            },
+        )
+    )
+    assert second.deterministic_action == "variant_selected"
+    assert second.reply_text is not None
+    assert "מה המחיר המדויק" in second.reply_text
+    assert second.publish_buttons_prompt is None
+    assert generation.calls == 2
+
+    third = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase7-price-publish-timing-3",
+            operator_phone=phone,
+            raw_message={"type": "text", "text": {"body": "7.90"}},
+        )
+    )
+    assert third.reply_text is not None
+    assert "לפרס" in third.reply_text
+    assert third.publish_buttons_prompt is not None
+    assert generation.calls == 2
 
 
 async def test_pipeline_brand_conflict_uses_operator_brand_and_logs_audit(
