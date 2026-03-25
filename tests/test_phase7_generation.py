@@ -173,9 +173,7 @@ class FakeGatewayNoPricePlannerMustNotRun(FakeGatewayNoPrice):
         questions_asked_so_far: int,
         missing_mandatory_fields: list[str],
     ) -> creative_brief_planner.CreativeBriefPlannerOutput:
-        raise AssertionError(
-            "plan_creative_brief should not run when mandatory fields are missing"
-        )
+        raise AssertionError("plan_creative_brief should not run when mandatory fields are missing")
 
 
 class FakeGatewayPriceFollowupInterruptProne(FakeGateway):
@@ -746,9 +744,7 @@ def test_build_generation_prompt_includes_discovered_product_photo_url() -> None
     )
 
     assert "Product Photo URL: https://assets.example/operator-photo.jpg." in prompt
-    assert (
-        "Discovered Product Photo URL: https://assets.example/discovered-photo.jpg." in prompt
-    )
+    assert "Discovered Product Photo URL: https://assets.example/discovered-photo.jpg." in prompt
 
 
 async def test_nano_banana_service_submits_expected_payload() -> None:

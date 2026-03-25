@@ -472,9 +472,7 @@ def _required_before_generation_keys(*, request_type: AdRequestType) -> tuple[st
         REQUEST_TYPE_QUESTION_RULES[AdRequestType.UNSET],
     )
     return tuple(
-        key
-        for key in rules.required_before_generation
-        if key in _ALLOWED_MANDATORY_QUESTION_KEYS
+        key for key in rules.required_before_generation if key in _ALLOWED_MANDATORY_QUESTION_KEYS
     )
 
 
