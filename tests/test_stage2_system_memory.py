@@ -98,6 +98,8 @@ class SequencedGateway:
         self,
         *,
         context: creative_brief_planner.CreativeBriefPlannerContext,
+        questions_asked_so_far: int,
+        missing_mandatory_fields: list[str],
     ) -> creative_brief_planner.CreativeBriefPlannerOutput:
         return creative_brief_planner.CreativeBriefPlannerOutput(
             decision=creative_brief_planner.CreativeBriefDecision.BRIEF_READY,
