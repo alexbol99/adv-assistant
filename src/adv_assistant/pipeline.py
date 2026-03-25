@@ -760,7 +760,10 @@ class InboundTaskProcessor:
                                 if next_q is not None:
                                     pending_question_type = next_q.pending_question_type
                                     pending_question_context = next_q.pending_question_context
-                                    if next_q.pending_question_type == PendingQuestionType.MISSING_INFO:
+                                    if (
+                                        next_q.pending_question_type
+                                        == PendingQuestionType.MISSING_INFO
+                                    ):
                                         # Keep missing-info clarifications separate. For missing
                                         # price specifically, defer publish actions until the
                                         # operator provides the price.
@@ -1264,7 +1267,8 @@ class InboundTaskProcessor:
                                     )
                                     if (
                                         pending_question_type == PendingQuestionType.MISSING_INFO
-                                        and pending_question_key == question_policy.QUESTION_KEY_PRICE
+                                        and pending_question_key
+                                        == question_policy.QUESTION_KEY_PRICE
                                         and next_question is not None
                                         and next_question.pending_question_type
                                         == PendingQuestionType.GENERATION_RETRY
@@ -1329,7 +1333,9 @@ class InboundTaskProcessor:
                         # Free-text edits after preview generation should stay on the
                         # current draft unless the operator explicitly asks for a new ad.
                         followup_regen_requested = True
-                        classification = IntentClassification(intent=Intent.REGENERATE_WITH_REFERENCE)
+                        classification = IntentClassification(
+                            intent=Intent.REGENERATE_WITH_REFERENCE
+                        )
 
                     intent_value = classification.intent.value
 
