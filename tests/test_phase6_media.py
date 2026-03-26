@@ -6,8 +6,18 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant.db.base import Base
+from adv_assistant.db.enums import (
+    AdDraftStatus,
+    AdRequestType,
+    ClassificationStatus,
+    PendingQuestionType,
+)
 from adv_assistant.db.models import AdDraft, AuditEvent, ConversationSession, Operator
-from adv_assistant.db.repositories import OperatorRepository
+from adv_assistant.db.repositories import (
+    AdDraftRepository,
+    ConversationSessionRepository,
+    OperatorRepository,
+)
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
 from adv_assistant.enrichment import EnrichedProduct
 from adv_assistant.llm_gateway import (
@@ -336,9 +346,13 @@ async def test_pipeline_processes_image_message_and_updates_draft(
     )
 
     assert result.status == "processed"
-    assert result.deterministic_action == "operator_photo_ingest"
+    assert result.deterministic_action == "product_confirmation_requested"
+    assert result.generated_image_url == (
+        "https://storage.googleapis.com/test-media/operator-photos/p1.jpg"
+    )
     assert result.reply_text is not None
-    assert "7290004127326" in result.reply_text
+    assert "זה המוצר שהתכוונת אליו" in result.reply_text
+    assert result.action_buttons is not None
 
     async with session_scope(session_factory) as session:
         session_obj = (
@@ -351,6 +365,11 @@ async def test_pipeline_processes_image_message_and_updates_draft(
         assert draft.photo_url == "https://storage.googleapis.com/test-media/operator-photos/p1.jpg"
         assert draft.ean == "7290004127326"
         assert draft.product_name == "קוטג תנובה"
+        assert draft.request_type == AdRequestType.SINGLE_PRODUCT
+        assert draft.classification_status == ClassificationStatus.RESOLVED
+        assert draft.is_classification_resolved is True
+        assert draft.awaiting_product_confirmation is True
+        assert session_obj.pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION
 
         audit_rows = (
             await session.execute(
@@ -358,6 +377,80 @@ async def test_pipeline_processes_image_message_and_updates_draft(
             )
         ).scalars()
         assert len(list(audit_rows)) == 1
+
+
+async def test_pipeline_image_message_starts_confirmation_when_existing_draft_has_no_photo(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000611"
+    await _seed_operator(session_factory, phone)
+
+    async with session_scope(session_factory) as session:
+        draft_repo = AdDraftRepository(session)
+        session_repo = ConversationSessionRepository(session)
+        draft = await draft_repo.create(
+            operator_phone=phone,
+            status=AdDraftStatus.DRAFT,
+            currency="ILS",
+            request_type=AdRequestType.SINGLE_PRODUCT,
+            classification_status=ClassificationStatus.RESOLVED,
+            is_classification_resolved=True,
+            awaiting_product_confirmation=False,
+            product_name="מוצר קודם",
+            photo_url=None,
+            rendered_image_url=None,
+            preview_reference_url=None,
+        )
+        await session_repo.create_or_update(
+            operator_phone=phone,
+            history=[],
+            current_draft_id=draft.id,
+            pending_question_type=PendingQuestionType.NONE,
+            pending_question_context={},
+        )
+
+    processor = InboundTaskProcessor(
+        session_factory,
+        operator_photo_ingestor=StaticPhotoIngestor(
+            IngestedOperatorPhoto(
+                public_url="https://storage.googleapis.com/test-media/operator-photos/p2.jpg",
+                object_name="operator-photos/p2.jpg",
+                content_type="image/jpeg",
+                content=b"jpeg-bytes",
+            )
+        ),
+        enrichment_service=StaticEnrichmentService(decoded_ean=None, enriched=None),
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-phase6-image-2",
+            operator_phone=phone,
+            raw_message={"type": "image", "image": {"id": "meta-media-2"}},
+        )
+    )
+
+    assert result.status == "processed"
+    assert result.deterministic_action == "product_confirmation_requested"
+    assert result.generated_image_url == (
+        "https://storage.googleapis.com/test-media/operator-photos/p2.jpg"
+    )
+    assert result.action_buttons is not None
+
+    async with session_scope(session_factory) as session:
+        session_obj = (
+            await session.execute(
+                select(ConversationSession).where(ConversationSession.operator_phone == phone)
+            )
+        ).scalar_one()
+        draft = await session.get(AdDraft, session_obj.current_draft_id)
+        assert draft is not None
+        assert draft.request_type == AdRequestType.SINGLE_PRODUCT
+        assert draft.classification_status == ClassificationStatus.RESOLVED
+        assert draft.is_classification_resolved is True
+        assert draft.awaiting_product_confirmation is True
+        assert draft.photo_url == "https://storage.googleapis.com/test-media/operator-photos/p2.jpg"
+        assert session_obj.pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION
 
 
 async def test_pipeline_image_ingest_failure_is_user_visible(
@@ -382,6 +475,8 @@ async def test_pipeline_image_ingest_failure_is_user_visible(
     assert result.status == "processed"
     assert result.reply_text is not None
     assert "could not process your photo" in result.reply_text.lower()
+    assert result.generated_image_url is None
+    assert result.action_buttons is None
 
 
 async def test_pipeline_set_logo_routes_next_image_to_operator_logo(

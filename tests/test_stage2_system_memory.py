@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from adv_assistant import creative_brief_planner
@@ -16,9 +17,16 @@ from adv_assistant.ad_generation import (
     build_generation_prompt,
 )
 from adv_assistant.db.base import Base
-from adv_assistant.db.repositories import ConversationSessionRepository, OperatorRepository
+from adv_assistant.db.enums import AdDraftStatus
+from adv_assistant.db.models import AdDraft
+from adv_assistant.db.repositories import (
+    AdDraftRepository,
+    ConversationSessionRepository,
+    OperatorRepository,
+)
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
 from adv_assistant.llm_gateway import (
+    BUTTON_CANCEL_PUBLISH,
     ExtractedAdFields,
     ExtractedBrandingFields,
     ExtractedProductQuery,
@@ -377,19 +385,17 @@ async def test_generation_adds_followup_when_system_memory_is_missing(
     assert result.publish_buttons_prompt is None  # deferred until after variant selection
 
 
-async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmation(
+async def test_variant_selection_shows_publish_and_feedback_regenerates_current_draft(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     phone = "+972500000714"
     await _seed_operator(session_factory, phone)
 
     gateway = SequencedGateway(
-        intents=[Intent.CREATE_AD, Intent.UNKNOWN, Intent.UNKNOWN],
+        intents=[Intent.CREATE_AD, Intent.CREATE_AD],
         ad_fields=[
             ExtractedAdFields(product_name="קולה", price=Decimal("6.00"), currency="ILS"),
-            ExtractedAdFields(price=Decimal("7.90"), currency="ILS"),
         ],
-        branding_fields=[ExtractedBrandingFields()],
     )
     generation = FakeGenerationService()
     processor = InboundTaskProcessor(
@@ -409,7 +415,7 @@ async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmat
     assert first.action_buttons is not None  # variant selection buttons shown
     assert len(generation.submitted_drafts) == 2  # two variant slots per generation
 
-    # Select variant A to proceed to follow-up questions.
+    # Select variant A and move directly to publish buttons.
     variant_select = await processor.process(
         InboundTaskPayload(
             wamid="wamid-stage2-seq-1b",
@@ -421,51 +427,24 @@ async def test_followup_questions_are_asked_one_by_one_then_regenerate_confirmat
         )
     )
     assert variant_select.reply_text is not None
-    assert "מה סוג העסק שלך" in variant_select.reply_text
+    assert "גרסה A נבחרה" in variant_select.reply_text
     assert variant_select.publish_buttons_prompt is not None
+    assert "תרצה לפרסם את הגרסא שבחרת" in variant_select.publish_buttons_prompt
     assert len(generation.submitted_drafts) == 2
 
+    # Free-text feedback should regenerate the same draft.
     second = await processor.process(
         InboundTaskPayload(
             wamid="wamid-stage2-seq-2",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "סופרמרקט שכונתי"}},
+            raw_message={"type": "text", "text": {"body": "תגדיל את הלוגו ותבליט את המחיר"}},
         )
     )
     assert second.reply_text is not None
-    assert "הנחיות כלליות לסגנון המודעות" in second.reply_text
-    assert len(generation.submitted_drafts) == 2  # no new generation
-
-    third = await processor.process(
-        InboundTaskPayload(
-            wamid="wamid-stage2-seq-3",
-            operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "סגנון נקי עם צבעים כחולים"}},
-        )
-    )
-    assert third.reply_text is not None
-    assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in third.reply_text
-    assert len(generation.submitted_drafts) == 2  # still no new generation
-
-    fourth = await processor.process(
-        InboundTaskPayload(
-            wamid="wamid-stage2-seq-4",
-            operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "כן מחיר 7.90"}},
-        )
-    )
-    assert fourth.reply_text is not None
-    assert "התצוגה המקדימה מוכנה" in fourth.reply_text
-    assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" not in fourth.reply_text
+    assert "התצוגה המקדימה מוכנה" in second.reply_text
     assert len(generation.submitted_drafts) == 4  # 2 generations × 2 variant slots
-    assert generation.submitted_drafts[2].price == Decimal("7.90")
 
     async with session_scope(session_factory) as session:
-        operator = await OperatorRepository(session).get_by_phone(phone)
-        assert operator is not None
-        assert operator.store_type == "סופרמרקט שכונתי"
-        assert operator.creative_guidance == "סגנון נקי עם צבעים כחולים"
-
         session_obj = await ConversationSessionRepository(session).get_by_operator_phone(phone)
         assert session_obj is not None
         assert session_obj.pending_followup_question is None
@@ -514,7 +493,7 @@ async def test_followup_interrupt_create_ad_skips_pending_question_and_generates
     assert generation.submitted_drafts[2].product_name == "חלב"
 
 
-async def test_regenerate_confirmation_unclear_answer_keeps_pending_state(
+async def test_variant_selection_uses_new_publish_question_text(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     phone = "+972500000716"
@@ -558,23 +537,14 @@ async def test_regenerate_confirmation_unclear_answer_keeps_pending_state(
         )
     )
     assert variant_select.reply_text is not None
-    assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in variant_select.reply_text
-
-    second = await processor.process(
-        InboundTaskPayload(
-            wamid="wamid-stage2-unclear-2",
-            operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "אולי"}},
-        )
-    )
-    assert second.reply_text is not None
-    assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in second.reply_text
-    assert len(generation.submitted_drafts) == 2  # two variant slots per generation
+    assert "גרסה A נבחרה" in variant_select.reply_text
+    assert variant_select.publish_buttons_prompt is not None
+    assert "תרצה לפרסם את הגרסא שבחרת" in variant_select.publish_buttons_prompt
 
     async with session_scope(session_factory) as session:
         session_obj = await ConversationSessionRepository(session).get_by_operator_phone(phone)
         assert session_obj is not None
-        assert session_obj.pending_followup_question == "regenerate_confirmation"
+        assert session_obj.pending_followup_question is None
 
 
 async def test_publish_buttons_sent_even_when_followup_pending(
@@ -608,7 +578,7 @@ async def test_publish_buttons_sent_even_when_followup_pending(
     assert result.action_buttons is not None
 
 
-async def test_regenerate_confirmation_decline_returns_publish_buttons(
+async def test_cancel_publish_resets_current_draft(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     phone = "+972500000719"
@@ -646,7 +616,7 @@ async def test_regenerate_confirmation_decline_returns_publish_buttons(
     assert first.reply_text is not None
     assert first.action_buttons is not None  # variant selection buttons shown
 
-    # Select variant A to proceed to regenerate confirmation.
+    # Select variant A to expose publish buttons.
     variant_select = await processor.process(
         InboundTaskPayload(
             wamid="wamid-stage2-decline-1b",
@@ -658,19 +628,39 @@ async def test_regenerate_confirmation_decline_returns_publish_buttons(
         )
     )
     assert variant_select.reply_text is not None
-    assert "רוצה שאפעיל עכשיו יצירת מודעה נוספת" in variant_select.reply_text
+    assert "גרסה A נבחרה" in variant_select.reply_text
     assert variant_select.publish_buttons_prompt is not None
 
     second = await processor.process(
         InboundTaskPayload(
             wamid="wamid-stage2-decline-2",
             operator_phone=phone,
-            raw_message={"type": "text", "text": {"body": "לא"}},
+            raw_message={
+                "type": "interactive",
+                "interactive": {"button_reply": {"id": BUTTON_CANCEL_PUBLISH}},
+            },
         )
     )
+    assert second.deterministic_action == "cancel_publish"
     assert second.reply_text is not None
-    assert "כשתרצה ליצור מודעה נוספת" in second.reply_text
-    assert second.publish_buttons_prompt is not None
+    assert "המודעה לא פורסמה" in second.reply_text
+
+    async with session_scope(session_factory) as session:
+        drafts = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .all()
+        )
+        assert len(drafts) == 2
+
+        session_obj = await ConversationSessionRepository(session).get_by_operator_phone(phone)
+        assert session_obj is not None
+        assert session_obj.current_draft_id is not None
+        active_draft = await AdDraftRepository(session).get_by_id(session_obj.current_draft_id)
+        assert active_draft is not None
+        assert active_draft.status == AdDraftStatus.DRAFT
+        assert active_draft.product_name is None
+        assert active_draft.rendered_image_url is None
 
 
 async def test_clear_request_removes_operator_fields_and_clears_pending_followup(

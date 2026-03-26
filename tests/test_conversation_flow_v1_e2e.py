@@ -4,7 +4,7 @@ Covers:
 - Full flow: create ad → generate → select variant → publish
 - Already-enough-info → direct generation path
 - Interrupt: new CREATE_AD during variant selection
-- Idempotent publish re-press
+- Publish action resets the active draft
 """
 
 from collections.abc import AsyncIterator
@@ -25,12 +25,19 @@ from adv_assistant.ad_generation import (
 )
 from adv_assistant.cms_cityscreen import CMSPublishResult
 from adv_assistant.db.base import Base
-from adv_assistant.db.enums import AdDraftStatus
-from adv_assistant.db.models import AdDraft, PublishedAd
+from adv_assistant.db.enums import (
+    AdDraftStatus,
+    AdRequestType,
+    ClassificationStatus,
+    PendingQuestionType,
+)
+from adv_assistant.db.models import AdDraft, ConversationSession, PublishedAd
 from adv_assistant.db.repositories import OperatorRepository
 from adv_assistant.db.session import create_engine, create_session_factory, session_scope
 from adv_assistant.llm_gateway import (
+    BUTTON_CONFIRM_PRODUCT_SELECTION,
     BUTTON_CONFIRM_PUBLISH,
+    BUTTON_REJECT_PRODUCT_SELECTION,
     BUTTON_SELECT_VARIANT_A,
     BUTTON_SELECT_VARIANT_B,
     ExtractedAdFields,
@@ -40,6 +47,7 @@ from adv_assistant.llm_gateway import (
     IntentClassification,
     ReplyGeneration,
 )
+from adv_assistant.media_ingest import IngestedOperatorPhoto
 from adv_assistant.pipeline import InboundTaskProcessor
 from adv_assistant.tasks_queue import InboundTaskPayload
 
@@ -214,6 +222,27 @@ class FakeCMSPublisher:
         return None
 
 
+class StaticPhotoIngestor:
+    async def ingest_whatsapp_image(self, *, media_id: str) -> IngestedOperatorPhoto:
+        return IngestedOperatorPhoto(
+            public_url="https://storage.googleapis.com/media/image-first-e2e.jpg",
+            object_name="operator-photos/image-first-e2e.jpg",
+            content_type="image/jpeg",
+            content=b"jpeg-bytes",
+        )
+
+    async def ingest_external_image_url(self, *, image_url: str) -> IngestedOperatorPhoto:
+        return IngestedOperatorPhoto(
+            public_url="https://storage.googleapis.com/media/image-first-e2e-rehost.jpg",
+            object_name="operator-photos/image-first-e2e-rehost.jpg",
+            content_type="image/jpeg",
+            content=b"jpeg-bytes",
+        )
+
+    async def close(self) -> None:
+        return None
+
+
 # ── Fixtures ───────────────────────────────────────────────────────────
 
 
@@ -330,24 +359,45 @@ async def test_full_v1_flow_create_generate_select_publish(
     assert publish_result.deterministic_action == "confirm_publish"
     assert cms.calls == 1
 
-    # Verify DB state.
+    # Verify DB state: published draft is kept and a fresh draft becomes active.
     async with session_scope(session_factory) as session:
-        draft = (
+        drafts = (
             (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
             .scalars()
-            .first()
+            .all()
         )
-        assert draft is not None
-        assert draft.status == AdDraftStatus.PUBLISHED
-        assert draft.selected_variant_id is not None
-        assert draft.selected_round_id is not None
+        assert len(drafts) == 2
+        published_draft = next((d for d in drafts if d.status == AdDraftStatus.PUBLISHED), None)
+        assert published_draft is not None
+        assert published_draft.selected_variant_id is not None
+        assert published_draft.selected_round_id is not None
 
         published = (
-            (await session.execute(select(PublishedAd).where(PublishedAd.ad_draft_id == draft.id)))
+            (
+                await session.execute(
+                    select(PublishedAd).where(PublishedAd.ad_draft_id == published_draft.id)
+                )
+            )
             .scalars()
             .first()
         )
         assert published is not None
+
+        session_obj = (
+            (
+                await session.execute(
+                    select(ConversationSession).where(ConversationSession.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert session_obj is not None
+        assert session_obj.current_draft_id is not None
+        active_draft = await session.get(AdDraft, session_obj.current_draft_id)
+        assert active_draft is not None
+        assert active_draft.status == AdDraftStatus.DRAFT
+        assert active_draft.product_name is None
 
 
 async def test_already_enough_info_generates_directly(
@@ -391,6 +441,61 @@ async def test_already_enough_info_generates_directly(
     assert len(result.variant_image_urls) == 2
     assert result.action_buttons is not None  # variant selection
     assert len(generation.submitted_drafts) == 2  # 2 variant slots
+
+
+async def test_image_first_message_enters_product_confirmation_flow(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    phone = "+972500000906"
+    await _seed_operator(session_factory, phone)
+
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=SequencedGateway(intents=[]),
+        operator_photo_ingestor=StaticPhotoIngestor(),
+    )
+
+    result = await processor.process(
+        InboundTaskPayload(
+            wamid="wamid-e2e-image-first",
+            operator_phone=phone,
+            raw_message={"type": "image", "image": {"id": "media-image-first"}},
+        )
+    )
+
+    assert result.deterministic_action == "product_confirmation_requested"
+    assert result.generated_image_url == "https://storage.googleapis.com/media/image-first-e2e.jpg"
+    assert result.publish_buttons_prompt is None
+    assert result.action_buttons_prompt is not None
+    assert result.action_buttons == [
+        (BUTTON_CONFIRM_PRODUCT_SELECTION, "כן, זה המוצר"),
+        (BUTTON_REJECT_PRODUCT_SELECTION, "לא, מוצר אחר"),
+    ]
+
+    async with session_scope(session_factory) as session:
+        draft = (
+            (await session.execute(select(AdDraft).where(AdDraft.operator_phone == phone)))
+            .scalars()
+            .first()
+        )
+        assert draft is not None
+        assert draft.photo_url == "https://storage.googleapis.com/media/image-first-e2e.jpg"
+        assert draft.request_type == AdRequestType.SINGLE_PRODUCT
+        assert draft.classification_status == ClassificationStatus.RESOLVED
+        assert draft.is_classification_resolved is True
+        assert draft.awaiting_product_confirmation is True
+
+        session_obj = (
+            (
+                await session.execute(
+                    select(ConversationSession).where(ConversationSession.operator_phone == phone)
+                )
+            )
+            .scalars()
+            .first()
+        )
+        assert session_obj is not None
+        assert session_obj.pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION
 
 
 async def test_select_variant_b_sets_correct_variant(

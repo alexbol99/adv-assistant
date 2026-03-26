@@ -16,6 +16,7 @@ from adv_assistant.llm_gateway import (
     IntentClassification,
     ReplyGeneration,
 )
+from adv_assistant.media_ingest import IngestedOperatorPhoto
 from adv_assistant.pipeline import InboundTaskProcessor
 from adv_assistant.product_resolution_models import ProductResolutionResult
 from adv_assistant.tasks_queue import InboundTaskPayload
@@ -100,6 +101,27 @@ class ProductResolutionProbeService:
             product_query=message_text,
             raw_user_text=message_text,
             clarification_question="מה שם המוצר המדויק?",
+        )
+
+    async def close(self) -> None:
+        return None
+
+
+class StaticPhotoIngestor:
+    async def ingest_whatsapp_image(self, *, media_id: str) -> IngestedOperatorPhoto:
+        return IngestedOperatorPhoto(
+            public_url="https://storage.googleapis.com/test-media/operator-photos/t5.jpg",
+            object_name="operator-photos/t5.jpg",
+            content_type="image/jpeg",
+            content=b"jpeg-bytes",
+        )
+
+    async def ingest_external_image_url(self, *, image_url: str) -> IngestedOperatorPhoto:
+        return IngestedOperatorPhoto(
+            public_url="https://storage.googleapis.com/test-media/operator-photos/t5-rehost.jpg",
+            object_name="operator-photos/t5-rehost.jpg",
+            content_type="image/jpeg",
+            content=b"jpeg-bytes",
         )
 
     async def close(self) -> None:
@@ -206,7 +228,7 @@ async def test_classification_followup_resolves_single_product_and_clears_pendin
         assert draft.product_name == "Milk"
 
 
-async def test_non_text_reply_during_classification_is_reprompted_without_photo_ingest(
+async def test_image_reply_during_classification_enters_image_first_product_confirmation(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     phone = "+972500001002"
@@ -215,7 +237,11 @@ async def test_non_text_reply_during_classification_is_reprompted_without_photo_
         intents=[Intent.CREATE_AD],
         ad_fields=[ExtractedAdFields()],
     )
-    processor = InboundTaskProcessor(session_factory, llm_gateway=gateway)
+    processor = InboundTaskProcessor(
+        session_factory,
+        llm_gateway=gateway,
+        operator_photo_ingestor=StaticPhotoIngestor(),
+    )
 
     await processor.process(
         InboundTaskPayload(
@@ -234,16 +260,24 @@ async def test_non_text_reply_during_classification_is_reprompted_without_photo_
     )
 
     assert result.reply_text is not None
-    assert "מוצר אחד" in result.reply_text
-    assert result.deterministic_action == "classification_reprompt"
+    assert "זה המוצר שהתכוונת אליו" in result.reply_text
+    assert result.deterministic_action == "product_confirmation_requested"
+    assert result.generated_image_url == (
+        "https://storage.googleapis.com/test-media/operator-photos/t5.jpg"
+    )
+    assert result.action_buttons is not None
 
     async with session_scope(session_factory) as session:
         session_obj = await ConversationSessionRepository(session).get_by_operator_phone(phone)
         assert session_obj is not None
-        assert session_obj.pending_question_type == PendingQuestionType.CLASSIFICATION
+        assert session_obj.pending_question_type == PendingQuestionType.PRODUCT_CONFIRMATION
         draft = session_obj.current_draft
         assert draft is not None
-        assert draft.photo_url is None
+        assert draft.photo_url == "https://storage.googleapis.com/test-media/operator-photos/t5.jpg"
+        assert draft.request_type == AdRequestType.SINGLE_PRODUCT
+        assert draft.classification_status == ClassificationStatus.RESOLVED
+        assert draft.is_classification_resolved is True
+        assert draft.awaiting_product_confirmation is True
 
 
 async def test_classification_followup_preserves_original_product_request_for_resolution(
