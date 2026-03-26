@@ -224,6 +224,18 @@ class _CreativeBriefPlannerTurnResult:
     validation_fallback: bool
 
 
+@dataclass(slots=True)
+class _ProductConfirmationPromptResult:
+    draft: AdDraft
+    reply_text: str
+    generated_image_url: str | None
+    action_buttons_prompt: str
+    action_buttons: list[tuple[str, str]]
+    pending_question_type: PendingQuestionType
+    pending_question_context: dict[str, Any]
+    deterministic_action: str
+
+
 def _operator_needs_onboarding(operator: Operator) -> bool:
     """Return True if the operator has not completed first-time onboarding."""
     return operator.business_name is None or operator.logo_url is None
@@ -758,47 +770,10 @@ class InboundTaskProcessor:
                                 current_draft = updated_draft
                                 deterministic_action = "variant_selected"
                                 base_reply = _variant_selected_reply(operator.language, slot_label)
-                                # Check for follow-up questions after selection.
-                                next_q = self._select_next_question(
-                                    current_draft=current_draft,
-                                    operator=operator,
-                                    after_preview_generation=True,
-                                    allow_regenerate_confirmation=True,
-                                    current_pending_question_context=pending_question_context,
-                                )
-                                if next_q is not None:
-                                    pending_question_type = next_q.pending_question_type
-                                    pending_question_context = next_q.pending_question_context
-                                    if (
-                                        next_q.pending_question_type
-                                        == PendingQuestionType.MISSING_INFO
-                                    ):
-                                        # Keep missing-info clarifications separate. For missing
-                                        # price specifically, defer publish actions until the
-                                        # operator provides the price.
-                                        reply_text = next_q.prompt_text
-                                        next_question_key = question_policy.pending_question_key(
-                                            pending_question_type=next_q.pending_question_type,
-                                            pending_question_context=next_q.pending_question_context,
-                                        )
-                                        if next_question_key == question_policy.QUESTION_KEY_PRICE:
-                                            publish_buttons_prompt = None
-                                        else:
-                                            publish_buttons_prompt = _publish_buttons_prompt(
-                                                operator.language
-                                            )
-                                    else:
-                                        reply_text = f"{base_reply}\n\n{next_q.prompt_text}"
-                                        publish_buttons_prompt = _publish_buttons_prompt(
-                                            operator.language
-                                        )
-                                else:
-                                    pending_question_type = PendingQuestionType.NONE
-                                    pending_question_context = {}
-                                    reply_text = base_reply
-                                    publish_buttons_prompt = _publish_buttons_prompt(
-                                        operator.language
-                                    )
+                                pending_question_type = PendingQuestionType.NONE
+                                pending_question_context = {}
+                                reply_text = base_reply
+                                publish_buttons_prompt = _publish_buttons_prompt(operator.language)
                                 await audit_repo.log(
                                     actor="system",
                                     action="variant_selected",
@@ -824,7 +799,11 @@ class InboundTaskProcessor:
                 elif button_payload_id == BUTTON_CONFIRM_PUBLISH:
                     deterministic_action = "confirm_publish"
                     intent_value = deterministic_action
-                    current_draft, reply_text = await self._confirm_publish_to_cms(
+                    (
+                        current_draft,
+                        reply_text,
+                        publish_resolved,
+                    ) = await self._confirm_publish_to_cms(
                         payload=payload,
                         draft_repo=draft_repo,
                         published_repo=published_repo,
@@ -833,6 +812,61 @@ class InboundTaskProcessor:
                         current_draft=current_draft,
                         language=operator.language,
                     )
+                    if publish_resolved:
+                        previous_draft_id = current_draft.id
+                        current_draft = await draft_repo.create(
+                            operator_phone=payload.operator_phone,
+                            status=AdDraftStatus.DRAFT,
+                            currency=operator.currency,
+                        )
+                        draft_created = True
+                        pending_question_type = PendingQuestionType.NONE
+                        pending_question_context = {}
+                        publish_buttons_prompt = None
+                        action_buttons_prompt = None
+                        action_buttons = None
+                        await audit_repo.log(
+                            actor="system",
+                            action="draft_reset_after_publish_decision",
+                            operator_phone=payload.operator_phone,
+                            metadata={
+                                "wamid": payload.wamid,
+                                "decision": "apply",
+                                "previous_draft_id": str(previous_draft_id),
+                                "new_draft_id": str(current_draft.id),
+                            },
+                        )
+                elif button_payload_id == BUTTON_CANCEL_PUBLISH:
+                    deterministic_action = "cancel_publish"
+                    intent_value = deterministic_action
+                    reply_text = _publish_canceled_reply(operator.language)
+                    if current_draft.rendered_image_url is not None or current_draft.status in {
+                        AdDraftStatus.PREVIEW_READY,
+                        AdDraftStatus.PUBLISHED,
+                    }:
+                        previous_draft_id = current_draft.id
+                        current_draft = await draft_repo.create(
+                            operator_phone=payload.operator_phone,
+                            status=AdDraftStatus.DRAFT,
+                            currency=operator.currency,
+                        )
+                        draft_created = True
+                        pending_question_type = PendingQuestionType.NONE
+                        pending_question_context = {}
+                        publish_buttons_prompt = None
+                        action_buttons_prompt = None
+                        action_buttons = None
+                        await audit_repo.log(
+                            actor="system",
+                            action="draft_reset_after_publish_decision",
+                            operator_phone=payload.operator_phone,
+                            metadata={
+                                "wamid": payload.wamid,
+                                "decision": "cancel",
+                                "previous_draft_id": str(previous_draft_id),
+                                "new_draft_id": str(current_draft.id),
+                            },
+                        )
                 else:
                     deterministic_action, reply_text = _resolve_button_action(button_payload_id)
                     intent_value = deterministic_action
@@ -850,11 +884,7 @@ class InboundTaskProcessor:
                         "wamid": payload.wamid,
                     }
                 )
-                if pending_question_type == PendingQuestionType.CLASSIFICATION:
-                    reply_text = _classification_prompt(operator.language)
-                    deterministic_action = "classification_reprompt"
-                    intent_value = last_user_intent_hint
-                elif pending_upload_type == _PENDING_UPLOAD_LOGO:
+                if pending_upload_type == _PENDING_UPLOAD_LOGO:
                     deterministic_action = "operator_logo_upload"
                     intent_value = deterministic_action
                     reply_text = await self._process_logo_upload(
@@ -865,8 +895,27 @@ class InboundTaskProcessor:
                         media_id=incoming_image_media_id,
                     )
                 else:
+                    can_start_fresh_image_flow = (
+                        pending_question_type == PendingQuestionType.NONE
+                        and current_draft.status == AdDraftStatus.DRAFT
+                        and not current_draft.awaiting_product_confirmation
+                        and current_draft.photo_url is None
+                        and current_draft.rendered_image_url is None
+                        and current_draft.preview_reference_url is None
+                    )
+                    is_image_first_path = (
+                        pending_question_type == PendingQuestionType.CLASSIFICATION
+                        or current_draft.request_type == AdRequestType.UNSET
+                        or can_start_fresh_image_flow
+                    )
                     deterministic_action = "operator_photo_ingest"
-                    intent_value = deterministic_action
+                    if is_image_first_path:
+                        intent_value = Intent.CREATE_AD.value
+                    else:
+                        intent_value = deterministic_action
+                    previous_pending_question_type = pending_question_type
+                    previous_pending_question_context = dict(pending_question_context)
+                    previous_photo_url = current_draft.photo_url
                     current_draft, reply_text = await self._process_operator_photo_message(
                         payload=payload,
                         draft_repo=draft_repo,
@@ -875,6 +924,53 @@ class InboundTaskProcessor:
                         language=operator.language,
                         media_id=incoming_image_media_id,
                     )
+                    photo_ingested = current_draft.photo_url is not None and (
+                        previous_photo_url is None or current_draft.photo_url != previous_photo_url
+                    )
+                    if is_image_first_path and photo_ingested:
+                        updated_draft = await draft_repo.update_for_operator_with_version(
+                            draft_id=current_draft.id,
+                            operator_phone=payload.operator_phone,
+                            expected_version=current_draft.version,
+                            request_type=AdRequestType.SINGLE_PRODUCT,
+                            classification_status=ClassificationStatus.RESOLVED,
+                            is_classification_resolved=True,
+                            awaiting_product_confirmation=True,
+                        )
+                        if updated_draft is None:
+                            reply_text = (
+                                "This draft was already changed. Please refresh and try again."
+                            )
+                            await audit_repo.log(
+                                actor="system",
+                                action="draft_stale_write_detected",
+                                operator_phone=payload.operator_phone,
+                                metadata={"wamid": payload.wamid},
+                            )
+                            pending_question_type = previous_pending_question_type
+                            pending_question_context = previous_pending_question_context
+                        else:
+                            current_draft = updated_draft
+                            confirmation_prompt = (
+                                await self._build_product_confirmation_requested_response(
+                                    payload=payload,
+                                    draft_repo=draft_repo,
+                                    audit_repo=audit_repo,
+                                    current_draft=current_draft,
+                                    language=operator.language,
+                                )
+                            )
+                            current_draft = confirmation_prompt.draft
+                            deterministic_action = confirmation_prompt.deterministic_action
+                            generated_image_url = confirmation_prompt.generated_image_url
+                            reply_text = confirmation_prompt.reply_text
+                            action_buttons_prompt = confirmation_prompt.action_buttons_prompt
+                            action_buttons = confirmation_prompt.action_buttons
+                            pending_question_type = confirmation_prompt.pending_question_type
+                            pending_question_context = confirmation_prompt.pending_question_context
+                    elif is_image_first_path:
+                        pending_question_type = previous_pending_question_type
+                        pending_question_context = previous_pending_question_context
                 # Upload intent is one-shot; consume it after the first image.
                 if pending_question_type != PendingQuestionType.CLASSIFICATION:
                     pending_upload_type = None
@@ -1164,12 +1260,12 @@ class InboundTaskProcessor:
                                 transition_status = question_policy.PendingResolutionStatus.RESOLVED
                                 pending_handled = True
                             elif yes_no is False:
-                                reply_text = _regenerate_again_declined_reply(operator.language)
+                                transition_status = question_policy.PendingResolutionStatus.RESOLVED
                                 if current_draft.rendered_image_url is not None:
+                                    reply_text = _publish_confirmation_prompt(operator.language)
                                     publish_buttons_prompt = _publish_buttons_prompt(
                                         operator.language
                                     )
-                                transition_status = question_policy.PendingResolutionStatus.RESOLVED
                                 pending_handled = True
                             else:
                                 classification = await self._llm_gateway.classify_intent(
@@ -1183,9 +1279,6 @@ class InboundTaskProcessor:
                                     and not _is_explicit_new_ad_interrupt(sanitized_text)
                                     and not _is_likely_create_ad_request(sanitized_text)
                                 ):
-                                    # In the "regenerate again?" follow-up, free-text feedback
-                                    # should continue the current draft instead of starting a
-                                    # brand-new ad flow.
                                     followup_regen_requested = True
                                     forced_intent = Intent.REGENERATE_WITH_REFERENCE
                                     transition_status = (
@@ -1200,9 +1293,14 @@ class InboundTaskProcessor:
                                     )
                                 else:
                                     transition_status = (
-                                        question_policy.PendingResolutionStatus.UNRESOLVED
+                                        question_policy.PendingResolutionStatus.RESOLVED
                                     )
                                     classification = IntentClassification(intent=Intent.UNKNOWN)
+                                    if current_draft.rendered_image_url is not None:
+                                        reply_text = _publish_confirmation_prompt(operator.language)
+                                        publish_buttons_prompt = _publish_buttons_prompt(
+                                            operator.language
+                                        )
                                 pending_handled = True
                         elif pending_question_type == PendingQuestionType.MISSING_INFO:
                             (
@@ -1269,25 +1367,10 @@ class InboundTaskProcessor:
                                     phase == question_policy.QUESTION_PHASE_PRE_GENERATION
                                 )
                                 if is_post_preview_phase:
-                                    next_question = self._select_next_question(
-                                        current_draft=current_draft,
-                                        operator=operator,
-                                        after_preview_generation=True,
-                                        allow_regenerate_confirmation=True,
-                                        current_pending_question_context=pending_question_context,
-                                    )
-                                    if (
-                                        pending_question_type == PendingQuestionType.MISSING_INFO
-                                        and pending_question_key
-                                        == question_policy.QUESTION_KEY_PRICE
-                                        and next_question is not None
-                                        and next_question.pending_question_type
-                                        == PendingQuestionType.GENERATION_RETRY
-                                    ):
-                                        # After a missing-price answer is resolved, surface
-                                        # publish confirmation directly.
-                                        next_question = None
-                                        forced_intent = Intent.PUBLISH_AD
+                                    # Post-preview followups now end with publish confirmation,
+                                    # without another "regenerate again?" question.
+                                    next_question = None
+                                    forced_intent = Intent.PUBLISH_AD
                                 elif is_pre_generation_phase:
                                     next_question = self._select_next_question(
                                         current_draft=current_draft,
@@ -1335,9 +1418,19 @@ class InboundTaskProcessor:
                     elif classification is None:
                         classification = IntentClassification(intent=Intent.UNKNOWN)
 
+                    has_selected_preview_context = (
+                        pending_question_type == PendingQuestionType.NONE
+                        and current_draft.selected_variant_id is not None
+                        and current_draft.rendered_image_url is not None
+                        and current_draft.status
+                        in {AdDraftStatus.PREVIEW_READY, AdDraftStatus.PUBLISHED}
+                    )
                     if (
-                        pending_question_type == PendingQuestionType.VARIANT_SELECTION
-                        and classification.intent == Intent.CREATE_AD
+                        classification.intent == Intent.CREATE_AD
+                        and (
+                            pending_question_type == PendingQuestionType.VARIANT_SELECTION
+                            or has_selected_preview_context
+                        )
                         and not _is_explicit_new_ad_interrupt(sanitized_text)
                         and not _is_likely_create_ad_request(sanitized_text)
                     ):
@@ -1504,45 +1597,6 @@ class InboundTaskProcessor:
                                 message_text=classification_context_text,
                                 reply_text=reply_text,
                             )
-                            if followup_regen_requested:
-                                branding = await self._llm_gateway.extract_branding_fields(
-                                    message_text=sanitized_text,
-                                    language=operator.language,
-                                )
-                                llm_used = self._llm_gateway.uses_external_llm or llm_used
-                                branding_update_fields = branding.to_update_kwargs()
-                                if branding_update_fields:
-                                    await operator_repo.update_branding(
-                                        payload.operator_phone,
-                                        **branding_update_fields,
-                                    )
-                                    if "language" in branding_update_fields:
-                                        operator.language = str(branding_update_fields["language"])
-                                        session_language_override = operator.language
-                                    if "store_type" in branding_update_fields:
-                                        operator.store_type = branding_update_fields["store_type"]
-                                    if "creative_guidance" in branding_update_fields:
-                                        operator.creative_guidance = branding_update_fields[
-                                            "creative_guidance"
-                                        ]
-                                    if "business_name" in branding_update_fields:
-                                        operator.business_name = branding_update_fields[
-                                            "business_name"
-                                        ]
-                                    if "brand_colors" in branding_update_fields:
-                                        operator.brand_colors = branding_update_fields[
-                                            "brand_colors"
-                                        ]
-                                    await audit_repo.log(
-                                        actor="system",
-                                        action="operator_branding_updated",
-                                        operator_phone=payload.operator_phone,
-                                        metadata={
-                                            "wamid": payload.wamid,
-                                            "updated_fields": sorted(branding_update_fields.keys()),
-                                            "source": "followup_regenerate_confirmation",
-                                        },
-                                    )
                             current_draft, enrichment_notice = await self._enrich_current_draft(
                                 payload=payload,
                                 draft_repo=draft_repo,
@@ -1592,61 +1646,24 @@ class InboundTaskProcessor:
                                 and current_draft.awaiting_product_confirmation
                                 and current_draft.photo_url is not None
                             ):
-                                (
-                                    current_draft,
-                                    confirmation_image_url,
-                                ) = await self._prepare_product_confirmation_image(
-                                    payload=payload,
-                                    draft_repo=draft_repo,
-                                    audit_repo=audit_repo,
-                                    current_draft=current_draft,
-                                )
-                                deterministic_action = "product_confirmation_requested"
-                                generated_image_url = confirmation_image_url
-                                reply_text = _product_confirmation_caption(
-                                    language=operator.language,
-                                    product_name=current_draft.product_name,
-                                )
-                                if (
-                                    generated_image_url is None
-                                    and current_draft.photo_url is not None
-                                ):
-                                    reply_text = (
-                                        f"{reply_text}\n\n"
-                                        + _product_confirmation_image_link_fallback_reply(
-                                            language=operator.language,
-                                            image_url=current_draft.photo_url,
-                                        )
+                                confirmation_prompt = (
+                                    await self._build_product_confirmation_requested_response(
+                                        payload=payload,
+                                        draft_repo=draft_repo,
+                                        audit_repo=audit_repo,
+                                        current_draft=current_draft,
+                                        language=operator.language,
                                     )
-                                action_buttons_prompt = _product_confirmation_buttons_prompt(
-                                    operator.language
                                 )
-                                action_buttons = [
-                                    (
-                                        BUTTON_CONFIRM_PRODUCT_SELECTION,
-                                        _product_confirmation_accept_label(operator.language),
-                                    ),
-                                    (
-                                        BUTTON_REJECT_PRODUCT_SELECTION,
-                                        _product_confirmation_reject_label(operator.language),
-                                    ),
-                                ]
-                                pending_question_type = PendingQuestionType.PRODUCT_CONFIRMATION
-                                pending_question_context = {
-                                    "draft_id": str(current_draft.id),
-                                    "photo_url": current_draft.photo_url,
-                                    "product_name": current_draft.product_name,
-                                }
-                                await audit_repo.log(
-                                    actor="system",
-                                    action="product_confirmation_requested",
-                                    operator_phone=payload.operator_phone,
-                                    metadata={
-                                        "wamid": payload.wamid,
-                                        "draft_id": str(current_draft.id),
-                                        "photo_url": current_draft.photo_url,
-                                        "product_name": current_draft.product_name,
-                                    },
+                                current_draft = confirmation_prompt.draft
+                                deterministic_action = confirmation_prompt.deterministic_action
+                                generated_image_url = confirmation_prompt.generated_image_url
+                                reply_text = confirmation_prompt.reply_text
+                                action_buttons_prompt = confirmation_prompt.action_buttons_prompt
+                                action_buttons = confirmation_prompt.action_buttons
+                                pending_question_type = confirmation_prompt.pending_question_type
+                                pending_question_context = (
+                                    confirmation_prompt.pending_question_context
                                 )
                     elif classification.intent == Intent.UNKNOWN and detected_ean is not None:
                         current_draft, enrichment_notice = await self._enrich_current_draft(
@@ -2172,11 +2189,11 @@ class InboundTaskProcessor:
         operator: Operator,
         current_draft: AdDraft,
         language: str,
-    ) -> tuple[AdDraft, str]:
+    ) -> tuple[AdDraft, str, bool]:
         if current_draft.rendered_image_url is None:
             if language.lower() == "he":
-                return current_draft, "אין כרגע תמונת תצוגה מוכנה לפרסום."
-            return current_draft, "There is no generated preview image ready for publishing."
+                return current_draft, "אין כרגע תמונת תצוגה מוכנה לפרסום.", False
+            return current_draft, "There is no generated preview image ready for publishing.", False
 
         # Idempotency: skip CMS call if draft is already published.
         if current_draft.status == AdDraftStatus.PUBLISHED:
@@ -2193,8 +2210,8 @@ class InboundTaskProcessor:
                     },
                 )
                 if language.lower() == "he":
-                    return current_draft, "המודעה הזו כבר פורסמה."
-                return current_draft, "This ad has already been published."
+                    return current_draft, "המודעה הזו כבר פורסמה.", True
+                return current_draft, "This ad has already been published.", True
 
         campaign_id = _coerce_positive_int(operator.cms_campaign_id)
         playlist_id = _coerce_positive_int(operator.cms_playlist_id)
@@ -2210,12 +2227,12 @@ class InboundTaskProcessor:
                     "cms_playlist_id": operator.cms_playlist_id,
                 },
             )
-            return current_draft, _cms_not_connected_reply()
+            return current_draft, _cms_not_connected_reply(), False
 
         if not self._cms_publisher.enabled:
             if language.lower() == "he":
-                return current_draft, "הפרסום ל-CMS לא מוגדר כרגע במערכת."
-            return current_draft, "CMS publishing is not configured yet."
+                return current_draft, "הפרסום ל-CMS לא מוגדר כרגע במערכת.", False
+            return current_draft, "CMS publishing is not configured yet.", False
 
         title = current_draft.product_name or f"draft-{current_draft.id}"
         logger.info(
@@ -2283,8 +2300,8 @@ class InboundTaskProcessor:
                 flush=True,
             )
             if language.lower() == "he":
-                return current_draft, "הפרסום הצליח. המודעה נוספה לפלייליסט."
-            return current_draft, "Publishing succeeded. Your ad was added to the playlist."
+                return current_draft, "הפרסום הצליח. המודעה נוספה לפלייליסט.", True
+            return current_draft, "Publishing succeeded. Your ad was added to the playlist.", True
         except CMSPublishError as exc:
             await audit_repo.log(
                 actor="system",
@@ -2307,8 +2324,8 @@ class InboundTaskProcessor:
                 flush=True,
             )
             if language.lower() == "he":
-                return current_draft, f"הפרסום נכשל: {exc}"
-            return current_draft, f"Publishing failed: {exc}"
+                return current_draft, f"הפרסום נכשל: {exc}", False
+            return current_draft, f"Publishing failed: {exc}", False
 
     async def _process_operator_photo_message(
         self,
@@ -3598,6 +3615,67 @@ class InboundTaskProcessor:
         )
         return current_draft, ingested_photo.public_url
 
+    async def _build_product_confirmation_requested_response(
+        self,
+        *,
+        payload: InboundTaskPayload,
+        draft_repo: AdDraftRepository,
+        audit_repo: AuditEventRepository,
+        current_draft: AdDraft,
+        language: str,
+    ) -> _ProductConfirmationPromptResult:
+        current_draft, confirmation_image_url = await self._prepare_product_confirmation_image(
+            payload=payload,
+            draft_repo=draft_repo,
+            audit_repo=audit_repo,
+            current_draft=current_draft,
+        )
+        reply_text = _product_confirmation_caption(
+            language=language,
+            product_name=current_draft.product_name,
+        )
+        if confirmation_image_url is None and current_draft.photo_url is not None:
+            reply_text = f"{reply_text}\n\n" + _product_confirmation_image_link_fallback_reply(
+                language=language,
+                image_url=current_draft.photo_url,
+            )
+        action_buttons = [
+            (
+                BUTTON_CONFIRM_PRODUCT_SELECTION,
+                _product_confirmation_accept_label(language),
+            ),
+            (
+                BUTTON_REJECT_PRODUCT_SELECTION,
+                _product_confirmation_reject_label(language),
+            ),
+        ]
+        pending_question_context = {
+            "draft_id": str(current_draft.id),
+            "photo_url": current_draft.photo_url,
+            "product_name": current_draft.product_name,
+        }
+        await audit_repo.log(
+            actor="system",
+            action="product_confirmation_requested",
+            operator_phone=payload.operator_phone,
+            metadata={
+                "wamid": payload.wamid,
+                "draft_id": str(current_draft.id),
+                "photo_url": current_draft.photo_url,
+                "product_name": current_draft.product_name,
+            },
+        )
+        return _ProductConfirmationPromptResult(
+            draft=current_draft,
+            reply_text=reply_text,
+            generated_image_url=confirmation_image_url,
+            action_buttons_prompt=_product_confirmation_buttons_prompt(language),
+            action_buttons=action_buttons,
+            pending_question_type=PendingQuestionType.PRODUCT_CONFIRMATION,
+            pending_question_context=pending_question_context,
+            deterministic_action="product_confirmation_requested",
+        )
+
     async def _enrich_current_draft(
         self,
         *,
@@ -4270,8 +4348,11 @@ def _missing_product_name_reply(language: str) -> str:
 
 def _publish_confirmation_prompt(language: str) -> str:
     if language.lower() == "he":
-        return "בחר האם לפרסם עכשיו ל-CMS או לבטל."
-    return "Choose whether to publish to CMS now or cancel."
+        return "תרצה לפרסם את הגרסא שבחרת?\n(במידה ויש שינויים נוספים תכתוב אותם כאן)"
+    return (
+        "Would you like to publish the selected version?\n"
+        "(If there are more changes, write them here.)"
+    )
 
 
 def _is_confirmation_image_url_compatible(image_url: str) -> bool:
@@ -4352,8 +4433,11 @@ def _product_confirmation_generation_instruction(language: str) -> str:
 
 def _publish_buttons_prompt(language: str) -> str:
     if language.lower() == "he":
-        return "לפרסם את המודעה הזו ל-CMS?"
-    return "Publish this ad to CMS?"
+        return "תרצה לפרסם את הגרסא שבחרת?\n(במידה ויש שינויים נוספים תכתוב אותם כאן)"
+    return (
+        "Would you like to publish the selected version?\n"
+        "(If there are more changes, write them here.)"
+    )
 
 
 def _variant_selection_prompt(language: str) -> str:
@@ -4378,8 +4462,14 @@ def _variant_selection_buttons(
 
 def _variant_selected_reply(language: str, slot_label: str) -> str:
     if language.lower() == "he":
-        return f"גרסה {slot_label} נבחרה. תרצה לפרסם את המודעה?"
-    return f"Variant {slot_label} selected. Would you like to publish this ad?"
+        return f"גרסה {slot_label} נבחרה."
+    return f"Variant {slot_label} selected."
+
+
+def _publish_canceled_reply(language: str) -> str:
+    if language.lower() == "he":
+        return "המודעה לא פורסמה. אפסתי את הטיוטה ואפשר להתחיל מודעה חדשה מתי שתרצה."
+    return "The ad was not published. I reset the draft and you can start a new ad anytime."
 
 
 def _variant_selection_use_buttons_reply(language: str) -> str:

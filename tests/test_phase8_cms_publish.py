@@ -156,6 +156,16 @@ async def test_confirm_publish_button_publishes_to_cms_and_marks_draft_published
         assert published_row is not None
         assert published_row.cms_id == "975"
 
+        session_obj = await ConversationSessionRepository(session).get_by_operator_phone(phone)
+        assert session_obj is not None
+        assert session_obj.current_draft_id is not None
+        assert session_obj.current_draft_id != draft_id
+        active_draft = await session.get(AdDraft, session_obj.current_draft_id)
+        assert active_draft is not None
+        assert active_draft.status == AdDraftStatus.DRAFT
+        assert active_draft.product_name is None
+        assert active_draft.rendered_image_url is None
+
 
 async def test_confirm_publish_button_returns_error_message_when_cms_fails(
     session_factory: async_sessionmaker[AsyncSession],
@@ -301,7 +311,7 @@ async def test_confirm_publish_routes_by_operator_cms_mapping(
     assert cms.target_calls == [(157, 139), (501, 808)]
 
 
-async def test_re_pressing_publish_on_already_published_draft_is_idempotent(
+async def test_re_pressing_publish_after_reset_is_blocked_without_new_preview(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     phone = "+972500000806"
@@ -326,7 +336,7 @@ async def test_re_pressing_publish_on_already_published_draft_is_idempotent(
     assert first.status == "processed"
     assert cms.calls == 1
 
-    # Re-press publish on the same (now PUBLISHED) draft.
+    # Re-press publish after the flow already reset to a fresh draft.
     second_payload = InboundTaskPayload(
         wamid="wamid-phase8-idem-2",
         operator_phone=phone,
@@ -337,8 +347,10 @@ async def test_re_pressing_publish_on_already_published_draft_is_idempotent(
     )
     second = await processor.process(second_payload)
     assert second.status == "processed"
+    assert second.reply_text is not None
     assert (
-        "כבר פורסמה" in second.reply_text or "already been published" in second.reply_text.lower()
+        "אין כרגע תמונת תצוגה מוכנה לפרסום" in second.reply_text
+        or "no generated preview image ready for publishing" in second.reply_text.lower()
     )
     assert cms.calls == 1  # no additional CMS call
 

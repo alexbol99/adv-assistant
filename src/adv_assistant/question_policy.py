@@ -446,9 +446,10 @@ def reprompt_limit_message(language: str) -> str:
 
 def regenerate_again_prompt(language: str) -> str:
     if language.lower() == "he":
-        return "כל השאלות הושלמו. רוצה שאפעיל עכשיו יצירת מודעה נוספת? (כן/לא)"
+        return "תרצה לפרסם את הגרסא שבחרת?\n(במידה ויש שינויים נוספים תכתוב אותם כאן)"
     return (
-        "All follow-up questions are complete. Do you want me to generate another ad now? (yes/no)"
+        "Would you like to publish the selected version?\n"
+        "(If there are more changes, write them here.)"
     )
 
 
